@@ -1,7 +1,10 @@
-import {update, world} from "../packages/core/core";
+import { setupCoreWorld, CoreWorld, CoreWorldBox } from "../packages/core/core";
 
+export type World = {UniqueTestThing: "Testing123"} & CoreWorld;
+export type WorldBox = CoreWorldBox & World;
+function setupWorld(){ 
+    console.log("DOING SETUP")
+    return setupCoreWorld() as WorldBox;
+}
 
-requestAnimationFrame(function animate() {
-    update(world);
-    requestAnimationFrame(animate);
-})
+export { setupWorld };
