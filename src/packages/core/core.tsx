@@ -132,6 +132,7 @@ function setupCoreWorld(MAX_ENTITIES = 100000) {
 
     const uiBridge = (world: CoreWorld) => {
         const { time, components } = world;
+        //todo this is still broken -- and maybe super inefficient 
         throttledUpdater("ticksPerSecond", sendTimeUpdate, time, {minMS:50000})
         throttledUpdater("playerUpdate", sendPlayerUpdate, {...components.Player[1]})
     }
