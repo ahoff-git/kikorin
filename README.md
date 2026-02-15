@@ -1,2 +1,2 @@
-# Kikorin
+# kikorin
 A “finely crafted machine”... ish
