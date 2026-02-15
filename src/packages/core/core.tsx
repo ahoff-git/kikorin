@@ -5,33 +5,41 @@ import {
     removeEntity,
     addComponent
 } from 'bitecs'
+import { createRingBuffer, RingBuffer } from '../util/ringBuffer'
+import { createThrottledUpdater } from '../util/throttledUpdate'
+import { eventBus } from './mitt'
 
 export type CoreWorldBox = ReturnType<typeof setupCoreWorld>
 
 export type CoreWorld = {
     components: {
         Position: {
-            x: Int32Array
-            y: Int32Array
+            x: Int32Array,
+            y: Int32Array,
             z: Int32Array
         }
         Velocity: {
-            x: Float32Array
-            y: Float32Array
+            x: Float32Array,
+            y: Float32Array,
             z: Float32Array
         }
         Health: Int32Array
         Player: { level: number; experience: number; name: string; }[]
     }
     time: {
-        delta: number
-        elapsed: number
-        then: number
+        delta: number,
+        elapsed: number,
+        then: number,
+        deltaBuffer: RingBuffer,
+        avgDelta: number,
+        ticksPerSecond: number
     }
 }
 
 function setupCoreWorld(MAX_ENTITIES = 100000) {
 
+    const throttledUpdater = createThrottledUpdater();
+    console.log("throttled")
     let runGameLoop = false;
     const world: CoreWorld = createWorld({
         components: {
@@ -54,7 +62,10 @@ function setupCoreWorld(MAX_ENTITIES = 100000) {
         time: {
             delta: 0,
             elapsed: 0,
-            then: performance.now()
+            then: performance.now(),
+            deltaBuffer: createRingBuffer(300),
+            avgDelta: 0,
+            ticksPerSecond: 0
         }
     }) as CoreWorld;
 
@@ -108,12 +119,31 @@ function setupCoreWorld(MAX_ENTITIES = 100000) {
     }
 
     const timeSystem = (world: CoreWorld) => {
-        const { time } = world
-        const now = performance.now()
-        const delta = now - time.then
-        time.delta = delta
-        time.elapsed += delta
-        time.then = now
+        const { time } = world;
+        const now = performance.now();
+        const delta = now - time.then;
+        time.delta = delta;
+        time.elapsed += delta;
+        time.then = now;
+        time.deltaBuffer.push(delta);
+        time.avgDelta = time.deltaBuffer.average();
+        time.ticksPerSecond = time.avgDelta ? 1000 / time.avgDelta : 0;
+    }
+
+    const uiBridge = (world: CoreWorld) => {
+        const { time, components } = world;
+        throttledUpdater("ticksPerSecond", sendTimeUpdate, time, {minMS:50000})
+        throttledUpdater("playerUpdate", sendPlayerUpdate, {...components.Player[1]})
+    }
+
+    function sendTimeUpdate(value: CoreWorld["time"]) {
+        eventBus.emit("ui:timeMetricsUpdate", { time: value });
+        console.log("Send Time Update", value)
+    }
+
+    function sendPlayerUpdate(value: CoreWorld["components"]["Player"][number]) {
+        eventBus.emit("ui:playerUpdate", { Player: value });
+        console.log("Send Player Update", value)
     }
 
     const update = (world: CoreWorld) => {
@@ -121,19 +151,20 @@ function setupCoreWorld(MAX_ENTITIES = 100000) {
         movementSystem(world)
         experienceSystem(world)
         healthSystem(world)
+        uiBridge(world)
     }
 
     function start() {
         runGameLoop = true;
         requestAnimationFrame(function gameLoop() {
             update(world);
-            if (runGameLoop){
+            if (runGameLoop) {
                 requestAnimationFrame(gameLoop);
             }
         })
     }
 
-    function stop(){
+    function stop() {
         runGameLoop = false;
     }
 
@@ -141,4 +172,4 @@ function setupCoreWorld(MAX_ENTITIES = 100000) {
 
 }
 
-export {setupCoreWorld};
+export { setupCoreWorld };
