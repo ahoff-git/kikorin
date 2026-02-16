@@ -6,27 +6,38 @@ import {
     addComponent
 } from 'bitecs'
 import { createRingBuffer, RingBuffer } from '../util/ringBuffer'
-import { createThrottledUpdater } from '../util/throttledUpdate'
 import { eventBus } from './mitt'
+import { createChillUpdater } from '../util/chillUpdate'
+import { rng } from '../util/random'
 
 export type CoreWorldBox = ReturnType<typeof setupCoreWorld>
-
-export type CoreWorld = {
-    components: {
-        Position: {
-            x: Int32Array,
-            y: Int32Array,
-            z: Int32Array
-        }
-        Velocity: {
-            x: Float32Array,
-            y: Float32Array,
-            z: Float32Array
-        }
-        Health: Int32Array
-        Player: { level: number; experience: number; name: string; }[]
-    }
-    time: {
+export type Positions = {
+    x: Int32Array,
+    y: Int32Array,
+    z: Int32Array
+}
+export type Position = {
+    x: number,
+    y: number,
+    z: number
+}
+export type Velocities = {
+    x: Float32Array,
+    y: Float32Array,
+    z: Float32Array
+}
+export type Velocity = {
+    x: number,
+    y: number,
+    z: number
+}
+export type Players = Player[];
+export type Player = {
+    level: number;
+    experience: number;
+    name: string;
+}
+export type Time = {
         delta: number,
         elapsed: number,
         then: number,
@@ -34,12 +45,21 @@ export type CoreWorld = {
         avgDelta: number,
         ticksPerSecond: number
     }
+export type CoreWorld = {
+    components: {
+        Position: Positions
+        Velocity: Velocities
+        Health: Int32Array
+        Player: Players
+    }
+    time: Time
 }
+
+
 
 function setupCoreWorld(MAX_ENTITIES = 100000) {
 
-    const throttledUpdater = createThrottledUpdater();
-    console.log("throttled")
+    const chillUpdater = createChillUpdater<any>();
     let runGameLoop = false;
     const world: CoreWorld = createWorld({
         components: {
@@ -69,24 +89,9 @@ function setupCoreWorld(MAX_ENTITIES = 100000) {
         }
     }) as CoreWorld;
 
-    const { Position, Velocity, Player, Health } = world.components
-
-    const eid = addEntity(world)
-    addComponent(world, eid, Position)
-    addComponent(world, eid, Velocity)
-    addComponent(world, eid, Player)
-    addComponent(world, eid, Health)
-
-    // SoA access pattern
-    Position.x[eid] = 0;
-    Position.y[eid] = 0;
-    Position.z[eid] = 0;
-    Velocity.x[eid] = 1.23;
-    Velocity.y[eid] = 1.23;
-    Health[eid] = 100;
-
-    // AoS access pattern  
-    Player[eid] = { level: 1, experience: 0, name: "Hero" }
+    for (let i = 0; i < 1000; i++){
+        createPerson({x:rng(0,500),y:rng(0,500),z:rng(0,500)},{x:rng(0,5),y:rng(0,5),z:rng(0,5)}, 100, {level: 0, experience:0, name: `Doom${i}`});
+    }
 
     const movementSystem = (world: CoreWorld) => {
         const { Position, Velocity } = world.components
@@ -110,6 +115,7 @@ function setupCoreWorld(MAX_ENTITIES = 100000) {
     }
 
     const healthSystem = (world: CoreWorld) => {
+        const { Health } = world.components
         for (const eid of query(world, [Health])) {
             if (Health[eid] <= 0) {
                 removeEntity(world, eid)
@@ -132,19 +138,37 @@ function setupCoreWorld(MAX_ENTITIES = 100000) {
 
     const uiBridge = (world: CoreWorld) => {
         const { time, components } = world;
-        //todo this is still broken -- and maybe super inefficient 
-        throttledUpdater("ticksPerSecond", sendTimeUpdate, time, {minMS:50000})
-        throttledUpdater("playerUpdate", sendPlayerUpdate, {...components.Player[1]})
+        chillUpdater.setUpdate({
+            updateKey: "ticksPerSecond",
+            updateFunction: sendTimeUpdate,
+            value: time,
+            minMS: 100
+        });
+        chillUpdater.setUpdate({
+            updateKey: "playerUpdate",
+            updateFunction: sendPlayerUpdate,
+            value: { ...components.Player[1] },
+            minMS: 100
+        });
+        // chillUpdater.setUpdate({
+        //     updateKey: "exposeWorld",
+        //     updateFunction: exposeWorld,
+        //     value: null,
+        //     minMS: 15000
+        // })
+        chillUpdater.check();
+    }
+
+    function exposeWorld(){
+        console.log(world);
     }
 
     function sendTimeUpdate(value: CoreWorld["time"]) {
         eventBus.emit("ui:timeMetricsUpdate", { time: value });
-        console.log("Send Time Update", value)
     }
 
     function sendPlayerUpdate(value: CoreWorld["components"]["Player"][number]) {
         eventBus.emit("ui:playerUpdate", { Player: value });
-        console.log("Send Player Update", value)
     }
 
     const update = (world: CoreWorld) => {
@@ -167,6 +191,28 @@ function setupCoreWorld(MAX_ENTITIES = 100000) {
 
     function stop() {
         runGameLoop = false;
+    }
+
+    function createPerson(position: Position, velocity:Velocity, health:number, player:Player) {
+        const { Position, Velocity, Player, Health } = world.components
+
+        const eid = addEntity(world)
+        addComponent(world, eid, Position)
+        addComponent(world, eid, Velocity)
+        addComponent(world, eid, Player)
+        addComponent(world, eid, Health)
+
+        // SoA access pattern
+        Position.x[eid] = position.x;
+        Position.y[eid] = position.y;
+        Position.z[eid] = position.z;
+        Velocity.x[eid] = velocity.x;
+        Velocity.y[eid] = velocity.y;
+        Velocity.z[eid] = velocity.z;
+        Health[eid] = health;
+
+        // AoS access pattern  
+        Player[eid] = player;
     }
 
     return { world, start, stop };

@@ -32,7 +32,7 @@ export default function Home() {
       <div>TPS: {Math.round(timeData?.ticksPerSecond ?? 0)}</div>
       <div>Player:
         <div> Name:{playerData?.name ?? "Nope"}</div>
-        <div> XP:{Math.round(playerData?.experience ?? 0)}</div>
+        <div> XP:{(Math.round((playerData?.experience?? 0)*100)/100)}</div>
         <div> Level:{Math.round(playerData?.level ?? 0)}</div>
       </div>
     </div>
