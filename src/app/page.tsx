@@ -3,16 +3,17 @@ import { ReactNode, useEffect, useRef, useState } from "react"
 import { setupWorld, WorldBox } from "./kikorin"
 import { PageLayout } from "./kikorinLayout";
 import { eventBus } from "@/packages/core/mitt";
+import { Player, Time } from "@/packages/core/types";
 
 export default function Home() {
   console.log("render");
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const worldRef = useRef<WorldBox | null>(null)
-  const [playerData, setPlayerData] = useState<WorldBox["world"]["components"]["Player"][number] | null>(null);
-  const [timeData, setTimeData] = useState<WorldBox["world"]["time"] | null>(null);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
+    const canvas = canvasRef.current!;
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
     const world = setupWorld(canvas)
     console.log("START WORLD");
     world.start()
@@ -37,8 +38,16 @@ export default function Home() {
   )
   function Content() {
     return (
-      <div>
-        Before<canvas ref={canvasRef} style={{ maxWidth: "100%", display: "block" }} />After
+      <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+        <canvas
+          ref={canvasRef}
+          style={{
+            flex: 1,
+            width: "100%",
+            height: "100%",
+            display: "block",
+          }}
+        />
       </div>
     )
   }
@@ -52,8 +61,8 @@ function LeftNav() {
 }
 
 function RightPanel() {
-  const [playerData, setPlayerData] = useState<any>(null);
-  const [timeData, setTimeData] = useState<any>(null);
+  const [playerData, setPlayerData] = useState<Player | null>(null);
+  const [timeData, setTimeData] = useState<Time | null>(null);
 
   useEffect(() => {
     const onTime = (v: any) => setTimeData(v.time);

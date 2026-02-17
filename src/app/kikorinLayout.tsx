@@ -22,7 +22,8 @@ export function PageLayout({
         minWidth: 0,
         overflow: "hidden",
         display: "grid",
-        gridTemplateRows: "auto minmax(0, 1fr) auto",
+        height: "100dvh",
+        gridTemplateRows: "auto 1fr auto",
       }}
     >
       <Box component="header">{header}</Box>
@@ -31,6 +32,7 @@ export function PageLayout({
         component="main"
         sx={{
           display: "grid",
+          height: "100%",
           minWidth: 0,
           minHeight: 0,
           overflow: "hidden",
@@ -42,7 +44,9 @@ export function PageLayout({
         }}
       >
         <Box sx={{ display: { xs: "none", md: "block" }, minWidth: 0, minHeight: 0, overflow: "auto" }}>{left}</Box>
-        <Box sx={{ minWidth: 0, minHeight: 0, overflow: "auto" }}>{children}</Box>
+        <Box sx={{ minWidth: 0, minHeight:0, display: "flex", flexDirection: "column" }}>
+          {children}
+        </Box>
         <Box sx={{ display: { xs: "none", md: "block" }, minWidth: 0, minHeight: 0, overflow: "auto" }}>{right}</Box>
       </Box>
 
