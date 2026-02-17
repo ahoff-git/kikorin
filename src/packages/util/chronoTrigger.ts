@@ -3,6 +3,7 @@ import { log, logLevels } from './logging';
 import { createRingBuffer } from './ringBuffer';
 
 interface ScheduledTask {
+    id: number;
     callback: (deltaMs: number) => void;
     callbackName: string;
     intervalMs: number;
@@ -13,13 +14,16 @@ interface ScheduledTask {
 interface ChronoTrigger {
     Start: () => void;
     Stop: () => void;
-    runAt: (options: { name?: string; callback: (deltaMs: number) => void; fpsTarget?: number }) => void;
+    runAt: (options: { name?: string; callback: (deltaMs: number) => void; fpsTarget?: number }) => number;
+    dispose: (id: number) => boolean;
     CurrentFPS: () => number;
     AverageFPS: () => number;
 }
 
 function createChronoTrigger(): ChronoTrigger {
     const scheduledTasks: ScheduledTask[] = [];
+    const taskIndexById = new Map<number, number>();
+    let nextTaskId = 1;
     const maxTicks = 5;
     const catchupWarningThrottleMs = 5000;
     let running = false;
@@ -89,6 +93,22 @@ function createChronoTrigger(): ChronoTrigger {
         }
     };
 
+    const dispose = (id: number): boolean => {
+        const index = taskIndexById.get(id);
+        if (index === undefined) return false;
+
+        const lastIndex = scheduledTasks.length - 1;
+        if (index !== lastIndex) {
+            const lastTask = scheduledTasks[lastIndex];
+            scheduledTasks[index] = lastTask;
+            taskIndexById.set(lastTask.id, index);
+        }
+
+        scheduledTasks.pop();
+        taskIndexById.delete(id);
+        return true;
+    };
+
     const runAt = ({
         name,
         fpsTarget,
@@ -97,7 +117,7 @@ function createChronoTrigger(): ChronoTrigger {
         name?: string;
         callback: (deltaMs: number) => void;
         fpsTarget?: number;
-    }): void => {
+    }): number => {
         if (typeof callback !== "function") {
             throw new Error("runAt requires a callback function.");
         }
@@ -111,20 +131,25 @@ function createChronoTrigger(): ChronoTrigger {
             intervalMs = 1000 / fpsTarget;
         }
 
+        const id = nextTaskId++;
         const callbackName = name || callback.name || "anonymous";
+        const accumulatorMs = intervalMs > 0 ? intervalMs : 0;
         scheduledTasks.push({
+            id,
             callback,
             callbackName,
             intervalMs,
-            accumulatorMs: 0,
+            accumulatorMs,
             lastCatchupWarningMs: -Infinity,
         });
+        taskIndexById.set(id, scheduledTasks.length - 1);
+        return id;
     };
 
     const CurrentFPS = (): number => fps;
     const AverageFPS = (): number => Math.round(fpsHist.average());
 
-    return { Start, Stop, runAt, CurrentFPS, AverageFPS };
+    return { Start, Stop, runAt, dispose, CurrentFPS, AverageFPS };
 }
 
 // Exporting the library

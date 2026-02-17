@@ -76,14 +76,15 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
 
         if (!schedulerRegistered) {
             Crono.runAt({
-                name: "runGameLoop",
-                fpsTarget: 6000,
+                name: "worldTick",
+                fpsTarget: 60,
                 callback: () => {
                     if (!runGameLoop) return;
                     worldTick(world);
                 }
             });
             Crono.runAt({
+                name: "renderSystem",
                 callback: () => {
                     if (!runGameLoop) return;
                     renderSystem(world)
@@ -91,7 +92,6 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
             });
             schedulerRegistered = true;
         }
-
         Crono.Start();
     }
 
