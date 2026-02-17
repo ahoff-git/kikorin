@@ -3,6 +3,7 @@ import {
 } from 'bitecs'
 import { createRingBuffer } from '../util/ringBuffer'
 import { createChillUpdater } from '../util/chillUpdate'
+import { Crono } from '../util/chronoTrigger'
 import { movementSystem } from './systems/movement'
 import { experienceSystem } from './systems/experience'
 import { timeSystem } from './systems/time'
@@ -13,8 +14,9 @@ import type { CoreWorld, Player } from './types'
 export type { CoreWorldBox, Positions, Position, Velocities, Velocity, Players, Player, Time, CoreWorld } from './types'
 
 function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000) {
-
     let runGameLoop = false;
+    let schedulerRegistered = false;
+
     const world: CoreWorld = createWorld({
         components: {
             // They can be any shape you want
@@ -25,9 +27,20 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
                 z: new Int32Array(MAX_ENTITIES)
             },
             Velocity: {
-                x: new Float32Array(1e5),
-                y: new Float32Array(1e5),
-                z: new Float32Array(1e5)
+                x: new Float32Array(MAX_ENTITIES),
+                y: new Float32Array(MAX_ENTITIES),
+                z: new Float32Array(MAX_ENTITIES)
+            },
+            Rotation: {
+                yaw: new Float32Array(MAX_ENTITIES),
+                pitch: new Float32Array(MAX_ENTITIES),
+                roll: new Float32Array(MAX_ENTITIES)
+            },
+            RenderDirtyFlags: {
+                DirtyTransformFlag: new Int8Array(MAX_ENTITIES), //set if Position/Rotation/Scale changes
+                DirtyCount: 0, //increment as the list grows
+                DirtyList: new Int32Array(MAX_ENTITIES), //list of eids that have been changed 
+                DirtyFlagSet: new Int8Array(MAX_ENTITIES), //set to prevent duplicates in DirtyList
             },
             Health: new Int32Array,
             // AoS:
@@ -42,30 +55,49 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
             ticksPerSecond: 0
         },
         chillUpdater: createChillUpdater<any>(),
-    }) as CoreWorld;
+    });
 
 
-    const update = (world: CoreWorld) => {
+    function worldTick(world: CoreWorld) {
         timeSystem(world)
         movementSystem(world)
         experienceSystem(world)
         healthSystem(world)
         uiBridgeSystem(world)
-        renderSystem(world)
+    }
+
+    function markTransformDirty(eid: number) {
+        const { DirtyTransformFlag, DirtyCount, DirtyList, DirtyFlagSet } = world.components.RenderDirtyFlags;
     }
 
     function start() {
+        if (runGameLoop) return;
         runGameLoop = true;
-        requestAnimationFrame(function gameLoop() {
-            update(world);
-            if (runGameLoop) {
-                requestAnimationFrame(gameLoop);
-            }
-        })
+
+        if (!schedulerRegistered) {
+            Crono.runAt({
+                name: "runGameLoop",
+                fpsTarget: 6000,
+                callback: () => {
+                    if (!runGameLoop) return;
+                    worldTick(world);
+                }
+            });
+            Crono.runAt({
+                callback: () => {
+                    if (!runGameLoop) return;
+                    renderSystem(world)
+                }
+            });
+            schedulerRegistered = true;
+        }
+
+        Crono.Start();
     }
 
     function stop() {
         runGameLoop = false;
+        Crono.Stop();
     }
 
     setupRenderer(canvas);

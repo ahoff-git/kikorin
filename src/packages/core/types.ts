@@ -41,13 +41,21 @@ export type Time = {
     ticksPerSecond: number
 }
 
+export type RenderDirtyFlags = {
+    DirtyTransformFlag: Int8Array, //set if Position/Rotation/Scale changes
+    DirtyCount: number, //increment as the list grows
+    DirtyList: Int32Array, //list of eids that have been changed 
+    DirtyFlagSet: Int8Array, //set to prevent duplicates in DirtyList
+}
+
 export type CoreWorld = {
     components: {
-        Position: Positions
-        Velocity: Velocities
-        Health: Int32Array
-        Player: Players
-    }
+        Position: Positions,
+        Velocity: Velocities,
+        Health: Int32Array,
+        Player: Players,
+        RenderDirtyFlags: RenderDirtyFlags
+    },    
     time: Time,
     chillUpdater: ReturnType<typeof import('../util/chillUpdate').createChillUpdater<any>>
 }

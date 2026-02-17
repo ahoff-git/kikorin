@@ -1,11 +1,42 @@
 import { CoreWorld } from "../core";
-import { Scene, PerspectiveCamera, WebGLRenderer } from "three";
+import { Scene, PerspectiveCamera, WebGLRenderer, Camera, Object3D } from "three";
 
-export function renderSystem(world: CoreWorld){
+let scene: Scene | null = null;
+let camera: PerspectiveCamera | null = null;
+let renderer: WebGLRenderer | null = null;
+let objectsByEid = new Map<number, Object3D>();
 
+type RenderWorld = {
+  scene: Scene
+  camera: Camera
+  renderer: WebGLRenderer
+  objectsByEid: Map<number, Object3D>
 }
 
-//todo: setup threejs to connect to the provided canvas element 
-export function setupRenderer(canvas: HTMLCanvasElement | null){
+export function renderSystem(_world: CoreWorld){
+    if (!renderer || !scene || !camera) return;
+    renderer.render(scene, camera);
+}
 
+export function setupRenderer(canvas: HTMLCanvasElement | null){
+    if (!canvas) return;
+
+    const width = canvas.clientWidth || canvas.width || 1;
+    const height = canvas.clientHeight || canvas.height || 1;
+
+    scene = new Scene();
+    camera = new PerspectiveCamera(75, width / height, 0.1, 1000);
+    camera.position.z = 5;
+
+    if (renderer) {
+        renderer.dispose();
+    }
+
+    renderer = new WebGLRenderer({
+        canvas,
+        antialias: false,
+        powerPreference: "high-performance",
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(width, height, false);
 }
