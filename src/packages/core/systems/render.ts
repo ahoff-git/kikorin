@@ -40,3 +40,14 @@ export function setupRenderer(canvas: HTMLCanvasElement | null){
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(width, height, false);
 }
+
+export function addToScene(obj: Object3D) {
+  if (!scene) throw new Error("Renderer not set up yet. Call setupRenderer(canvas) first.");
+  scene.add(obj);
+  return obj;
+}
+
+export function removeFromScene(obj: Object3D) {
+  if (!scene) return;
+  scene.remove(obj);
+}

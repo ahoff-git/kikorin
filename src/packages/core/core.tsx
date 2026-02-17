@@ -42,6 +42,7 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
                 DirtyList: new Int32Array(MAX_ENTITIES), //list of eids that have been changed 
                 DirtyFlagSet: new Int8Array(MAX_ENTITIES), //set to prevent duplicates in DirtyList
             },
+            Render: new Int32Array,
             Health: new Int32Array,
             // AoS:
             Player: [] as Player[]
@@ -101,6 +102,13 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
     }
 
     setupRenderer(canvas);
+
+    // const cube = new Mesh(
+    //     new BoxGeometry(1, 1, 1),
+    //     new MeshBasicMaterial({ color: 0xff00ff })
+    // );
+
+    // addToScene(cube);
 
     return { world, start, stop };
 
