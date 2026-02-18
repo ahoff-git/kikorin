@@ -1,9 +1,9 @@
 import type { RingBuffer } from '../util/ringBuffer'
 
 export type Positions = {
-    x: Int32Array,
-    y: Int32Array,
-    z: Int32Array
+    x: Float32Array,
+    y: Float32Array,
+    z: Float32Array
 }
 
 export type Position = {
@@ -48,11 +48,19 @@ export type RenderDirtyFlags = {
     DirtyFlagSet: Int8Array, //set to prevent duplicates in DirtyList
 }
 
+export type Rotations = {
+                yaw:  Float32Array,
+                pitch: Float32Array,
+                roll: Float32Array
+}
+
 export type CoreWorld = {
     components: {
         Position: Positions,
         Velocity: Velocities,
+        Rotation: Rotations,
         Health: Int32Array,
+        Render: Int32Array,
         Player: Players,
         RenderDirtyFlags: RenderDirtyFlags
     },    
@@ -64,4 +72,7 @@ export type CoreWorldBox = {
     world: CoreWorld
     start: () => void
     stop: () => void
+    setCameraFollowTarget: (eid: number, opts?: { offset?: Partial<Position> }) => void
+    setCameraLookAtTarget: (eid: number, opts?: { position?: Partial<Position> }) => void
+    resetCameraTarget: () => void
 }

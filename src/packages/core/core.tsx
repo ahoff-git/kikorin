@@ -10,6 +10,8 @@ import { timeSystem } from './systems/time'
 import { uiBridgeSystem } from './systems/uiBridge'
 import { healthSystem } from './systems/health'
 import { renderSystem, setupRenderer } from './systems/render'
+import { dirtyTransformsSystem } from './systems/dirtyTransforms'
+import { cameraFollowSystem, resetCameraTarget, setCameraFollowTarget, setCameraLookAtTarget } from './systems/cameraFollow'
 import type { CoreWorld, Player } from './types'
 export type { CoreWorldBox, Positions, Position, Velocities, Velocity, Players, Player, Time, CoreWorld } from './types'
 
@@ -17,14 +19,14 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
     let runGameLoop = false;
     let schedulerRegistered = false;
 
-    const world: CoreWorld = createWorld({
+    const worldConfig: CoreWorld = {
         components: {
             // They can be any shape you want
             // SoA:
             Position: {
-                x: new Int32Array(MAX_ENTITIES),
-                y: new Int32Array(MAX_ENTITIES),
-                z: new Int32Array(MAX_ENTITIES)
+                x: new Float32Array(MAX_ENTITIES),
+                y: new Float32Array(MAX_ENTITIES),
+                z: new Float32Array(MAX_ENTITIES)
             },
             Velocity: {
                 x: new Float32Array(MAX_ENTITIES),
@@ -56,19 +58,32 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
             ticksPerSecond: 0
         },
         chillUpdater: createChillUpdater<any>(),
-    });
+    };
+    const world = createWorld<CoreWorld>(worldConfig);
 
 
     function worldTick(world: CoreWorld) {
         timeSystem(world)
-        movementSystem(world)
+        movementSystem(world, markTransformDirty)
+        cameraFollowSystem(world)
         experienceSystem(world)
         healthSystem(world)
+        if (world.components.RenderDirtyFlags.DirtyCount > 0) {
+            dirtyTransformsSystem(world)
+        }
         uiBridgeSystem(world)
     }
 
     function markTransformDirty(eid: number) {
-        const { DirtyTransformFlag, DirtyCount, DirtyList, DirtyFlagSet } = world.components.RenderDirtyFlags;
+        const dirtyFlags = world.components.RenderDirtyFlags;
+        const { DirtyTransformFlag, DirtyList, DirtyFlagSet } = dirtyFlags;
+        if (DirtyFlagSet[eid]) return;
+
+        DirtyTransformFlag[eid] = 1;
+        DirtyFlagSet[eid] = 1;
+        DirtyList[dirtyFlags.DirtyCount] = eid;
+        dirtyFlags.DirtyCount += 1;
+        console.log( dirtyFlags.DirtyCount)
     }
 
     function start() {
@@ -102,6 +117,7 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
     }
 
     setupRenderer(canvas);
+    resetCameraTarget();
 
     // const cube = new Mesh(
     //     new BoxGeometry(1, 1, 1),
@@ -110,7 +126,7 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
 
     // addToScene(cube);
 
-    return { world, start, stop };
+    return { world, start, stop, setCameraFollowTarget, setCameraLookAtTarget, resetCameraTarget };
 
 }
 

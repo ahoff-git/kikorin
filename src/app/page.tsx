@@ -3,7 +3,7 @@ import { ReactNode, useEffect, useRef, useState } from "react"
 import { setupWorld, WorldBox } from "./kikorin"
 import { PageLayout } from "./kikorinLayout";
 import { eventBus } from "@/packages/core/mitt";
-import { Player, Time } from "@/packages/core/types";
+import { Player, Position, Time } from "@/packages/core/types";
 
 export default function Home() {
   console.log("render");
@@ -62,16 +62,20 @@ function LeftNav() {
 
 function RightPanel() {
   const [playerData, setPlayerData] = useState<Player | null>(null);
+  const [playerLoc, setPlayerLoc] = useState<Position | null>(null);
   const [timeData, setTimeData] = useState<Time | null>(null);
 
   useEffect(() => {
     const onTime = (v: any) => setTimeData(v.time);
     const onPlayer = (v: any) => setPlayerData(v.Player);
+    const onPlayerLoc = (v: any) => { setPlayerLoc(v.Player) };
     eventBus.on("ui:timeMetricsUpdate", onTime);
     eventBus.on("ui:playerUpdate", onPlayer);
+    eventBus.on("ui:playerUpdateLoc", onPlayerLoc);
     return () => {
       eventBus.off("ui:timeMetricsUpdate", onTime);
       eventBus.off("ui:playerUpdate", onPlayer);
+      eventBus.off("ui:playerUpdateLoc", onPlayerLoc);
     };
   }, []);
 
@@ -83,6 +87,7 @@ function RightPanel() {
         <div> Name:{playerData?.name ?? "Nope"}</div>
         <div> XP:{(Math.round((playerData?.experience ?? 0) * 100) / 100)}</div>
         <div> Level:{Math.round(playerData?.level ?? 0)}</div>
+        <div> Position: {playerLoc?.x ?? 0}, {playerLoc?.y ?? 0}, {playerLoc?.z ?? 0}</div>
       </div>
     </div>
   )
