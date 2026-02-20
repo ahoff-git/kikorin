@@ -15,21 +15,120 @@ let renderer: WebGLRenderer | null = null;
 const objectsByEid = new Map<number, Object3D>();
 const poolsByKey = new Map<string, Object3D[]>();
 const DEFAULT_POOL_MAX = 256;
+const RENDER_DEBUG = false;
+const RENDER_DEBUG_FRAME_INTERVAL = 30;
 
-export function renderSystem(_world: CoreWorld) {
-  if (!renderer || !scene || !camera) return;
+let renderFrameCount = 0;
+let setCameraPositionCallCount = 0;
+let lookCameraAtCallCount = 0;
+let lastRenderSkipReason: string | null = null;
+
+function logRenderDebug(message: string, data?: Record<string, unknown>) {
+  if (!RENDER_DEBUG) return;
+  if (data) {
+    console.log(`[render] ${message}`, data);
+    return;
+  }
+  console.log(`[render] ${message}`);
+}
+
+function logRenderSkipOnce(reason: string, data?: Record<string, unknown>) {
+  if (!RENDER_DEBUG) return;
+  if (lastRenderSkipReason === reason) return;
+  lastRenderSkipReason = reason;
+  logRenderDebug(`skipping frame: ${reason}`, data);
+}
+
+function clearRenderSkipReason() {
+  lastRenderSkipReason = null;
+}
+
+export function renderSystem(world: CoreWorld) {
+  if (!renderer || !scene || !camera) {
+    logRenderSkipOnce("renderer/scene/camera missing", {
+      hasRenderer: Boolean(renderer),
+      hasScene: Boolean(scene),
+      hasCamera: Boolean(camera),
+    });
+    return;
+  }
+
+  clearRenderSkipReason();
+  renderFrameCount += 1;
+  if (renderFrameCount % RENDER_DEBUG_FRAME_INTERVAL === 0) {
+    logRenderDebug("tick", {
+      frame: renderFrameCount,
+      sceneChildren: scene.children.length,
+      cameraPosition: {
+        x: camera.position.x,
+        y: camera.position.y,
+        z: camera.position.z,
+      },
+      cameraRotation: {
+        x: camera.rotation.x,
+        y: camera.rotation.y,
+        z: camera.rotation.z,
+      },
+      worldTimeDelta: world.time.delta,
+      worldTimeElapsed: world.time.elapsed,
+    });
+  }
+
   renderer.render(scene, camera);
 }
 
 export function setCameraPosition(x: number, y: number, z: number): boolean {
-  if (!camera) return false;
+  if (!camera) {
+    logRenderDebug("setCameraPosition failed: camera missing", { x, y, z });
+    return false;
+  }
+
+  setCameraPositionCallCount += 1;
+  const previous = {
+    x: camera.position.x,
+    y: camera.position.y,
+    z: camera.position.z,
+  };
   camera.position.set(x, y, z);
+
+  if (
+    setCameraPositionCallCount <= 10 ||
+    setCameraPositionCallCount % RENDER_DEBUG_FRAME_INTERVAL === 0
+  ) {
+    logRenderDebug("setCameraPosition", {
+      call: setCameraPositionCallCount,
+      previous,
+      next: { x, y, z },
+    });
+  }
+
   return true;
 }
 
 export function lookCameraAt(x: number, y: number, z: number): boolean {
-  if (!camera) return false;
+  if (!camera) {
+    logRenderDebug("lookCameraAt failed: camera missing", { x, y, z });
+    return false;
+  }
+
+  lookCameraAtCallCount += 1;
   camera.lookAt(x, y, z);
+
+  if (
+    lookCameraAtCallCount <= 10 ||
+    lookCameraAtCallCount % RENDER_DEBUG_FRAME_INTERVAL === 0
+  ) {
+    logRenderDebug("lookCameraAt", {
+      call: lookCameraAtCallCount,
+      target: { x, y, z },
+      resultingRotation: {
+        x: camera.rotation.x,
+        y: camera.rotation.y,
+        z: camera.rotation.z,
+      },
+    });
+  }
+
   return true;
 }
 
@@ -38,7 +137,10 @@ export function readCameraPosition(out: {
   y: number;
   z: number;
 }): boolean {
-  if (!camera) return false;
+  if (!camera) {
+    logRenderDebug("readCameraPosition failed: camera missing");
+    return false;
+  }
   out.x = camera.position.x;
   out.y = camera.position.y;
   out.z = camera.position.z;
@@ -64,6 +166,11 @@ function disposeObject3D(root: Object3D) {
 }
 
 function clearRenderState() {
+  logRenderDebug("clearing render state", {
+    activeObjects: objectsByEid.size,
+    poolKeys: poolsByKey.size,
+  });
+
   for (const obj of objectsByEid.values()) {
     obj.parent?.remove(obj);
     disposeObject3D(obj);
@@ -84,7 +191,10 @@ function clearRenderState() {
 }
 
 export function setupRenderer(canvas: HTMLCanvasElement | null) {
-  if (!canvas) return;
+  if (!canvas) {
+    logRenderDebug("setupRenderer skipped: canvas is null");
+    return;
+  }
 
   clearRenderState();
 
@@ -103,6 +213,17 @@ export function setupRenderer(canvas: HTMLCanvasElement | null) {
 
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setSize(width, height, false);
+
+  logRenderDebug("renderer setup complete", {
+    width,
+    height,
+    cameraInitialPosition: {
+      x: camera.position.x,
+      y: camera.position.y,
+      z: camera.position.z,
+    },
+    pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
+  });
 }
 
 function assertScene(): Scene {

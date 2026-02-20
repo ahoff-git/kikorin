@@ -16,10 +16,16 @@ export type WorldBox = CoreWorldBox & {world:World};
 function setupWorld(canvas: HTMLCanvasElement | null) {
     console.log("DOING SETUP")
     const worldBox = setupCoreWorld(canvas) as WorldBox;
-    const prime = createPerson(worldBox.world, { x: 0, y: 0, z: 0 }, { x: 0.01, y: 0, z: 0 }, 100, { level: 0, experience: 0, name: `DoomPrime` });
+    const prime = createPerson(worldBox.world, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0}, 100, { level: 0, experience: 0, name: `DoomPrime` });
     worldBox.setCameraFollowTarget(prime);
-    for (let i = 0; i < 1000; i++) {
-        createPerson(worldBox.world, { x: 0, y: 0, z: 0 }, { x: rng(0, .01, 2), y: rng(0, .01, 2), z: rng(0, .01, 2) }, 100, { level: 0, experience: 0, name: `Doom${i}` });
+    for (let i = 0; i < 10000; i++) {
+        const rvx =  rng(-10, 10, 2);
+        const rvy =  rng(-10, 10, 2);
+        const rvz =  rng(-10, 10, 2);
+        const rx = 0// rng(-10, 10);
+        const ry = 0// rng(-10, 10);
+        const rz = 0// rng(-10, 10);
+        createPerson(worldBox.world, { x: rx, y: ry, z: rz }, { x: rvx, y: rvy, z: rvz }, 100, { level: 0, experience: 0, name: `Doom${i}` });
     }
     
     return worldBox;

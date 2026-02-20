@@ -54,6 +54,32 @@ export type Rotations = {
                 roll: Float32Array
 }
 
+export type CoreCommand = {
+    sequence: number,
+    timestamp: number,
+    source: string,
+    type: string,
+    payload?: unknown
+}
+
+export type CoreCommandInput = {
+    timestamp?: number,
+    source: string,
+    type: string,
+    payload?: unknown
+}
+
+export type CoreCommandHandler<TWorld> = (world: TWorld, command: CoreCommand) => void
+
+export type CoreCommands<TWorld> = {
+    queue: CoreCommand[],
+    handlers: Map<string, CoreCommandHandler<TWorld>[]>,
+    enqueue: (command: CoreCommandInput) => number,
+    on: (type: string, handler: CoreCommandHandler<TWorld>) => () => void,
+    process: (world: TWorld) => void,
+    clear: () => void
+}
+
 export type CoreWorld = {
     components: {
         Position: Positions,
@@ -65,6 +91,7 @@ export type CoreWorld = {
         RenderDirtyFlags: RenderDirtyFlags
     },    
     time: Time,
+    commands: CoreCommands<CoreWorld>,
     chillUpdater: ReturnType<typeof import('../util/chillUpdate').createChillUpdater<any>>
 }
 

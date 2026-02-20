@@ -7,6 +7,11 @@ type CameraMode = "off" | "follow" | "lookAt";
 
 const DEFAULT_FOLLOW_OFFSET: Vec3 = { x: 0, y: 4, z: 10 };
 const DEFAULT_STATIONARY_POSITION: Vec3 = { x: 0, y: 4, z: 10 };
+const CAMERA_DEBUG = false;
+const CAMERA_DEBUG_FRAME_INTERVAL = 30;
+
+let cameraFollowFrameCount = 0;
+let lastSkipReason: string | null = null;
 
 const cameraState: {
   mode: CameraMode;
@@ -27,9 +32,33 @@ function assignVec3(target: Vec3, source?: PartialVec3) {
   if (source.z !== undefined) target.z = source.z;
 }
 
+function logCameraDebug(message: string, data?: Record<string, unknown>) {
+  if (!CAMERA_DEBUG) return;
+  if (data) {
+    console.log(`[cameraFollow] ${message}`, data);
+    return;
+  }
+  console.log(`[cameraFollow] ${message}`);
+}
+
+function logSkipOnce(reason: string, data?: Record<string, unknown>) {
+  if (!CAMERA_DEBUG) return;
+  if (lastSkipReason === reason) return;
+  lastSkipReason = reason;
+  logCameraDebug(`skipping update: ${reason}`, data);
+}
+
+function clearSkipReason() {
+  lastSkipReason = null;
+}
+
 export function resetCameraTarget() {
   cameraState.mode = "off";
   cameraState.targetEid = -1;
+  logCameraDebug("reset target", {
+    mode: cameraState.mode,
+    targetEid: cameraState.targetEid,
+  });
 }
 
 export function setCameraFollowTarget(
@@ -39,6 +68,14 @@ export function setCameraFollowTarget(
   cameraState.mode = "follow";
   cameraState.targetEid = eid;
   assignVec3(cameraState.followOffset, opts.offset);
+  logCameraDebug("set follow target", {
+    targetEid: cameraState.targetEid,
+    followOffset: {
+      x: cameraState.followOffset.x,
+      y: cameraState.followOffset.y,
+      z: cameraState.followOffset.z,
+    },
+  });
 }
 
 export function setCameraLookAtTarget(
@@ -50,27 +87,105 @@ export function setCameraLookAtTarget(
   if (opts.position) {
     assignVec3(cameraState.stationaryPosition, opts.position);
   } else {
-    readCameraPosition(cameraState.stationaryPosition);
+    const readOk = readCameraPosition(cameraState.stationaryPosition);
+    logCameraDebug("captured stationary camera position from current camera", {
+      readOk,
+      stationaryPosition: {
+        x: cameraState.stationaryPosition.x,
+        y: cameraState.stationaryPosition.y,
+        z: cameraState.stationaryPosition.z,
+      },
+    });
   }
+
+  logCameraDebug("set lookAt target", {
+    targetEid: cameraState.targetEid,
+    stationaryPosition: {
+      x: cameraState.stationaryPosition.x,
+      y: cameraState.stationaryPosition.y,
+      z: cameraState.stationaryPosition.z,
+    },
+  });
 }
 
 export function cameraFollowSystem(world: CoreWorld) {
+  cameraFollowFrameCount += 1;
+
   if (cameraState.mode === "off") return;
   const eid = cameraState.targetEid;
-  if (eid < 0) return;
+  if (eid < 0) {
+    logSkipOnce("invalid target eid", { eid });
+    return;
+  }
 
   const { Position } = world.components;
   const tx = Position.x[eid];
   const ty = Position.y[eid];
   const tz = Position.z[eid];
+  if (!Number.isFinite(tx) || !Number.isFinite(ty) || !Number.isFinite(tz)) {
+    logSkipOnce("target position is not finite", { eid, tx, ty, tz });
+    return;
+  }
+  clearSkipReason();
+
+  let desiredCameraX: number;
+  let desiredCameraY: number;
+  let desiredCameraZ: number;
 
   if (cameraState.mode === "follow") {
     const offset = cameraState.followOffset;
-    setCameraPosition(tx + offset.x, ty + offset.y, tz + offset.z);
+    desiredCameraX = tx + offset.x;
+    desiredCameraY = ty + offset.y;
+    desiredCameraZ = tz + offset.z;
   } else {
     const p = cameraState.stationaryPosition;
-    setCameraPosition(p.x, p.y, p.z);
+    desiredCameraX = p.x;
+    desiredCameraY = p.y;
+    desiredCameraZ = p.z;
   }
 
-  lookCameraAt(tx, ty, tz);
+  const setPositionOk = setCameraPosition(
+    desiredCameraX,
+    desiredCameraY,
+    desiredCameraZ,
+  );
+  const lookAtOk = lookCameraAt(tx, ty, tz);
+  const shouldLogFrame =
+    cameraFollowFrameCount % CAMERA_DEBUG_FRAME_INTERVAL === 0 ||
+    !setPositionOk ||
+    !lookAtOk;
+
+  if (shouldLogFrame) {
+    const cameraPosition = { x: 0, y: 0, z: 0 };
+    const readBackOk = readCameraPosition(cameraPosition);
+    logCameraDebug("tick", {
+      frame: cameraFollowFrameCount,
+      mode: cameraState.mode,
+      targetEid: eid,
+      targetPosition: { x: tx, y: ty, z: tz },
+      desiredCameraPosition: {
+        x: desiredCameraX,
+        y: desiredCameraY,
+        z: desiredCameraZ,
+      },
+      cameraReadBackOk: readBackOk,
+      cameraReadBackPosition: {
+        x: cameraPosition.x,
+        y: cameraPosition.y,
+        z: cameraPosition.z,
+      },
+      followOffset:
+        cameraState.mode === "follow"
+          ? {
+              x: cameraState.followOffset.x,
+              y: cameraState.followOffset.y,
+              z: cameraState.followOffset.z,
+            }
+          : null,
+      worldTimeDelta: world.time.delta,
+      worldTimeElapsed: world.time.elapsed,
+      setPositionOk,
+      lookAtOk,
+    });
+  }
 }

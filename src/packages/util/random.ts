@@ -23,17 +23,19 @@ import { log, logLevels } from "./logging";
  * // Example 3: Automatically derived precision
  * rng(0.001, 0.1); // Could return 0.023 (3 decimal places derived)
  */
+
 export function rng(low: number, high: number, decimals: number | null = null): number {
-    const lowDecimals = (low.toString().split(".")[1] || "").length;
-    const highDecimals = (high.toString().split(".")[1] || "").length;
+    const min = low < high ? low : high;
+    const max = low < high ? high : low;
+    const lowDecimals = (Math.abs(low).toString().split(".")[1] || "").length;
+    const highDecimals = (Math.abs(high).toString().split(".")[1] || "").length;
     const derivedDecimals = Math.max(lowDecimals, highDecimals); // Derive max precision
+    const precision = decimals !== null ? decimals : derivedDecimals;
+    const factor = 10 ** precision;
 
-    const randomValue = Math.random() * (high - low) + low;
+    const randomValue = Math.random() * (max - min) + min;
 
-    // If decimals is explicitly set, use it; otherwise, use derived precision
-    return decimals !== null
-        ? parseFloat(randomValue.toFixed(decimals))
-        : parseFloat(randomValue.toFixed(derivedDecimals));
+    return Math.round(randomValue * factor) / factor;
 }
 
 /**

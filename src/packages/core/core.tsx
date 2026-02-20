@@ -11,9 +11,10 @@ import { uiBridgeSystem } from './systems/uiBridge'
 import { healthSystem } from './systems/health'
 import { renderSystem, setupRenderer } from './systems/render'
 import { dirtyTransformsSystem } from './systems/dirtyTransforms'
+import { commandsSystem, createCoreCommands } from './systems/commands'
 import { cameraFollowSystem, resetCameraTarget, setCameraFollowTarget, setCameraLookAtTarget } from './systems/cameraFollow'
 import type { CoreWorld, Player } from './types'
-export type { CoreWorldBox, Positions, Position, Velocities, Velocity, Players, Player, Time, CoreWorld } from './types'
+export type { CoreWorldBox, Positions, Position, Velocities, Velocity, Players, Player, Time, CoreWorld, CoreCommand, CoreCommandInput, CoreCommandHandler, CoreCommands } from './types'
 
 function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000) {
     let runGameLoop = false;
@@ -44,8 +45,8 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
                 DirtyList: new Int32Array(MAX_ENTITIES), //list of eids that have been changed 
                 DirtyFlagSet: new Int8Array(MAX_ENTITIES), //set to prevent duplicates in DirtyList
             },
-            Render: new Int32Array,
-            Health: new Int32Array,
+            Render: new Int32Array(MAX_ENTITIES),
+            Health: new Int32Array(MAX_ENTITIES),
             // AoS:
             Player: [] as Player[]
         },
@@ -57,15 +58,16 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
             avgDelta: 0,
             ticksPerSecond: 0
         },
+        commands: createCoreCommands<CoreWorld>(),
         chillUpdater: createChillUpdater<any>(),
     };
     const world = createWorld<CoreWorld>(worldConfig);
 
 
     function worldTick(world: CoreWorld) {
+        commandsSystem(world);
         timeSystem(world)
-        movementSystem(world, markTransformDirty)
-        cameraFollowSystem(world)
+        movementSystem(world)
         experienceSystem(world)
         healthSystem(world)
         if (world.components.RenderDirtyFlags.DirtyCount > 0) {
@@ -74,16 +76,9 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
         uiBridgeSystem(world)
     }
 
-    function markTransformDirty(eid: number) {
-        const dirtyFlags = world.components.RenderDirtyFlags;
-        const { DirtyTransformFlag, DirtyList, DirtyFlagSet } = dirtyFlags;
-        if (DirtyFlagSet[eid]) return;
-
-        DirtyTransformFlag[eid] = 1;
-        DirtyFlagSet[eid] = 1;
-        DirtyList[dirtyFlags.DirtyCount] = eid;
-        dirtyFlags.DirtyCount += 1;
-        console.log( dirtyFlags.DirtyCount)
+    function renderTick(world: CoreWorld){
+        cameraFollowSystem(world);
+        renderSystem(world);
     }
 
     function start() {
@@ -103,7 +98,7 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
                 name: "renderSystem",
                 callback: () => {
                     if (!runGameLoop) return;
-                    renderSystem(world)
+                    renderTick(world);
                 }
             });
             schedulerRegistered = true;
