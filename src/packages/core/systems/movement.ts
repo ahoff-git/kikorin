@@ -1,8 +1,9 @@
 import { query } from "bitecs"
-import { CoreWorld } from "../core"
+import type { CoreWorld } from "../types"
+import { markCollisionTransformDirty } from "./collision"
 
 export function movementSystem(world: CoreWorld) {
-    const { Position, Velocity, Render, RenderDirtyFlags } = world.components
+    const { Position, Velocity, Render, RenderDirtyFlags, Collider } = world.components
     const delta = world.time.delta
     if (delta === 0) return
 
@@ -32,6 +33,10 @@ export function movementSystem(world: CoreWorld) {
             DirtyFlagSet[eid] = 1
             DirtyList[dirtyCount] = eid
             dirtyCount += 1
+        }
+
+        if (Collider.Active[eid]) {
+            markCollisionTransformDirty(world, eid)
         }
     }
 

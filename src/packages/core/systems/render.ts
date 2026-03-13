@@ -261,6 +261,38 @@ export function applyToObjectByEid(
   return true;
 }
 
+export function setObjectTouchingByEid(
+  eid: number,
+  touching: boolean,
+): boolean {
+  const obj = objectsByEid.get(eid);
+  if (!obj) return false;
+
+  let applied = false;
+  obj.traverse((node) => {
+    const candidate = node as Object3D & {
+      material?: Material | Material[];
+      userData: {
+        baseMaterial?: Material | Material[];
+        touchMaterial?: Material | Material[];
+      };
+    };
+
+    if (candidate.material === undefined) return;
+
+    const nextMaterial = touching
+      ? candidate.userData.touchMaterial
+      : candidate.userData.baseMaterial;
+
+    if (!nextMaterial || candidate.material === nextMaterial) return;
+
+    candidate.material = nextMaterial;
+    applied = true;
+  });
+
+  return applied;
+}
+
 export function setObjectTransformByEid(
   eid: number,
   x: number,

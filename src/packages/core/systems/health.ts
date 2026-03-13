@@ -1,12 +1,15 @@
 import { query, removeEntity } from "bitecs"
-import { CoreWorld } from "../core"
+import type { CoreWorld } from "../types"
+import { removeColliderByEid } from "./collision"
+import { removeObjectByEid } from "./render"
 
 export function healthSystem (world: CoreWorld) {
         const { Health } = world.components
         for (const eid of query(world, [Health])) {
             if (Health[eid] <= 0) {
+                removeColliderByEid(world, eid)
+                removeObjectByEid(eid)
                 removeEntity(world, eid)
-                //todo make sure we ask three and rapier to clean up their entities too
             }
         }
     }

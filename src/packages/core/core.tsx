@@ -13,8 +13,28 @@ import { renderSystem, setupRenderer } from './systems/render'
 import { dirtyTransformsSystem } from './systems/dirtyTransforms'
 import { commandsSystem, createCoreCommands } from './systems/commands'
 import { cameraFollowSystem, resetCameraTarget, setCameraFollowTarget, setCameraLookAtTarget } from './systems/cameraFollow'
+import { collisionSystem, createCollisionState, setupCollisionSystem } from './systems/collision'
 import type { CoreWorld, Player } from './types'
-export type { CoreWorldBox, Positions, Position, Velocities, Velocity, Players, Player, Time, CoreWorld, CoreCommand, CoreCommandInput, CoreCommandHandler, CoreCommands } from './types'
+export type {
+    CollisionDirtyFlags,
+    CollisionState,
+    ColliderShapes,
+    CoreCommand,
+    CoreCommandHandler,
+    CoreCommandInput,
+    CoreCommands,
+    CoreWorld,
+    CoreWorldBox,
+    Player,
+    Players,
+    Position,
+    Positions,
+    Time,
+    TouchPairList,
+    Velocities,
+    Velocity,
+} from './types'
+export { configureCuboidCollider, getTouchPairs, getTouchingEntities, markCollisionTransformDirty } from './systems/collision'
 
 function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000) {
     let runGameLoop = false;
@@ -39,10 +59,24 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
                 pitch: new Float32Array(MAX_ENTITIES),
                 roll: new Float32Array(MAX_ENTITIES)
             },
+            Collider: {
+                Active: new Int8Array(MAX_ENTITIES),
+                Sensor: new Int8Array(MAX_ENTITIES),
+                HalfWidth: new Float32Array(MAX_ENTITIES),
+                HalfHeight: new Float32Array(MAX_ENTITIES),
+                HalfDepth: new Float32Array(MAX_ENTITIES),
+            },
             RenderDirtyFlags: {
                 DirtyTransformFlag: new Int8Array(MAX_ENTITIES), //set if Position/Rotation/Scale changes
                 DirtyCount: 0, //increment as the list grows
                 DirtyList: new Int32Array(MAX_ENTITIES), //list of eids that have been changed 
+                DirtyFlagSet: new Int8Array(MAX_ENTITIES), //set to prevent duplicates in DirtyList
+            },
+            CollisionDirtyFlags: {
+                DirtyTransformFlag: new Int8Array(MAX_ENTITIES), //set if Position/Rotation/Scale/Collider changes
+                ConfigDirtyFlag: new Int8Array(MAX_ENTITIES), //set if collider configuration changes
+                DirtyCount: 0, //increment as the list grows
+                DirtyList: new Int32Array(MAX_ENTITIES), //list of eids that have been changed
                 DirtyFlagSet: new Int8Array(MAX_ENTITIES), //set to prevent duplicates in DirtyList
             },
             Render: new Int32Array(MAX_ENTITIES),
@@ -50,6 +84,7 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
             // AoS:
             Player: [] as Player[]
         },
+        collision: createCollisionState(MAX_ENTITIES),
         time: {
             delta: 0,
             elapsed: 0,
@@ -68,6 +103,7 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
         commandsSystem(world);
         timeSystem(world)
         movementSystem(world)
+        collisionSystem(world)
         experienceSystem(world)
         healthSystem(world)
         if (world.components.RenderDirtyFlags.DirtyCount > 0) {
@@ -112,6 +148,7 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
     }
 
     setupRenderer(canvas);
+    setupCollisionSystem(world);
     resetCameraTarget();
 
     // const cube = new Mesh(
