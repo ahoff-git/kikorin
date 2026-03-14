@@ -46,7 +46,11 @@ import {
 import { gravitySystem } from "./systems/gravity";
 import { healthSystem } from "./systems/health";
 import { movementSystem } from "./systems/movement";
-import { disposeRenderer, renderSystem, setupRenderer } from "./systems/render";
+import {
+  disposeRenderer,
+  renderSystem,
+  setupRenderer,
+} from "./systems/render";
 import { timeSystem } from "./systems/time";
 import { uiBridgeSystem } from "./systems/uiBridge";
 import type {
@@ -114,7 +118,9 @@ export type {
 export { CoreFlagCustomSources, CoreFlags } from "./coreFlags";
 export { ControlSources, KeyboardControls, PointerControls } from "./types";
 export {
+  castEntityCollider,
   configureCuboidCollider,
+  getCollisionBounceDelta,
   getBounceSuggestion,
   getTouchPairs,
   getTouchingEntities,
@@ -255,6 +261,7 @@ function createCoreWorldConfig(maxEntities: number): CoreWorld {
         roll: new Float32Array(maxEntities),
       },
       FaceVelocity: new Int8Array(maxEntities),
+      Projectile: new Int8Array(maxEntities),
       Collider: {
         Active: new Int8Array(maxEntities),
         Sensor: new Int8Array(maxEntities),

@@ -2,12 +2,15 @@ import RAPIER, {
     ActiveCollisionTypes,
     type Collider as RapierCollider,
     ColliderDesc,
+    type QueryFilterFlags,
     type Rotation as RapierRotation,
+    type ShapeColliderTOI,
     type Vector as RapierVector,
 } from '@dimforge/rapier3d-compat'
 import { hasComponent } from 'bitecs'
+import { Euler, Matrix4, Quaternion } from 'three'
 import { CoreFlagCustomSources, CoreFlags } from '../coreFlags'
-import type { CollisionState, CoreWorld, Vec3 } from '../types'
+import type { CollisionState, CoreWorld, Position, Vec3 } from '../types'
 import {
     evaluateFlaginatorFlag,
     markFlaginatorComponentChanged,
@@ -20,6 +23,9 @@ const IDENTITY_ROTATION: RapierRotation = { x: 0, y: 0, z: 0, w: 1 }
 const COLLISION_RESPONSE_PREDICTION = 0.001
 const COLLISION_BOUNCE_RESTITUTION = 0.8
 const COLLISION_MIN_BOUNCE_SPEED = 0.75
+const scratchEuler = new Euler(0, 0, 0, 'YXZ')
+const scratchQuaternion = new Quaternion()
+const scratchRotationMatrix = new Matrix4()
 
 let rapierInitPromise: Promise<void> | null = null
 
@@ -190,21 +196,14 @@ function eulerToQuaternion(pitch: number, yaw: number, roll: number): RapierRota
         return IDENTITY_ROTATION
     }
 
-    const halfPitch = pitch * 0.5
-    const halfYaw = yaw * 0.5
-    const halfRoll = roll * 0.5
-    const sinPitch = Math.sin(halfPitch)
-    const cosPitch = Math.cos(halfPitch)
-    const sinYaw = Math.sin(halfYaw)
-    const cosYaw = Math.cos(halfYaw)
-    const sinRoll = Math.sin(halfRoll)
-    const cosRoll = Math.cos(halfRoll)
+    scratchEuler.set(pitch, yaw, roll)
+    scratchQuaternion.setFromEuler(scratchEuler)
 
     return {
-        x: sinPitch * cosYaw * cosRoll - cosPitch * sinYaw * sinRoll,
-        y: cosPitch * sinYaw * cosRoll + sinPitch * cosYaw * sinRoll,
-        z: cosPitch * cosYaw * sinRoll - sinPitch * sinYaw * cosRoll,
-        w: cosPitch * cosYaw * cosRoll + sinPitch * sinYaw * sinRoll,
+        x: scratchQuaternion.x,
+        y: scratchQuaternion.y,
+        z: scratchQuaternion.z,
+        w: scratchQuaternion.w,
     }
 }
 
@@ -214,26 +213,23 @@ function fillWorldHalfExtents(world: CoreWorld, eid: number, out: RapierVector) 
     const hy = Collider.HalfHeight[eid]
     const hz = Collider.HalfDepth[eid]
 
-    const pitch = Rotation.pitch[eid]
-    const yaw = Rotation.yaw[eid]
-    const roll = Rotation.roll[eid]
+    scratchEuler.set(
+        Rotation.pitch[eid],
+        Rotation.yaw[eid],
+        Rotation.roll[eid],
+    )
+    scratchRotationMatrix.makeRotationFromEuler(scratchEuler)
 
-    const a = Math.cos(pitch)
-    const b = Math.sin(pitch)
-    const c = Math.cos(yaw)
-    const d = Math.sin(yaw)
-    const e = Math.cos(roll)
-    const f = Math.sin(roll)
-
-    const m11 = c * e
-    const m12 = -c * f
-    const m13 = d
-    const m21 = a * f + b * e * d
-    const m22 = a * e - b * f * d
-    const m23 = -b * c
-    const m31 = b * f - a * e * d
-    const m32 = b * e + a * f * d
-    const m33 = a * c
+    const { elements } = scratchRotationMatrix
+    const m11 = elements[0]!
+    const m12 = elements[4]!
+    const m13 = elements[8]!
+    const m21 = elements[1]!
+    const m22 = elements[5]!
+    const m23 = elements[9]!
+    const m31 = elements[2]!
+    const m32 = elements[6]!
+    const m33 = elements[10]!
 
     out.x = Math.abs(m11) * hx + Math.abs(m12) * hy + Math.abs(m13) * hz
     out.y = Math.abs(m21) * hx + Math.abs(m22) * hy + Math.abs(m23) * hz
@@ -294,6 +290,71 @@ function addBounceSuggestion(world: CoreWorld, eid: number, delta: RapierVector)
     suggestions.z[eid] += delta.z
 }
 
+function computeCollisionBounceResponses(
+    world: CoreWorld,
+    a: number,
+    b: number,
+    normal: RapierVector,
+) {
+    const { Collider, Floor, Position, Velocity } = world.components
+    if (Collider.Sensor[a] || Collider.Sensor[b] || Floor[a] || Floor[b]) {
+        return null
+    }
+
+    let normalizedNormal = normalize(normal)
+    if (!normalizedNormal) {
+        normalizedNormal = normalize({
+            x: Position.x[b] - Position.x[a],
+            y: Position.y[b] - Position.y[a],
+            z: Position.z[b] - Position.z[a],
+        })
+    }
+    if (!normalizedNormal) {
+        return null
+    }
+
+    const aDynamic = hasComponent(world, a, Velocity)
+    const bDynamic = hasComponent(world, b, Velocity)
+    const dynamicCount = Number(aDynamic) + Number(bDynamic)
+    if (dynamicCount === 0) {
+        return null
+    }
+
+    const relativeVelocity = {
+        x: (aDynamic ? Velocity.x[a] : 0) - (bDynamic ? Velocity.x[b] : 0),
+        y: (aDynamic ? Velocity.y[a] : 0) - (bDynamic ? Velocity.y[b] : 0),
+        z: (aDynamic ? Velocity.z[a] : 0) - (bDynamic ? Velocity.z[b] : 0),
+    }
+    const closingSpeed = dot(relativeVelocity, normalizedNormal)
+    if (closingSpeed <= COLLISION_MIN_BOUNCE_SPEED) {
+        return null
+    }
+
+    const bounceImpulse = ((1 + COLLISION_BOUNCE_RESTITUTION) * closingSpeed) / dynamicCount
+    const response = {
+        a: aDynamic
+            ? {
+                x: -normalizedNormal.x * bounceImpulse,
+                y: -normalizedNormal.y * bounceImpulse,
+                z: -normalizedNormal.z * bounceImpulse,
+            }
+            : null,
+        b: bDynamic
+            ? {
+                x: normalizedNormal.x * bounceImpulse,
+                y: normalizedNormal.y * bounceImpulse,
+                z: normalizedNormal.z * bounceImpulse,
+            }
+            : null,
+    }
+
+    if (!response.a && !response.b) {
+        return null
+    }
+
+    return response
+}
+
 function suggestCollisionBounce(world: CoreWorld, a: number, b: number) {
     const state = world.collision
     const aCollider = state.collidersByEid[a]
@@ -302,61 +363,22 @@ function suggestCollisionBounce(world: CoreWorld, a: number, b: number) {
         return false
     }
 
-    const { Collider, Floor, Position, Velocity } = world.components
-    if (Collider.Sensor[a] || Collider.Sensor[b] || Floor[a] || Floor[b]) {
-        return false
-    }
-
     const contact = aCollider.contactCollider(bCollider, COLLISION_RESPONSE_PREDICTION)
     if (!contact) {
         return false
     }
 
-    let normal = normalize(contact.normal1)
-    if (!normal) {
-        normal = normalize({
-            x: Position.x[b] - Position.x[a],
-            y: Position.y[b] - Position.y[a],
-            z: Position.z[b] - Position.z[a],
-        })
-    }
-    if (!normal) {
+    const response = computeCollisionBounceResponses(world, a, b, contact.normal1)
+    if (!response) {
         return false
     }
 
-    const aDynamic = hasComponent(world, a, Velocity)
-    const bDynamic = hasComponent(world, b, Velocity)
-    const dynamicCount = Number(aDynamic) + Number(bDynamic)
-    if (dynamicCount === 0) {
-        return false
+    if (response.a) {
+        addBounceSuggestion(world, a, response.a)
     }
 
-    const relativeVelocity = {
-        x: (aDynamic ? Velocity.x[a] : 0) - (bDynamic ? Velocity.x[b] : 0),
-        y: (aDynamic ? Velocity.y[a] : 0) - (bDynamic ? Velocity.y[b] : 0),
-        z: (aDynamic ? Velocity.z[a] : 0) - (bDynamic ? Velocity.z[b] : 0),
-    }
-    const closingSpeed = dot(relativeVelocity, normal)
-    if (closingSpeed <= COLLISION_MIN_BOUNCE_SPEED) {
-        return false
-    }
-
-    const bounceImpulse = ((1 + COLLISION_BOUNCE_RESTITUTION) * closingSpeed) / dynamicCount
-
-    if (aDynamic) {
-        addBounceSuggestion(world, a, {
-            x: -normal.x * bounceImpulse,
-            y: -normal.y * bounceImpulse,
-            z: -normal.z * bounceImpulse,
-        })
-    }
-
-    if (bDynamic) {
-        addBounceSuggestion(world, b, {
-            x: normal.x * bounceImpulse,
-            y: normal.y * bounceImpulse,
-            z: normal.z * bounceImpulse,
-        })
+    if (response.b) {
+        addBounceSuggestion(world, b, response.b)
     }
 
     return true
@@ -636,6 +658,90 @@ export function getBounceSuggestion(world: CoreWorld, eid: number): Vec3 | null 
         x: suggestions.x[eid],
         y: suggestions.y[eid],
         z: suggestions.z[eid],
+    }
+}
+
+export function getCollisionBounceDelta(
+    world: CoreWorld,
+    eid: number,
+    otherEid: number,
+    normal: Vec3,
+): Vec3 | null {
+    const response = computeCollisionBounceResponses(world, eid, otherEid, normal)
+    return response?.a ?? null
+}
+
+export function castEntityCollider(
+    world: CoreWorld,
+    eid: number,
+    shapePos: Position,
+    shapeVel: Vec3,
+    opts: {
+        maxToi?: number,
+        stopAtPenetration?: boolean,
+        filterFlags?: QueryFilterFlags,
+        filterPredicate?: (otherEid: number) => boolean,
+    } = {},
+): {
+    colliderEid: number,
+    toi: number,
+    witness1: Vec3,
+    witness2: Vec3,
+    normal1: Vec3,
+    normal2: Vec3,
+} | null {
+    const state = world.collision
+    const rapierWorld = state.world
+    const selfCollider = state.collidersByEid[eid]
+    if (!rapierWorld || !selfCollider?.isValid()) {
+        return null
+    }
+
+    if (shapeVel.x === 0 && shapeVel.y === 0 && shapeVel.z === 0) {
+        return null
+    }
+
+    const { Rotation } = world.components
+    const hit: ShapeColliderTOI | null = rapierWorld.castShape(
+        shapePos,
+        eulerToQuaternion(
+            Rotation.pitch[eid],
+            Rotation.yaw[eid],
+            Rotation.roll[eid],
+        ),
+        shapeVel,
+        selfCollider.shape,
+        opts.maxToi ?? 1,
+        opts.stopAtPenetration ?? false,
+        opts.filterFlags,
+        undefined,
+        selfCollider,
+        undefined,
+        (collider) => {
+            const otherEid = state.eidByColliderHandle.get(collider.handle)
+            if (otherEid === undefined || otherEid === eid) {
+                return false
+            }
+
+            return opts.filterPredicate?.(otherEid) ?? true
+        },
+    )
+    if (!hit) {
+        return null
+    }
+
+    const otherEid = state.eidByColliderHandle.get(hit.collider.handle)
+    if (otherEid === undefined) {
+        return null
+    }
+
+    return {
+        colliderEid: otherEid,
+        toi: hit.toi,
+        witness1: hit.witness1,
+        witness2: hit.witness2,
+        normal1: hit.normal1,
+        normal2: hit.normal2,
     }
 }
 

@@ -125,6 +125,7 @@ export function spawnEntity(
   if (needsVelocity) ensureComponent(world, eid, "Velocity");
   if (needsRotation) ensureComponent(world, eid, "Rotation");
   if (definition.faceVelocity === true) ensureComponent(world, eid, "FaceVelocity");
+  if (definition.projectile === true) ensureComponent(world, eid, "Projectile");
   if (definition.collider !== undefined) ensureComponent(world, eid, "Collider");
   if (definition.gravity !== undefined) ensureComponent(world, eid, "Gravity");
   if (definition.floor === true) ensureComponent(world, eid, "Floor");
@@ -194,6 +195,10 @@ export function spawnEntity(
 
   if (definition.faceVelocity === true) {
     world.components.FaceVelocity[eid] = 1;
+  }
+
+  if (definition.projectile === true) {
+    world.components.Projectile[eid] = 1;
   }
 
   if (definition.renderMesh !== undefined) {

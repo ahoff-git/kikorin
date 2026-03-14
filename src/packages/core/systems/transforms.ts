@@ -6,7 +6,7 @@ import {
 } from "./flaginator";
 import { markCollisionTransformDirty } from "./collision";
 
-const scratchEuler = new Euler();
+const scratchEuler = new Euler(0, 0, 0, "YXZ");
 const scratchVector = new Vector3();
 
 export function markTransformDirty(world: CoreWorld, eid: number) {

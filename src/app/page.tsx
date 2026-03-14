@@ -68,10 +68,10 @@ const controlsSectionStyle: CSSProperties = {
 };
 
 const CONTROL_INSTRUCTIONS =
-  "W / S move forward and back, Q / E strafe, A / D or Left / Right turn, I / K pitch up and down, left click to fire pointer events, right drag inside the canvas to orbit the camera, and press Space to jump.";
+  "W / S move forward and back, Q / E strafe, A / D or Left / Right turn, I / K pitch up and down, left click to fire a small block, right drag inside the canvas to orbit the camera, and press Space to jump.";
 
 const LEFT_NAV_CONTROL_INSTRUCTIONS =
-  "Move forward and back with W and S, strafe with Q and E, turn with A and D or the left and right arrow keys, use I and K to pitch up and down, left click to fire pointer events, right drag inside the canvas to orbit the camera, and press Space to jump.";
+  "Move forward and back with W and S, strafe with Q and E, turn with A and D or the left and right arrow keys, use I and K to pitch up and down, left click to fire a small block that can bounce off other blocks, right drag inside the canvas to orbit the camera, and press Space to jump.";
 
 const CONTROL_SYSTEM_NOTE =
   "The React Boost Forward button in the header also feeds the same control system, so you can compare UI input with keyboard input.";

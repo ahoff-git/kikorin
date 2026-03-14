@@ -1,14 +1,22 @@
 import {
+  castEntityCollider,
   CoreFlags,
   ControlSources,
+  destroyEntity,
   evaluateFlaginatorFlag,
+  getBounceSuggestion,
+  getCollisionBounceDelta,
+  getTouchingEntities,
   getYawFromXZDirection,
   hasEntityComponents,
   KeyboardControls,
   markFlaginatorComponentChanged,
+  PointerControls,
   queryEntities,
   rotateLocalVectorByEntityRotation,
+  setEntityPosition,
   setEntityRotation,
+  setEntityVelocity,
   setupCoreWorld,
   spawnEntity,
   type CoreWorld,
@@ -16,6 +24,7 @@ import {
   type Player,
   type Position,
   type Rotation,
+  type Vec3,
   type Velocity,
 } from "@/packages/core/core";
 import { findHighestFloorTopAtPosition } from "@/packages/core/systems/gravity";
@@ -27,6 +36,7 @@ import {
   LineSegments,
   Mesh,
   MeshBasicMaterial,
+  SphereGeometry,
 } from "three";
 import { PlayerReactControls } from "./kikorinControls";
 
@@ -46,6 +56,26 @@ const PERSON_FRONT_COLOR = 0xffe082;
 const PERSON_TOUCH_COLOR = 0xff6b3d;
 const PERSON_TOUCH_FRONT_COLOR = 0xffc46b;
 const PERSON_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x16324f });
+const PROJECTILE_RADIUS = 0.12;
+const PROJECTILE_SCALE = {
+  x: 0.82,
+  y: 0.82,
+  z: 1.35,
+};
+const PROJECTILE_COLLIDER = {
+  halfWidth: PROJECTILE_RADIUS * PROJECTILE_SCALE.x,
+  halfHeight: PROJECTILE_RADIUS * PROJECTILE_SCALE.y,
+  halfDepth: PROJECTILE_RADIUS * PROJECTILE_SCALE.z,
+};
+const PROJECTILE_GEOMETRY = new SphereGeometry(PROJECTILE_RADIUS, 14, 10);
+const PROJECTILE_BODY_COLOR = 0xf97316;
+const PROJECTILE_TOUCH_COLOR = 0xea580c;
+const PROJECTILE_BASE_MATERIAL = new MeshBasicMaterial({
+  color: PROJECTILE_BODY_COLOR,
+});
+const PROJECTILE_TOUCH_MATERIAL = new MeshBasicMaterial({
+  color: PROJECTILE_TOUCH_COLOR,
+});
 const FLOOR_COLLIDER = {
   halfWidth: 240,
   halfHeight: 1,
@@ -93,6 +123,15 @@ const PLAYER_PITCH_DOWN_KEYS = [KeyboardControls.KeyK];
 const PLAYER_PITCH_SPEED = 1.5;
 const PLAYER_YAW_SPEED = 1.5;
 const PLAYER_MAX_PITCH = Math.PI * 0.45;
+const PROJECTILE_SPEED = 42;
+const PROJECTILE_TTL_TICKS = 84;
+const PROJECTILE_FORWARD_SPAWN_OFFSET =
+  PERSON_COLLIDER.halfDepth + PROJECTILE_COLLIDER.halfDepth + 0.24;
+const PROJECTILE_SPAWN_HEIGHT = PERSON_COLLIDER.halfHeight * 0.35;
+const PROJECTILE_BOUNCE_REPEAT_COOLDOWN_TICKS = 6;
+const PROJECTILE_SWEEP_REWIND_TOI = 0.002;
+const PROJECTILE_BOUNCE_SEPARATION_DISTANCE = 0.04;
+const PROJECTILE_FALLBACK_BOUNCE_RESTITUTION = 0.8;
 const AMBIENT_PERSON_COUNT = 8000;
 
 function createPersonFaceMaterials(bodyColor: number, frontColor: number) {
@@ -113,11 +152,15 @@ const PERSON_TOUCH_MATERIALS = createPersonFaceMaterials(
   PERSON_TOUCH_COLOR,
   PERSON_TOUCH_FRONT_COLOR,
 );
-
 export type World = CoreWorld;
 export type WorldBox = CoreWorldBox;
 
 type FloorEids = ArrayLike<number>;
+type ProjectileState = {
+  remainingTicks: number;
+  bounceCooldownsByTarget: Map<number, number>;
+};
+type ProjectileRegistry = Map<number, ProjectileState>;
 
 function createPersonRenderMesh() {
   const mesh = new Mesh(PERSON_GEOMETRY, PERSON_BASE_MATERIALS);
@@ -136,6 +179,18 @@ function createFloorRenderMesh() {
   outline.renderOrder = 1;
   outline.scale.setScalar(1.0005);
   mesh.add(outline);
+  return mesh;
+}
+
+function createProjectileRenderMesh() {
+  const mesh = new Mesh(PROJECTILE_GEOMETRY, PROJECTILE_BASE_MATERIAL);
+  mesh.scale.set(
+    PROJECTILE_SCALE.x,
+    PROJECTILE_SCALE.y,
+    PROJECTILE_SCALE.z,
+  );
+  mesh.userData.baseMaterial = PROJECTILE_BASE_MATERIAL;
+  mesh.userData.touchMaterial = PROJECTILE_TOUCH_MATERIAL;
   return mesh;
 }
 
@@ -217,6 +272,8 @@ function spawnAmbientPeople(
 }
 
 function registerPrimeControls(world: CoreWorld, eid: number) {
+  const projectiles: ProjectileRegistry = new Map();
+
   const isControllingPrime = (activeWorld: CoreWorld) => {
     return (
       hasEntityComponents(activeWorld, eid, [
@@ -243,6 +300,212 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
     markFlaginatorComponentChanged(activeWorld, "Velocity", eid);
     markFlaginatorComponentChanged(activeWorld, "Gravity", eid);
   };
+
+  const fireProjectile = (activeWorld: CoreWorld) => {
+    if (
+      !hasEntityComponents(activeWorld, eid, [
+        "Position",
+        "Rotation",
+        "Velocity",
+      ])
+    ) {
+      return;
+    }
+
+    const { Position, Rotation } = activeWorld.components;
+    const forward = normalizeVector(
+      rotateLocalVectorByEntityRotation(activeWorld, eid, {
+        x: 0,
+        y: 0,
+        z: -1,
+      }),
+    );
+    const spawnPosition = clampSpawnPositionToFloor(
+      activeWorld,
+      {
+        x:
+          Position.x[eid] + forward.x * PROJECTILE_FORWARD_SPAWN_OFFSET,
+        y:
+          Position.y[eid] +
+          PROJECTILE_SPAWN_HEIGHT +
+          forward.y * PROJECTILE_FORWARD_SPAWN_OFFSET,
+        z:
+          Position.z[eid] + forward.z * PROJECTILE_FORWARD_SPAWN_OFFSET,
+      },
+      PROJECTILE_COLLIDER.halfHeight,
+    );
+    const projectileEid = spawnEntity(activeWorld, {
+      position: spawnPosition,
+      velocity: {
+        x: forward.x * PROJECTILE_SPEED,
+        y: forward.y * PROJECTILE_SPEED,
+        z: forward.z * PROJECTILE_SPEED,
+      },
+      rotation: {
+        pitch: Rotation.pitch[eid],
+        yaw: Rotation.yaw[eid],
+        roll: 0,
+      },
+      projectile: true,
+      collider: PROJECTILE_COLLIDER,
+      renderMesh: createProjectileRenderMesh,
+    });
+
+    projectiles.set(projectileEid, {
+      remainingTicks: PROJECTILE_TTL_TICKS,
+      bounceCooldownsByTarget: new Map(),
+    });
+  };
+
+  const updateProjectiles = (
+    activeWorld: CoreWorld,
+    deltaSeconds: number,
+  ) => {
+    const { Floor, Position, Velocity } = activeWorld.components;
+
+    for (const [projectileEid, projectile] of projectiles) {
+      if (
+        !hasEntityComponents(activeWorld, projectileEid, [
+          "Position",
+          "Rotation",
+          "Velocity",
+          "Collider",
+        ])
+      ) {
+        projectiles.delete(projectileEid);
+        continue;
+      }
+
+      updateProjectileBounceCooldowns(projectile);
+      projectile.remainingTicks -= 1;
+      if (projectile.remainingTicks <= 0) {
+        destroyEntity(activeWorld, projectileEid);
+        projectiles.delete(projectileEid);
+        continue;
+      }
+
+      const currentPosition = {
+        x: Position.x[projectileEid],
+        y: Position.y[projectileEid],
+        z: Position.z[projectileEid],
+      };
+      const currentVelocity = {
+        x: Velocity.x[projectileEid],
+        y: Velocity.y[projectileEid],
+        z: Velocity.z[projectileEid],
+      };
+      const isFreshBounceTarget = (targetEid: number) => {
+        return (
+          !Floor[targetEid] &&
+          (projectile.bounceCooldownsByTarget.get(targetEid) ?? 0) === 0
+        );
+      };
+
+      const bounce = getBounceSuggestion(activeWorld, projectileEid);
+      const freshOverlapTargets = getTouchingEntities(
+        activeWorld,
+        projectileEid,
+      ).filter(isFreshBounceTarget);
+
+      if (bounce && freshOverlapTargets.length > 0) {
+        const bouncedVelocity = addVectors(currentVelocity, bounce);
+        const separatedPosition = getProjectileSeparatedPosition(
+          currentPosition,
+          bouncedVelocity,
+        );
+        setEntityPosition(activeWorld, projectileEid, separatedPosition);
+        setEntityVelocity(activeWorld, projectileEid, bouncedVelocity);
+        faceEntityAlongVelocity(activeWorld, projectileEid, bouncedVelocity);
+
+        for (let i = 0; i < freshOverlapTargets.length; i += 1) {
+          projectile.bounceCooldownsByTarget.set(
+            freshOverlapTargets[i]!,
+            PROJECTILE_BOUNCE_REPEAT_COOLDOWN_TICKS,
+          );
+        }
+
+        continue;
+      }
+
+      if (deltaSeconds <= 0) {
+        continue;
+      }
+
+      const movementDelta = scaleVector(currentVelocity, deltaSeconds);
+      if (
+        movementDelta.x === 0 &&
+        movementDelta.y === 0 &&
+        movementDelta.z === 0
+      ) {
+        continue;
+      }
+
+      const sweptHit = castEntityCollider(
+        activeWorld,
+        projectileEid,
+        currentPosition,
+        movementDelta,
+        {
+          filterPredicate: isFreshBounceTarget,
+        },
+      );
+      if (!sweptHit) {
+        setEntityPosition(activeWorld, projectileEid, {
+          x: currentPosition.x + movementDelta.x,
+          y: currentPosition.y + movementDelta.y,
+          z: currentPosition.z + movementDelta.z,
+        });
+        continue;
+      }
+
+      const resolvedBounce = resolveProjectileSweepBounce(
+        activeWorld,
+        projectileEid,
+        sweptHit.colliderEid,
+        currentVelocity,
+        {
+          x: sweptHit.normal1.x,
+          y: sweptHit.normal1.y,
+          z: sweptHit.normal1.z,
+        },
+      );
+      const correctedToi = clamp(
+        sweptHit.toi - PROJECTILE_SWEEP_REWIND_TOI,
+        0,
+        1,
+      );
+      const impactPosition = {
+        x: currentPosition.x + movementDelta.x * correctedToi,
+        y: currentPosition.y + movementDelta.y * correctedToi,
+        z: currentPosition.z + movementDelta.z * correctedToi,
+      };
+      if (!resolvedBounce) {
+        setEntityPosition(activeWorld, projectileEid, impactPosition);
+        continue;
+      }
+
+      const bouncedVelocity = addVectors(
+        currentVelocity,
+        resolvedBounce.bounceDelta,
+      );
+      const correctedPosition = getProjectileSeparatedPosition(
+        impactPosition,
+        bouncedVelocity,
+      );
+      setEntityPosition(activeWorld, projectileEid, correctedPosition);
+      setEntityVelocity(activeWorld, projectileEid, bouncedVelocity);
+      faceEntityAlongVelocity(activeWorld, projectileEid, bouncedVelocity);
+
+      projectile.bounceCooldownsByTarget.set(
+        sweptHit.colliderEid,
+        PROJECTILE_BOUNCE_REPEAT_COOLDOWN_TICKS,
+      );
+    }
+  };
+
+  world.controls.onTick((activeWorld, tick) => {
+    updateProjectiles(activeWorld, tick.deltaSeconds);
+  });
 
   world.controls.onTick((activeWorld, tick, controls) => {
     if (!isControllingPrime(activeWorld)) return;
@@ -358,11 +621,24 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
       markFlaginatorComponentChanged(activeWorld, "Velocity", eid);
     },
   );
+
+  world.controls.on(
+    {
+      source: ControlSources.Pointer,
+      controlId: PointerControls.Primary,
+      phase: "trigger",
+    },
+    (activeWorld) => {
+      if (!isControllingPrime(activeWorld)) return;
+      fireProjectile(activeWorld);
+    },
+  );
 }
 
-function clampPersonSpawnPositionToFloor(
+function clampSpawnPositionToFloor(
   world: World,
   position: Position,
+  halfHeight: number,
   floorEids: FloorEids = queryFloorEids(world),
 ) {
   const floorTop = findHighestFloorTopAtPosition(
@@ -377,9 +653,205 @@ function clampPersonSpawnPositionToFloor(
 
   return {
     x: position.x,
-    y: Math.max(position.y, floorTop + PERSON_COLLIDER.halfHeight),
+    y: Math.max(position.y, floorTop + halfHeight),
     z: position.z,
   };
+}
+
+function normalizeVector(vector: Velocity): Velocity {
+  const normalizedVector = normalizeVectorOrNull(vector);
+  if (normalizedVector) {
+    return normalizedVector;
+  }
+
+  return { x: 0, y: 0, z: -1 };
+}
+
+function normalizeVectorOrNull(vector: Velocity): Velocity | null {
+  const length = Math.hypot(vector.x, vector.y, vector.z);
+  if (length === 0) {
+    return null;
+  }
+
+  return {
+    x: vector.x / length,
+    y: vector.y / length,
+    z: vector.z / length,
+  };
+}
+
+function scaleVector(vector: Velocity, scalar: number): Velocity {
+  return {
+    x: vector.x * scalar,
+    y: vector.y * scalar,
+    z: vector.z * scalar,
+  };
+}
+
+function addVectors(a: Velocity, b: Vec3): Velocity {
+  return {
+    x: a.x + b.x,
+    y: a.y + b.y,
+    z: a.z + b.z,
+  };
+}
+
+function invertVector(vector: Vec3): Velocity {
+  return {
+    x: -vector.x,
+    y: -vector.y,
+    z: -vector.z,
+  };
+}
+
+function dotVectors(a: Vec3, b: Vec3): number {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+function getFallbackProjectileBounceDelta(
+  velocity: Velocity,
+  normal: Velocity,
+): Velocity | null {
+  const closingSpeed = dotVectors(velocity, normal);
+  if (closingSpeed <= 0) {
+    return null;
+  }
+
+  return {
+    x:
+      -normal.x *
+      closingSpeed *
+      (1 + PROJECTILE_FALLBACK_BOUNCE_RESTITUTION),
+    y:
+      -normal.y *
+      closingSpeed *
+      (1 + PROJECTILE_FALLBACK_BOUNCE_RESTITUTION),
+    z:
+      -normal.z *
+      closingSpeed *
+      (1 + PROJECTILE_FALLBACK_BOUNCE_RESTITUTION),
+  };
+}
+
+function resolveProjectileSweepBounce(
+  world: CoreWorld,
+  projectileEid: number,
+  colliderEid: number,
+  velocity: Velocity,
+  sweepNormal: Vec3,
+) {
+  const candidateNormals = [
+    normalizeVectorOrNull(sweepNormal),
+    normalizeVectorOrNull(
+      rotateLocalVectorByEntityRotation(world, projectileEid, sweepNormal),
+    ),
+  ].filter((candidate): candidate is Velocity => candidate !== null);
+
+  for (let i = 0; i < candidateNormals.length; i += 1) {
+    const normal = candidateNormals[i]!;
+    const bounceDelta = getCollisionBounceDelta(
+      world,
+      projectileEid,
+      colliderEid,
+      normal,
+    );
+    if (bounceDelta) {
+      return { bounceDelta, impactNormal: normal };
+    }
+
+    const invertedNormal = invertVector(normal);
+    const invertedBounceDelta = getCollisionBounceDelta(
+      world,
+      projectileEid,
+      colliderEid,
+      invertedNormal,
+    );
+    if (invertedBounceDelta) {
+      return { bounceDelta: invertedBounceDelta, impactNormal: invertedNormal };
+    }
+  }
+
+  for (let i = 0; i < candidateNormals.length; i += 1) {
+    const normal = candidateNormals[i]!;
+    const fallbackBounceDelta = getFallbackProjectileBounceDelta(
+      velocity,
+      normal,
+    );
+    if (fallbackBounceDelta) {
+      return { bounceDelta: fallbackBounceDelta, impactNormal: normal };
+    }
+
+    const invertedNormal = invertVector(normal);
+    const invertedFallbackBounceDelta = getFallbackProjectileBounceDelta(
+      velocity,
+      invertedNormal,
+    );
+    if (invertedFallbackBounceDelta) {
+      return {
+        bounceDelta: invertedFallbackBounceDelta,
+        impactNormal: invertedNormal,
+      };
+    }
+  }
+
+  return null;
+}
+
+function getProjectileSeparatedPosition(
+  position: Position,
+  bouncedVelocity: Velocity,
+): Position {
+  const separationDirection = normalizeVectorOrNull(bouncedVelocity);
+  if (!separationDirection) {
+    return position;
+  }
+
+  return {
+    x:
+      position.x +
+      separationDirection.x * PROJECTILE_BOUNCE_SEPARATION_DISTANCE,
+    y:
+      position.y +
+      separationDirection.y * PROJECTILE_BOUNCE_SEPARATION_DISTANCE,
+    z:
+      position.z +
+      separationDirection.z * PROJECTILE_BOUNCE_SEPARATION_DISTANCE,
+  };
+}
+
+function faceEntityAlongVelocity(
+  world: CoreWorld,
+  eid: number,
+  velocity: Velocity,
+) {
+  const normalizedVelocity = normalizeVectorOrNull(velocity);
+  if (!normalizedVelocity) {
+    return;
+  }
+
+  const horizontalSpeed = Math.hypot(
+    normalizedVelocity.x,
+    normalizedVelocity.z,
+  );
+  setEntityRotation(world, eid, {
+    pitch: Math.asin(clamp(normalizedVelocity.y, -1, 1)),
+    yaw:
+      horizontalSpeed > 0
+        ? getYawFromXZDirection(normalizedVelocity.x, normalizedVelocity.z)
+        : undefined,
+    roll: 0,
+  });
+}
+
+function updateProjectileBounceCooldowns(projectile: ProjectileState) {
+  for (const [targetEid, remainingTicks] of projectile.bounceCooldownsByTarget) {
+    if (remainingTicks <= 1) {
+      projectile.bounceCooldownsByTarget.delete(targetEid);
+      continue;
+    }
+
+    projectile.bounceCooldownsByTarget.set(targetEid, remainingTicks - 1);
+  }
 }
 
 function createPerson(
@@ -392,9 +864,10 @@ function createPerson(
   player: Player,
   floorEids: FloorEids = queryFloorEids(world),
 ) {
-  const spawnPosition = clampPersonSpawnPositionToFloor(
+  const spawnPosition = clampSpawnPositionToFloor(
     world,
     position,
+    PERSON_COLLIDER.halfHeight,
     floorEids,
   );
 

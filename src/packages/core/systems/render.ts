@@ -350,6 +350,7 @@ export function setObjectTransformByEid(
   if (!obj) return false;
 
   obj.position.set(x, y, z);
+  obj.rotation.order = "YXZ";
   obj.rotation.set(pitch, yaw, roll);
   return true;
 }
@@ -396,6 +397,7 @@ function getPool(key: string): Object3D[] {
 function resetPooledObject(obj: Object3D) {
   obj.visible = false;
   obj.position.set(0, 0, 0);
+  obj.rotation.order = "YXZ";
   obj.rotation.set(0, 0, 0);
   obj.scale.set(1, 1, 1);
   delete obj.userData.eid;

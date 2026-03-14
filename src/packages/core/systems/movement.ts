@@ -11,7 +11,7 @@ import {
 const FACE_VELOCITY_MIN_SPEED_SQUARED = 0.0001
 
 export function movementSystem(world: CoreWorld) {
-    const { Collider, FaceVelocity, Floor, Gravity, Position, Rotation, Velocity } = world.components
+    const { Collider, FaceVelocity, Floor, Gravity, Position, Projectile, Rotation, Velocity } = world.components
     const delta = world.time.delta
     if (delta === 0) return
 
@@ -25,6 +25,10 @@ export function movementSystem(world: CoreWorld) {
     const velZ = Velocity.z
 
     for (const eid of query(world, [Position, Velocity])) {
+        if (hasComponent(world, eid, Projectile)) {
+            continue
+        }
+
         const vx = velX[eid]
         const vy = velY[eid]
         const vz = velZ[eid]
