@@ -125,6 +125,7 @@ export {
   spawnEntity,
 } from "./entities";
 export {
+  getYawFromXZDirection,
   markTransformDirty,
   setEntityPosition,
   rotateLocalVectorByEntityRotation,
@@ -251,6 +252,7 @@ function createCoreWorldConfig(maxEntities: number): CoreWorld {
         pitch: new Float32Array(maxEntities),
         roll: new Float32Array(maxEntities),
       },
+      FaceVelocity: new Int8Array(maxEntities),
       Collider: {
         Active: new Int8Array(maxEntities),
         Sensor: new Int8Array(maxEntities),

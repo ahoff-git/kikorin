@@ -118,6 +118,10 @@ export function setEntityRotation(
   return didChange;
 }
 
+export function getYawFromXZDirection(x: number, z: number): number {
+  return Math.atan2(-x, -z);
+}
+
 export function rotateLocalVectorByEntityRotation(
   world: CoreWorld,
   eid: number,

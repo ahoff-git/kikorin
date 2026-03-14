@@ -2,10 +2,16 @@ import { hasComponent, query } from "bitecs"
 import type { CoreWorld } from "../types"
 import { markFlaginatorComponentChanged } from "./flaginator"
 import { resolveFloorPosition } from "./gravity"
-import { markTransformDirty } from "./transforms"
+import {
+    getYawFromXZDirection,
+    markTransformDirty,
+    setEntityRotation,
+} from "./transforms"
+
+const FACE_VELOCITY_MIN_SPEED_SQUARED = 0.0001
 
 export function movementSystem(world: CoreWorld) {
-    const { Collider, Floor, Gravity, Position, Rotation, Velocity } = world.components
+    const { Collider, FaceVelocity, Floor, Gravity, Position, Rotation, Velocity } = world.components
     const delta = world.time.delta
     if (delta === 0) return
 
@@ -47,6 +53,16 @@ export function movementSystem(world: CoreWorld) {
                     velocityChanged = true
                 }
             }
+        }
+
+        if (
+            hasComponent(world, eid, FaceVelocity) &&
+            hasComponent(world, eid, Rotation) &&
+            vx * vx + vz * vz > FACE_VELOCITY_MIN_SPEED_SQUARED
+        ) {
+            setEntityRotation(world, eid, {
+                yaw: getYawFromXZDirection(vx, vz),
+            })
         }
 
         if (

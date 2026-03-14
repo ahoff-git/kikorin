@@ -124,6 +124,7 @@ export function spawnEntity(
   if (needsPosition) ensureComponent(world, eid, "Position");
   if (needsVelocity) ensureComponent(world, eid, "Velocity");
   if (needsRotation) ensureComponent(world, eid, "Rotation");
+  if (definition.faceVelocity === true) ensureComponent(world, eid, "FaceVelocity");
   if (definition.collider !== undefined) ensureComponent(world, eid, "Collider");
   if (definition.gravity !== undefined) ensureComponent(world, eid, "Gravity");
   if (definition.floor === true) ensureComponent(world, eid, "Floor");
@@ -189,6 +190,10 @@ export function spawnEntity(
   if (definition.player !== undefined) {
     world.components.Player[eid] = { ...definition.player };
     markFlaginatorComponentChanged(world, "Player", eid);
+  }
+
+  if (definition.faceVelocity === true) {
+    world.components.FaceVelocity[eid] = 1;
   }
 
   if (definition.renderMesh !== undefined) {

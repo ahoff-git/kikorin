@@ -2,6 +2,7 @@ import {
   CoreFlags,
   ControlSources,
   evaluateFlaginatorFlag,
+  getYawFromXZDirection,
   hasEntityComponents,
   KeyboardControls,
   markFlaginatorComponentChanged,
@@ -163,6 +164,8 @@ function createPrimePlayer(world: CoreWorld, floorEids: FloorEids) {
     world,
     { x: 0, y: 12, z: 0 },
     { x: 0, y: 0, z: 0 },
+    { pitch: 0, yaw: 0, roll: 0 },
+    false,
     100,
     { level: 0, experience: 0, name: "DoomPrime" },
     floorEids,
@@ -194,6 +197,14 @@ function spawnAmbientPeople(
       world,
       position,
       velocity,
+      {
+        pitch: 0,
+        yaw: moving
+          ? getYawFromXZDirection(velocity.x, velocity.z)
+          : rng(0, Math.PI * 2, 3),
+        roll: 0,
+      },
+      moving,
       100,
       {
         level: 0,
@@ -375,6 +386,8 @@ function createPerson(
   world: World,
   position: Position,
   velocity: Velocity,
+  rotation: Rotation,
+  faceVelocity: boolean,
   health: number,
   player: Player,
   floorEids: FloorEids = queryFloorEids(world),
@@ -388,6 +401,8 @@ function createPerson(
   return spawnEntity(world, {
     position: spawnPosition,
     velocity,
+    rotation,
+    faceVelocity,
     gravity: true,
     health,
     player,
