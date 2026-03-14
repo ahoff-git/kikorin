@@ -30,10 +30,22 @@ const PERSON_EDGE_GEOMETRY = new EdgesGeometry(PERSON_GEOMETRY);
 const PERSON_BASE_MATERIAL = new MeshBasicMaterial({ color: 0x66ccff });
 const PERSON_TOUCH_MATERIAL = new MeshBasicMaterial({ color: 0xff6b3d });
 const PERSON_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x16324f });
+const FLOOR_HALF_WIDTH = 240;
+const FLOOR_HALF_HEIGHT = 1;
+const FLOOR_HALF_DEPTH = 240;
+const FLOOR_TOP_Y = 0;
+const FLOOR_GEOMETRY = new BoxGeometry(
+    FLOOR_HALF_WIDTH * 2,
+    FLOOR_HALF_HEIGHT * 2,
+    FLOOR_HALF_DEPTH * 2,
+);
+const FLOOR_EDGE_GEOMETRY = new EdgesGeometry(FLOOR_GEOMETRY);
+const FLOOR_BASE_MATERIAL = new MeshBasicMaterial({ color: 0x445342 });
+const FLOOR_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x243022 });
 const PLAYER_ACCELERATION = 30;
 const PLAYER_MAX_SPEED = 18;
 const PLAYER_DRAG_PER_SECOND = 4;
-const PLAYER_CLICK_LIFT = 8;
+const PLAYER_JUMP_SPEED = 8;
 const PLAYER_FORWARD_BOOST = 10;
 const PLAYER_FORWARD_KEYS = [KeyboardControls.KeyW, KeyboardControls.ArrowUp];
 const PLAYER_BACKWARD_KEYS = [KeyboardControls.KeyS, KeyboardControls.ArrowDown];
@@ -55,31 +67,48 @@ function createPersonRenderMesh() {
     return mesh;
 }
 
+function createFloorRenderMesh() {
+    const mesh = new Mesh(FLOOR_GEOMETRY, FLOOR_BASE_MATERIAL);
+    const outline = new LineSegments(FLOOR_EDGE_GEOMETRY, FLOOR_EDGE_MATERIAL);
+    outline.renderOrder = 1;
+    outline.scale.setScalar(1.0005);
+    mesh.add(outline);
+    return mesh;
+}
+
 export type World = { UniqueTestThing: "Testing123" } & CoreWorld;
 export type WorldBox = CoreWorldBox & {world:World};
 function setupWorld(canvas: HTMLCanvasElement | null) {
     console.log("DOING SETUP")
     const worldBox = setupCoreWorld(canvas) as WorldBox;
-    const prime = createPerson(worldBox.world, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0}, 100, { level: 0, experience: 0, name: `DoomPrime` });
+    createFloor(worldBox.world, { x: 0, y: FLOOR_TOP_Y - FLOOR_HALF_HEIGHT, z: 0 });
+    const prime = createPerson(worldBox.world, { x: 0, y: 12, z: 0 }, { x: 0, y: 0, z: 0}, 100, { level: 0, experience: 0, name: `DoomPrime` });
     registerPrimeControls(worldBox.world, prime);
     worldBox.setCameraFollowTarget(prime);
     const numBlocks = 10000;
+    const spawnRangeX = FLOOR_HALF_WIDTH - 4;
+    const spawnRangeZ = FLOOR_HALF_DEPTH - 4;
     for (let i = 0; i < numBlocks; i++) {
-        const range = Math.sqrt(numBlocks) * 2;
         const moving = rng(0, 10) > 9; // 10% chance to be moving
         const rvx = moving ? rng(-10, 10, 2) : 0;
-        const rvy = moving ? rng(-10, 10, 2) : 0;
         const rvz = moving ? rng(-10, 10, 2) : 0;
-        const rx = rng(-range, range);
-        const ry = rng(-range, range);
-        const rz = rng(-range, range);
-        createPerson(worldBox.world, { x: rx, y: ry, z: rz }, { x: rvx, y: rvy, z: rvz }, 100, { level: 0, experience: 0, name: `Doom${i}` });
+        const rx = rng(-spawnRangeX, spawnRangeX);
+        const ry = rng(FLOOR_TOP_Y + 4, FLOOR_TOP_Y + 60);
+        const rz = rng(-spawnRangeZ, spawnRangeZ);
+        createPerson(worldBox.world, { x: rx, y: ry, z: rz }, { x: rvx, y: 0, z: rvz }, 100, { level: 0, experience: 0, name: `Doom${i}` });
     }
     
     return worldBox;
 }
 
 function registerPrimeControls(world: CoreWorld, eid: number) {
+    const jump = (activeWorld: CoreWorld) => {
+        const { Gravity, Velocity } = activeWorld.components;
+        if (Gravity.Grounded[eid] === 0) return;
+        Velocity.y[eid] = clamp(PLAYER_JUMP_SPEED, -PLAYER_MAX_SPEED, PLAYER_MAX_SPEED);
+        Gravity.Grounded[eid] = 0;
+    };
+
     world.controls.onTick((activeWorld, tick, controls) => {
         const dt = tick.deltaSeconds;
         if (dt === 0) return;
@@ -88,7 +117,6 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
         const { Velocity, Rotation } = activeWorld.components;
         const velocity = Velocity;
         velocity.x[eid] *= drag;
-        velocity.y[eid] *= drag;
         velocity.z[eid] *= drag;
 
         const moveX = controls.getAxis(PLAYER_LEFT_KEYS, PLAYER_RIGHT_KEYS, ControlSources.Keyboard);
@@ -116,8 +144,11 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
     });
 
     world.controls.on({ source: ControlSources.Pointer, controlId: PointerControls.Primary, phase: "trigger" }, (activeWorld) => {
-        const velocity = activeWorld.components.Velocity;
-        velocity.y[eid] = clamp(velocity.y[eid] + PLAYER_CLICK_LIFT, -PLAYER_MAX_SPEED, PLAYER_MAX_SPEED);
+        jump(activeWorld);
+    });
+
+    world.controls.on({ source: ControlSources.Keyboard, controlId: KeyboardControls.Space, phase: "start" }, (activeWorld) => {
+        jump(activeWorld);
     });
 
     world.controls.on({ source: ControlSources.React, controlId: PlayerReactControls.BoostForward, phase: "trigger" }, (activeWorld) => {
@@ -127,13 +158,14 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
 }
 
 function createPerson(world: World, position: Position, velocity: Velocity, health: number, player: Player) {
-    const { Position, Velocity, Rotation, Player, Health, Render, Collider } = world.components
+    const { Position, Velocity, Rotation, Player, Health, Render, Collider, Gravity } = world.components
 
     const eid = addEntity(world)
     addComponent(world, eid, Position)
     addComponent(world, eid, Velocity)
     addComponent(world, eid, Rotation)
     addComponent(world, eid, Collider)
+    addComponent(world, eid, Gravity)
     addComponent(world, eid, Player)
     addComponent(world, eid, Health)
     addComponent(world, eid, Render)
@@ -148,6 +180,7 @@ function createPerson(world: World, position: Position, velocity: Velocity, heal
     Rotation.yaw[eid] = 0;
     Rotation.pitch[eid] = 0;
     Rotation.roll[eid] = 0;
+    Gravity.Grounded[eid] = 0;
     Render[eid] = 1;
     Health[eid] = health;
     configureCuboidCollider(world, eid, {
@@ -169,6 +202,45 @@ function createPerson(world: World, position: Position, velocity: Velocity, heal
         Rotation.yaw[eid],
         Rotation.roll[eid]
     );
+    return eid;
+}
+
+function createFloor(world: World, position: Position) {
+    const { Position, Rotation, Render, Collider, Floor } = world.components
+
+    const eid = addEntity(world)
+    addComponent(world, eid, Position)
+    addComponent(world, eid, Rotation)
+    addComponent(world, eid, Collider)
+    addComponent(world, eid, Render)
+    addComponent(world, eid, Floor)
+
+    Position.x[eid] = position.x;
+    Position.y[eid] = position.y;
+    Position.z[eid] = position.z;
+    Rotation.yaw[eid] = 0;
+    Rotation.pitch[eid] = 0;
+    Rotation.roll[eid] = 0;
+    Floor[eid] = 1;
+    Render[eid] = 1;
+
+    configureCuboidCollider(world, eid, {
+        halfWidth: FLOOR_HALF_WIDTH,
+        halfHeight: FLOOR_HALF_HEIGHT,
+        halfDepth: FLOOR_HALF_DEPTH,
+    })
+
+    upsertObjectByEid(eid, createFloorRenderMesh);
+    setObjectTransformByEid(
+        eid,
+        Position.x[eid],
+        Position.y[eid],
+        Position.z[eid],
+        Rotation.pitch[eid],
+        Rotation.yaw[eid],
+        Rotation.roll[eid]
+    );
+
     return eid;
 }
 

@@ -87,24 +87,35 @@ function removeValueInPlace(list: number[], value: number) {
     return true
 }
 
-function addTouchPair(world: CoreWorld, a: number, b: number) {
-    const state = world.collision
-    const aList = getTouchList(state, a)
-    const aWasTouching = aList.length > 0
-    if (!aList.includes(b)) {
-        aList.push(b)
-        if (!aWasTouching) {
-            setObjectTouchingByEid(a, true)
+function shouldShowTouchingState(world: CoreWorld, eid: number) {
+    if (world.components.Floor[eid]) return false
+
+    const list = getTouchList(world.collision, eid)
+    for (let i = 0; i < list.length; i += 1) {
+        if (!world.components.Floor[list[i]!]) {
+            return true
         }
     }
 
+    return false
+}
+
+function syncTouchingVisual(world: CoreWorld, eid: number) {
+    setObjectTouchingByEid(eid, shouldShowTouchingState(world, eid))
+}
+
+function addTouchPair(world: CoreWorld, a: number, b: number) {
+    const state = world.collision
+    const aList = getTouchList(state, a)
+    if (!aList.includes(b)) {
+        aList.push(b)
+        syncTouchingVisual(world, a)
+    }
+
     const bList = getTouchList(state, b)
-    const bWasTouching = bList.length > 0
     if (!bList.includes(a)) {
         bList.push(a)
-        if (!bWasTouching) {
-            setObjectTouchingByEid(b, true)
-        }
+        syncTouchingVisual(world, b)
     }
 
     const key = pairKeyFor(world, a, b)
@@ -126,14 +137,14 @@ function removeTouchPair(world: CoreWorld, a: number, b: number) {
 
     const aList = getTouchList(state, a)
     const aRemoved = removeValueInPlace(aList, b)
-    if (aRemoved && aList.length === 0) {
-        setObjectTouchingByEid(a, false)
+    if (aRemoved) {
+        syncTouchingVisual(world, a)
     }
 
     const bList = getTouchList(state, b)
     const bRemoved = removeValueInPlace(bList, a)
-    if (bRemoved && bList.length === 0) {
-        setObjectTouchingByEid(b, false)
+    if (bRemoved) {
+        syncTouchingVisual(world, b)
     }
 
     const key = pairKeyFor(world, a, b)

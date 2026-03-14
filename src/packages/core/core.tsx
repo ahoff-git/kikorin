@@ -15,6 +15,7 @@ import { commandsSystem, createCoreCommands } from './systems/commands'
 import { controlsSystem, createControls, setupControlInputs } from './systems/controls'
 import { cameraFollowSystem, resetCameraTarget, setCameraFollowTarget, setCameraLookAtTarget } from './systems/cameraFollow'
 import { collisionSystem, createCollisionState, setupCollisionSystem } from './systems/collision'
+import { gravitySystem } from './systems/gravity'
 import { markTransformDirty, rotateLocalVectorByEntityRotation, setEntityRotation } from './systems/transforms'
 import type { CoreWorld, Player } from './types'
 export type {
@@ -38,6 +39,7 @@ export type {
     CoreCommandHandler,
     CoreCommandInput,
     CoreCommands,
+    GravityState,
     CoreWorld,
     CoreWorldBox,
     Player,
@@ -86,6 +88,10 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
                 HalfHeight: new Float32Array(MAX_ENTITIES),
                 HalfDepth: new Float32Array(MAX_ENTITIES),
             },
+            Gravity: {
+                Grounded: new Int8Array(MAX_ENTITIES),
+            },
+            Floor: new Int8Array(MAX_ENTITIES),
             RenderDirtyFlags: {
                 DirtyTransformFlag: new Int8Array(MAX_ENTITIES), //set if Position/Rotation/Scale changes
                 DirtyCount: 0, //increment as the list grows
@@ -125,6 +131,7 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
         timeSystem(world)
         controlsSystem(world)
         commandsSystem(world);
+        gravitySystem(world)
         movementSystem(world)
         collisionSystem(world)
         experienceSystem(world)

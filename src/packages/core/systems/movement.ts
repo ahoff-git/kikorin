@@ -1,13 +1,15 @@
-import { query } from "bitecs"
+import { hasComponent, query } from "bitecs"
 import type { CoreWorld } from "../types"
+import { resolveFloorPosition } from "./gravity"
 import { markTransformDirty } from "./transforms"
 
 export function movementSystem(world: CoreWorld) {
-    const { Position, Velocity } = world.components
+    const { Collider, Floor, Gravity, Position, Rotation, Velocity } = world.components
     const delta = world.time.delta
     if (delta === 0) return
 
     const dt = delta * 0.001
+    const floorEids = query(world, [Floor, Position, Rotation, Collider])
     const posX = Position.x
     const posY = Position.y
     const posZ = Position.z
@@ -19,11 +21,38 @@ export function movementSystem(world: CoreWorld) {
         const vx = velX[eid]
         const vy = velY[eid]
         const vz = velZ[eid]
-        if (vx === 0 && vy === 0 && vz === 0) continue
+        let nextX = posX[eid] + vx * dt
+        let nextY = posY[eid] + vy * dt
+        let nextZ = posZ[eid] + vz * dt
 
-        posX[eid] += vx * dt
-        posY[eid] += vy * dt
-        posZ[eid] += vz * dt
+        if (
+            hasComponent(world, eid, Gravity) &&
+            hasComponent(world, eid, Rotation) &&
+            hasComponent(world, eid, Collider)
+        ) {
+            const resolvedY = resolveFloorPosition(world, floorEids, eid, nextX, nextY, nextZ)
+            const grounded = resolvedY !== null
+            Gravity.Grounded[eid] = grounded ? 1 : 0
+
+            if (grounded) {
+                nextY = resolvedY
+                if (velY[eid] < 0) {
+                    velY[eid] = 0
+                }
+            }
+        }
+
+        if (
+            nextX === posX[eid] &&
+            nextY === posY[eid] &&
+            nextZ === posZ[eid]
+        ) {
+            continue
+        }
+
+        posX[eid] = nextX
+        posY[eid] = nextY
+        posZ[eid] = nextZ
 
         markTransformDirty(world, eid)
     }

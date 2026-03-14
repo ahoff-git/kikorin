@@ -63,6 +63,10 @@ export type ColliderShapes = {
     HalfDepth: Float32Array
 }
 
+export type GravityState = {
+    Grounded: Int8Array
+}
+
 export type CollisionDirtyFlags = {
     DirtyTransformFlag: Int8Array, //set if Position/Rotation/Scale/Collider changes
     ConfigDirtyFlag: Int8Array, //set if collider configuration changes
@@ -253,6 +257,8 @@ export type CoreWorld = {
         Velocity: Velocities,
         Rotation: Rotations,
         Collider: ColliderShapes,
+        Gravity: GravityState,
+        Floor: Int8Array,
         Health: Int32Array,
         Render: Int32Array,
         Player: Players,
