@@ -15,12 +15,21 @@ import {
     Player
 } from "../packages/core/core";
 import { addComponent, addEntity} from "bitecs";
-import { BoxGeometry, Mesh, MeshBasicMaterial } from "three";
+import {
+    BoxGeometry,
+    EdgesGeometry,
+    LineBasicMaterial,
+    LineSegments,
+    Mesh,
+    MeshBasicMaterial,
+} from "three";
 import { setObjectTransformByEid, upsertObjectByEid } from "../packages/core/systems/render";
 
 const PERSON_GEOMETRY = new BoxGeometry(1, 1, 1);
+const PERSON_EDGE_GEOMETRY = new EdgesGeometry(PERSON_GEOMETRY);
 const PERSON_BASE_MATERIAL = new MeshBasicMaterial({ color: 0x66ccff });
 const PERSON_TOUCH_MATERIAL = new MeshBasicMaterial({ color: 0xff6b3d });
+const PERSON_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x16324f });
 const PLAYER_ACCELERATION = 30;
 const PLAYER_MAX_SPEED = 18;
 const PLAYER_DRAG_PER_SECOND = 4;
@@ -37,8 +46,12 @@ const PLAYER_MAX_PITCH = Math.PI * 0.45;
 
 function createPersonRenderMesh() {
     const mesh = new Mesh(PERSON_GEOMETRY, PERSON_BASE_MATERIAL);
+    const outline = new LineSegments(PERSON_EDGE_GEOMETRY, PERSON_EDGE_MATERIAL);
+    outline.renderOrder = 1;
+    outline.scale.setScalar(1.001);
     mesh.userData.baseMaterial = PERSON_BASE_MATERIAL;
     mesh.userData.touchMaterial = PERSON_TOUCH_MATERIAL;
+    mesh.add(outline);
     return mesh;
 }
 
