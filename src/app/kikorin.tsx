@@ -13,7 +13,7 @@ import {
     Velocity,
     Player
 } from "../packages/core/core";
-import { addComponent, addEntity} from "bitecs";
+import { addComponent, addEntity, query } from "bitecs";
 import {
     BoxGeometry,
     EdgesGeometry,
@@ -22,9 +22,13 @@ import {
     Mesh,
     MeshBasicMaterial,
 } from "three";
+import { findHighestFloorTopAtPosition } from "../packages/core/systems/gravity";
 import { setObjectTransformByEid, upsertObjectByEid } from "../packages/core/systems/render";
 
-const PERSON_GEOMETRY = new BoxGeometry(1, 1, 1);
+const PERSON_HALF_WIDTH = 0.5;
+const PERSON_HALF_HEIGHT = 0.5;
+const PERSON_HALF_DEPTH = 0.5;
+const PERSON_GEOMETRY = new BoxGeometry(PERSON_HALF_WIDTH * 2, PERSON_HALF_HEIGHT * 2, PERSON_HALF_DEPTH * 2);
 const PERSON_EDGE_GEOMETRY = new EdgesGeometry(PERSON_GEOMETRY);
 const PERSON_BODY_COLOR = 0x66ccff;
 const PERSON_FRONT_COLOR = 0xffe082;
@@ -59,7 +63,7 @@ const PLAYER_PITCH_DOWN_KEYS = [KeyboardControls.KeyK];
 const PLAYER_PITCH_SPEED = 1.5;
 const PLAYER_YAW_SPEED = 1.5;
 const PLAYER_MAX_PITCH = Math.PI * 0.45;
-const AMBIENT_PERSON_COUNT = 10000;
+const AMBIENT_PERSON_COUNT = 8000;
 
 function createPersonFaceMaterials(bodyColor: number, frontColor: number) {
     return [
@@ -204,8 +208,28 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
     });
 }
 
+function clampPersonSpawnPositionToFloor(world: World, position: Position) {
+    const floorEids = query(world, [
+        world.components.Floor,
+        world.components.Position,
+        world.components.Rotation,
+        world.components.Collider,
+    ]);
+    const floorTop = findHighestFloorTopAtPosition(world, floorEids, position.x, position.z);
+    if (floorTop === null) {
+        return position;
+    }
+
+    return {
+        x: position.x,
+        y: Math.max(position.y, floorTop + PERSON_HALF_HEIGHT),
+        z: position.z,
+    };
+}
+
 function createPerson(world: World, position: Position, velocity: Velocity, health: number, player: Player) {
     const { Position, Velocity, Rotation, Player, Health, Render, Collider, Gravity } = world.components
+    const spawnPosition = clampPersonSpawnPositionToFloor(world, position)
 
     const eid = addEntity(world)
     addComponent(world, eid, Position)
@@ -218,9 +242,9 @@ function createPerson(world: World, position: Position, velocity: Velocity, heal
     addComponent(world, eid, Render)
 
     // SoA access pattern
-    Position.x[eid] = position.x;
-    Position.y[eid] = position.y;
-    Position.z[eid] = position.z;
+    Position.x[eid] = spawnPosition.x;
+    Position.y[eid] = spawnPosition.y;
+    Position.z[eid] = spawnPosition.z;
     Velocity.x[eid] = velocity.x;
     Velocity.y[eid] = velocity.y;
     Velocity.z[eid] = velocity.z;
@@ -231,9 +255,9 @@ function createPerson(world: World, position: Position, velocity: Velocity, heal
     Render[eid] = 1;
     Health[eid] = health;
     configureCuboidCollider(world, eid, {
-        halfWidth: 0.5,
-        halfHeight: 0.5,
-        halfDepth: 0.5,
+        halfWidth: PERSON_HALF_WIDTH,
+        halfHeight: PERSON_HALF_HEIGHT,
+        halfDepth: PERSON_HALF_DEPTH,
     })
 
     // AoS access pattern  
