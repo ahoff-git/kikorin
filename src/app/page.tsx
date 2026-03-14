@@ -77,7 +77,18 @@ function Header({ onBoostForward }: { onBoostForward: (event: MouseEvent<HTMLBut
   )
 }
 function LeftNav() {
-  return (<>Hi - I'm the LeftNav</>)
+  return (
+    <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+        Controls
+      </div>
+      <div style={{ lineHeight: 1.6, color: "#555" }}>
+        Move with WASD or the arrow keys, use I and K to pitch up and down, and click inside the canvas to hop.
+        The React Boost Forward button in the header also feeds the same control system, so you can compare UI
+        input with keyboard and pointer input.
+      </div>
+    </div>
+  )
 }
 
 function RightPanel() {
