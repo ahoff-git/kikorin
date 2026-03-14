@@ -1,4 +1,4 @@
-import { addComponent, addEntity, query } from "bitecs";
+import { addComponent, addEntity, hasComponent, query } from "bitecs";
 import {
   configureCuboidCollider,
   ControlSources,
@@ -217,7 +217,20 @@ function spawnAmbientPeople(
 }
 
 function registerPrimeControls(world: CoreWorld, eid: number) {
+  const isControllingPrime = (activeWorld: CoreWorld) => {
+    const { Gravity, Player, Rotation, Velocity } = activeWorld.components;
+    return (
+      hasComponent(activeWorld, eid, Player) &&
+      hasComponent(activeWorld, eid, Velocity) &&
+      hasComponent(activeWorld, eid, Rotation) &&
+      hasComponent(activeWorld, eid, Gravity) &&
+      Player[eid]?.name === "DoomPrime"
+    );
+  };
+
   const jump = (activeWorld: CoreWorld) => {
+    if (!isControllingPrime(activeWorld)) return;
+
     const { Gravity, Velocity } = activeWorld.components;
     if (Gravity.Grounded[eid] === 0) return;
 
@@ -230,6 +243,8 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
   };
 
   world.controls.onTick((activeWorld, tick, controls) => {
+    if (!isControllingPrime(activeWorld)) return;
+
     const dt = tick.deltaSeconds;
     if (dt === 0) return;
 
@@ -319,6 +334,8 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
       phase: "trigger",
     },
     (activeWorld) => {
+      if (!isControllingPrime(activeWorld)) return;
+
       const { Velocity } = activeWorld.components;
       Velocity.z[eid] = clamp(
         Velocity.z[eid] - PLAYER_FORWARD_BOOST,

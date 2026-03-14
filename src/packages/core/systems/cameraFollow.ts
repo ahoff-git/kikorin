@@ -1,4 +1,4 @@
-import { query } from "bitecs";
+import { hasComponent, query } from "bitecs";
 import type { CoreWorld } from "../core";
 import { findHighestFloorTopAtPosition } from "./gravity";
 import { lookCameraAt, readCameraPosition, setCameraPosition } from "./render";
@@ -230,6 +230,12 @@ export function cameraFollowSystem(world: CoreWorld) {
   }
 
   const { Position } = world.components;
+  if (!hasComponent(world, eid, Position)) {
+    resetCameraTarget();
+    logSkipOnce("target entity no longer exists", { eid });
+    return;
+  }
+
   const tx = Position.x[eid];
   const ty = Position.y[eid];
   const tz = Position.z[eid];

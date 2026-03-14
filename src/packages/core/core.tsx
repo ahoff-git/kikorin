@@ -21,6 +21,7 @@ import {
   setupControlInputs,
 } from "./systems/controls";
 import { dirtyTransformsSystem } from "./systems/dirtyTransforms";
+import { fallCleanupSystem } from "./systems/entityCleanup";
 import { experienceSystem } from "./systems/experience";
 import { gravitySystem } from "./systems/gravity";
 import { healthSystem } from "./systems/health";
@@ -88,6 +89,7 @@ const WORLD_SYSTEMS = [
   gravitySystem,
   movementSystem,
   collisionSystem,
+  fallCleanupSystem,
   experienceSystem,
   healthSystem,
 ] as const satisfies readonly CoreSystem[];
