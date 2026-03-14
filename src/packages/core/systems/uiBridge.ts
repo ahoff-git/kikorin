@@ -1,51 +1,89 @@
+import { query } from "bitecs";
 import type { CoreWorld, Position } from "../core";
 import { eventBus } from "../mitt";
 
-export function uiBridgeSystem (world: CoreWorld) {
-        const { time, components, chillUpdater } = world;
-        chillUpdater.setUpdate({
-            updateKey: "ticksPerSecond",
-            updateFunction: sendTimeUpdate,
-            value: time,
-            minMS: 100
-        });
-        chillUpdater.setUpdate({
-            updateKey: "playerUpdate",
-            updateFunction: sendPlayerUpdate,
-            value: { ...components.Player[1] },
-            minMS: 100
-        });
-        chillUpdater.setUpdate({
-            updateKey: "playerUpdateLoc",
-            updateFunction: sendPlayerLocUpdate,
-            value: { x: components.Position.x[1], y: components.Position.y[1], z: components.Position.z[1] },
-            minMS: 200
-        });
-        chillUpdater.setUpdate({
-            updateKey: "controlsUpdate",
-            updateFunction: sendControlsUpdate,
-            value: world.controls.getStates().filter((state) => {
-                return state.active || state.triggerCount > 0 || state.activationCount > 0;
-            }).slice(0, 8),
-            minMS: 100
-        });
-        chillUpdater.check();
-    }
+const TIME_UPDATE_INTERVAL_MS = 100;
+const PLAYER_UPDATE_INTERVAL_MS = 100;
+const PLAYER_POSITION_UPDATE_INTERVAL_MS = 200;
+const CONTROLS_UPDATE_INTERVAL_MS = 100;
+const MAX_VISIBLE_CONTROL_STATES = 8;
 
-    function sendTimeUpdate(value: CoreWorld["time"]) {
-        eventBus.emit("ui:timeMetricsUpdate", { time: value });
-    }
+function findPrimaryPlayerEid(world: CoreWorld) {
+    const { Player } = world.components;
+    const playerEids = query(world, [Player]);
+    return playerEids[0] ?? null;
+}
 
-    function sendPlayerUpdate(value: CoreWorld["components"]["Player"][number]) {
-        eventBus.emit("ui:playerUpdate", { Player: value });
-    }
+function readPlayerPosition(world: CoreWorld, eid: number): Position {
+    const { Position } = world.components;
+    return {
+        x: Position.x[eid],
+        y: Position.y[eid],
+        z: Position.z[eid],
+    };
+}
 
-    function sendPlayerLocUpdate(value: Position) {
-        eventBus.emit("ui:playerUpdateLoc", { Player: value });
-    }
+function readTimeMetrics(world: CoreWorld) {
+    return { ...world.time };
+}
 
-    function sendControlsUpdate(
-        value: ReturnType<CoreWorld["controls"]["getStates"]>
-    ) {
-        eventBus.emit("ui:controlsUpdate", { controls: value });
-    }
+function getVisibleControlStates(world: CoreWorld) {
+    return world.controls
+        .getStates()
+        .filter((state) => state.active || state.triggerCount > 0 || state.activationCount > 0)
+        .slice(0, MAX_VISIBLE_CONTROL_STATES);
+}
+
+export function uiBridgeSystem(world: CoreWorld) {
+    const { chillUpdater } = world;
+    const playerEid = findPrimaryPlayerEid(world);
+    const player =
+        playerEid === null ? null : { ...world.components.Player[playerEid]! };
+    const playerPosition =
+        playerEid === null ? null : readPlayerPosition(world, playerEid);
+    const timeMetrics = readTimeMetrics(world);
+
+    chillUpdater.setUpdate({
+        updateKey: "timeMetrics",
+        updateFunction: sendTimeMetricsUpdate,
+        value: timeMetrics,
+        minMS: TIME_UPDATE_INTERVAL_MS,
+    });
+    chillUpdater.setUpdate({
+        updateKey: "player",
+        updateFunction: sendPlayerUpdate,
+        value: player,
+        minMS: PLAYER_UPDATE_INTERVAL_MS,
+    });
+    chillUpdater.setUpdate({
+        updateKey: "playerPosition",
+        updateFunction: sendPlayerPositionUpdate,
+        value: playerPosition,
+        minMS: PLAYER_POSITION_UPDATE_INTERVAL_MS,
+    });
+    chillUpdater.setUpdate({
+        updateKey: "controls",
+        updateFunction: sendControlsUpdate,
+        value: getVisibleControlStates(world),
+        minMS: CONTROLS_UPDATE_INTERVAL_MS,
+    });
+    chillUpdater.check();
+}
+
+function sendTimeMetricsUpdate(value: CoreWorld["time"]) {
+    eventBus.emit("ui:timeMetricsUpdate", { timeMetrics: value });
+}
+
+function sendPlayerUpdate(value: CoreWorld["components"]["Player"][number] | null) {
+    eventBus.emit("ui:playerUpdate", { player: value });
+}
+
+function sendPlayerPositionUpdate(value: Position | null) {
+    eventBus.emit("ui:playerPositionUpdate", { playerPosition: value });
+}
+
+function sendControlsUpdate(
+    value: ReturnType<CoreWorld["controls"]["getStates"]>
+) {
+    eventBus.emit("ui:controlsUpdate", { controlStates: value });
+}

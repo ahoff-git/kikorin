@@ -96,6 +96,7 @@ export function createCoreCommands<TWorld>(): CoreCommands<TWorld> {
 
     function clear() {
         queue.length = 0;
+        handlers.clear();
     }
 
     return { queue, handlers, enqueue, on, process, clear };

@@ -11,6 +11,8 @@ import {
 let scene: Scene | null = null;
 let camera: PerspectiveCamera | null = null;
 let renderer: WebGLRenderer | null = null;
+let rendererViewportWidth = 0;
+let rendererViewportHeight = 0;
 
 const objectsByEid = new Map<number, Object3D>();
 const poolsByKey = new Map<string, Object3D[]>();
@@ -53,6 +55,7 @@ export function renderSystem(world: CoreWorld) {
     return;
   }
 
+  syncRendererViewportSize();
   clearRenderSkipReason();
   renderFrameCount += 1;
   if (renderFrameCount % RENDER_DEBUG_FRAME_INTERVAL === 0) {
@@ -185,9 +188,46 @@ function clearRenderState() {
   scene?.clear();
   scene = null;
   camera = null;
+  rendererViewportWidth = 0;
+  rendererViewportHeight = 0;
 
   renderer?.dispose();
   renderer = null;
+}
+
+function updateCameraAspect(width: number, height: number) {
+  if (!camera) return;
+  camera.aspect = width / Math.max(height, 1);
+  camera.updateProjectionMatrix();
+}
+
+function setRendererViewportSize(width: number, height: number) {
+  if (!renderer) return false;
+
+  const nextWidth = Math.max(1, Math.round(width));
+  const nextHeight = Math.max(1, Math.round(height));
+  if (
+    rendererViewportWidth === nextWidth &&
+    rendererViewportHeight === nextHeight
+  ) {
+    return false;
+  }
+
+  rendererViewportWidth = nextWidth;
+  rendererViewportHeight = nextHeight;
+  renderer.setSize(nextWidth, nextHeight, false);
+  updateCameraAspect(nextWidth, nextHeight);
+  return true;
+}
+
+function syncRendererViewportSize() {
+  if (!renderer) return false;
+
+  const canvas = renderer.domElement;
+  const width = canvas.clientWidth || rendererViewportWidth || canvas.width || 1;
+  const height =
+    canvas.clientHeight || rendererViewportHeight || canvas.height || 1;
+  return setRendererViewportSize(width, height);
 }
 
 export function setupRenderer(canvas: HTMLCanvasElement | null) {
@@ -212,7 +252,7 @@ export function setupRenderer(canvas: HTMLCanvasElement | null) {
   });
 
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setSize(width, height, false);
+  setRendererViewportSize(width, height);
 
   logRenderDebug("renderer setup complete", {
     width,
@@ -224,6 +264,10 @@ export function setupRenderer(canvas: HTMLCanvasElement | null) {
     },
     pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
   });
+}
+
+export function disposeRenderer() {
+  clearRenderState();
 }
 
 function assertScene(): Scene {

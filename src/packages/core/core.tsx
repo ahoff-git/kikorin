@@ -9,7 +9,7 @@ import { experienceSystem } from './systems/experience'
 import { timeSystem } from './systems/time'
 import { uiBridgeSystem } from './systems/uiBridge'
 import { healthSystem } from './systems/health'
-import { renderSystem, setupRenderer } from './systems/render'
+import { disposeRenderer, renderSystem, setupRenderer } from './systems/render'
 import { dirtyTransformsSystem } from './systems/dirtyTransforms'
 import { commandsSystem, createCoreCommands } from './systems/commands'
 import { controlsSystem, createControls, setupControlInputs } from './systems/controls'
@@ -57,59 +57,56 @@ export { ControlSources, KeyboardControls, PointerControls } from './types'
 export { configureCuboidCollider, getTouchPairs, getTouchingEntities, markCollisionTransformDirty } from './systems/collision'
 export { markTransformDirty, rotateLocalVectorByEntityRotation, setEntityRotation } from './systems/transforms'
 
-function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000) {
-    let runGameLoop = false;
-    let schedulerRegistered = false;
-
-    const worldConfig: CoreWorld = {
+function createWorldConfig(maxEntities: number): CoreWorld {
+    return {
         components: {
             // They can be any shape you want
             // SoA:
             Position: {
-                x: new Float32Array(MAX_ENTITIES),
-                y: new Float32Array(MAX_ENTITIES),
-                z: new Float32Array(MAX_ENTITIES)
+                x: new Float32Array(maxEntities),
+                y: new Float32Array(maxEntities),
+                z: new Float32Array(maxEntities)
             },
             Velocity: {
-                x: new Float32Array(MAX_ENTITIES),
-                y: new Float32Array(MAX_ENTITIES),
-                z: new Float32Array(MAX_ENTITIES)
+                x: new Float32Array(maxEntities),
+                y: new Float32Array(maxEntities),
+                z: new Float32Array(maxEntities)
             },
             Rotation: {
-                yaw: new Float32Array(MAX_ENTITIES),
-                pitch: new Float32Array(MAX_ENTITIES),
-                roll: new Float32Array(MAX_ENTITIES)
+                yaw: new Float32Array(maxEntities),
+                pitch: new Float32Array(maxEntities),
+                roll: new Float32Array(maxEntities)
             },
             Collider: {
-                Active: new Int8Array(MAX_ENTITIES),
-                Sensor: new Int8Array(MAX_ENTITIES),
-                HalfWidth: new Float32Array(MAX_ENTITIES),
-                HalfHeight: new Float32Array(MAX_ENTITIES),
-                HalfDepth: new Float32Array(MAX_ENTITIES),
+                Active: new Int8Array(maxEntities),
+                Sensor: new Int8Array(maxEntities),
+                HalfWidth: new Float32Array(maxEntities),
+                HalfHeight: new Float32Array(maxEntities),
+                HalfDepth: new Float32Array(maxEntities),
             },
             Gravity: {
-                Grounded: new Int8Array(MAX_ENTITIES),
+                Grounded: new Int8Array(maxEntities),
             },
-            Floor: new Int8Array(MAX_ENTITIES),
+            Floor: new Int8Array(maxEntities),
             RenderDirtyFlags: {
-                DirtyTransformFlag: new Int8Array(MAX_ENTITIES), //set if Position/Rotation/Scale changes
+                DirtyTransformFlag: new Int8Array(maxEntities), //set if Position/Rotation/Scale changes
                 DirtyCount: 0, //increment as the list grows
-                DirtyList: new Int32Array(MAX_ENTITIES), //list of eids that have been changed 
-                DirtyFlagSet: new Int8Array(MAX_ENTITIES), //set to prevent duplicates in DirtyList
+                DirtyList: new Int32Array(maxEntities), //list of eids that have been changed
+                DirtyFlagSet: new Int8Array(maxEntities), //set to prevent duplicates in DirtyList
             },
             CollisionDirtyFlags: {
-                DirtyTransformFlag: new Int8Array(MAX_ENTITIES), //set if Position/Rotation/Scale/Collider changes
-                ConfigDirtyFlag: new Int8Array(MAX_ENTITIES), //set if collider configuration changes
+                DirtyTransformFlag: new Int8Array(maxEntities), //set if Position/Rotation/Scale/Collider changes
+                ConfigDirtyFlag: new Int8Array(maxEntities), //set if collider configuration changes
                 DirtyCount: 0, //increment as the list grows
-                DirtyList: new Int32Array(MAX_ENTITIES), //list of eids that have been changed
-                DirtyFlagSet: new Int8Array(MAX_ENTITIES), //set to prevent duplicates in DirtyList
+                DirtyList: new Int32Array(maxEntities), //list of eids that have been changed
+                DirtyFlagSet: new Int8Array(maxEntities), //set to prevent duplicates in DirtyList
             },
-            Render: new Int32Array(MAX_ENTITIES),
-            Health: new Int32Array(MAX_ENTITIES),
+            Render: new Int32Array(maxEntities),
+            Health: new Int32Array(maxEntities),
             // AoS:
             Player: [] as Player[]
         },
-        collision: createCollisionState(MAX_ENTITIES),
+        collision: createCollisionState(maxEntities),
         time: {
             delta: 0,
             elapsed: 0,
@@ -122,7 +119,12 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
         controls: createControls<CoreWorld>(),
         chillUpdater: createChillUpdater(),
     };
-    const world = createWorld<CoreWorld>(worldConfig);
+}
+
+function setupCoreWorld(canvas: HTMLCanvasElement | null, maxEntities = 100000) {
+    let runGameLoop = false;
+    let schedulerRegistered = false;
+    const world = createWorld<CoreWorld>(createWorldConfig(maxEntities));
     const controlInputs = setupControlInputs(world, canvas);
 
 
@@ -179,7 +181,10 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
     function dispose() {
         stop();
         controlInputs.disconnect();
+        world.commands.clear();
         world.controls.clear();
+        disposeRenderer();
+        resetCameraTarget();
     }
 
     setupRenderer(canvas);

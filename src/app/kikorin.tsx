@@ -59,6 +59,7 @@ const PLAYER_PITCH_DOWN_KEYS = [KeyboardControls.KeyK];
 const PLAYER_PITCH_SPEED = 1.5;
 const PLAYER_YAW_SPEED = 1.5;
 const PLAYER_MAX_PITCH = Math.PI * 0.45;
+const AMBIENT_PERSON_COUNT = 10000;
 
 function createPersonFaceMaterials(bodyColor: number, frontColor: number) {
     return [
@@ -95,29 +96,53 @@ function createFloorRenderMesh() {
     return mesh;
 }
 
-export type World = { UniqueTestThing: "Testing123" } & CoreWorld;
-export type WorldBox = CoreWorldBox & {world:World};
+export type World = CoreWorld;
+export type WorldBox = CoreWorldBox;
+
 function setupWorld(canvas: HTMLCanvasElement | null) {
-    console.log("DOING SETUP")
-    const worldBox = setupCoreWorld(canvas) as WorldBox;
+    const worldBox: WorldBox = setupCoreWorld(canvas);
     createFloor(worldBox.world, { x: 0, y: FLOOR_TOP_Y - FLOOR_HALF_HEIGHT, z: 0 });
-    const prime = createPerson(worldBox.world, { x: 0, y: 12, z: 0 }, { x: 0, y: 0, z: 0}, 100, { level: 0, experience: 0, name: `DoomPrime` });
+    const prime = createPrimePlayer(worldBox.world);
     registerPrimeControls(worldBox.world, prime);
     worldBox.setCameraFollowTarget(prime);
-    const numBlocks = 10000;
+    spawnAmbientPeople(worldBox.world);
+
+    return worldBox;
+}
+
+function createPrimePlayer(world: CoreWorld) {
+    return createPerson(
+        world,
+        { x: 0, y: 12, z: 0 },
+        { x: 0, y: 0, z: 0 },
+        100,
+        { level: 0, experience: 0, name: "DoomPrime" },
+    );
+}
+
+function spawnAmbientPeople(world: CoreWorld, count = AMBIENT_PERSON_COUNT) {
     const spawnRangeX = FLOOR_HALF_WIDTH - 4;
     const spawnRangeZ = FLOOR_HALF_DEPTH - 4;
-    for (let i = 0; i < numBlocks; i++) {
+
+    for (let i = 0; i < count; i += 1) {
         const moving = rng(0, 10) > 9; // 10% chance to be moving
-        const rvx = moving ? rng(-10, 10, 2) : 0;
-        const rvz = moving ? rng(-10, 10, 2) : 0;
-        const rx = rng(-spawnRangeX, spawnRangeX);
-        const ry = rng(FLOOR_TOP_Y + 4, FLOOR_TOP_Y + 60);
-        const rz = rng(-spawnRangeZ, spawnRangeZ);
-        createPerson(worldBox.world, { x: rx, y: ry, z: rz }, { x: rvx, y: 0, z: rvz }, 100, { level: 0, experience: 0, name: `Doom${i}` });
+        const velocity = {
+            x: moving ? rng(-10, 10, 2) : 0,
+            y: 0,
+            z: moving ? rng(-10, 10, 2) : 0,
+        };
+        const position = {
+            x: rng(-spawnRangeX, spawnRangeX),
+            y: rng(FLOOR_TOP_Y + 4, FLOOR_TOP_Y + 60),
+            z: rng(-spawnRangeZ, spawnRangeZ),
+        };
+
+        createPerson(world, position, velocity, 100, {
+            level: 0,
+            experience: 0,
+            name: `Doom${i}`,
+        });
     }
-    
-    return worldBox;
 }
 
 function registerPrimeControls(world: CoreWorld, eid: number) {
