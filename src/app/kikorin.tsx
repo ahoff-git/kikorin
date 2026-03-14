@@ -49,11 +49,14 @@ const PLAYER_JUMP_SPEED = 8;
 const PLAYER_FORWARD_BOOST = 10;
 const PLAYER_FORWARD_KEYS = [KeyboardControls.KeyW, KeyboardControls.ArrowUp];
 const PLAYER_BACKWARD_KEYS = [KeyboardControls.KeyS, KeyboardControls.ArrowDown];
-const PLAYER_LEFT_KEYS = [KeyboardControls.KeyA, KeyboardControls.ArrowLeft];
-const PLAYER_RIGHT_KEYS = [KeyboardControls.KeyD, KeyboardControls.ArrowRight];
+const PLAYER_STRAFE_LEFT_KEYS = [KeyboardControls.KeyQ];
+const PLAYER_STRAFE_RIGHT_KEYS = [KeyboardControls.KeyE];
+const PLAYER_LOOK_LEFT_KEYS = [KeyboardControls.KeyA, KeyboardControls.ArrowLeft];
+const PLAYER_LOOK_RIGHT_KEYS = [KeyboardControls.KeyD, KeyboardControls.ArrowRight];
 const PLAYER_PITCH_UP_KEYS = [KeyboardControls.KeyI];
 const PLAYER_PITCH_DOWN_KEYS = [KeyboardControls.KeyK];
 const PLAYER_PITCH_SPEED = 1.5;
+const PLAYER_YAW_SPEED = 1.5;
 const PLAYER_MAX_PITCH = Math.PI * 0.45;
 
 function createPersonRenderMesh() {
@@ -119,9 +122,10 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
         velocity.x[eid] *= drag;
         velocity.z[eid] *= drag;
 
-        const moveX = controls.getAxis(PLAYER_LEFT_KEYS, PLAYER_RIGHT_KEYS, ControlSources.Keyboard);
+        const moveX = controls.getAxis(PLAYER_STRAFE_LEFT_KEYS, PLAYER_STRAFE_RIGHT_KEYS, ControlSources.Keyboard);
         const moveZ = controls.getAxis(PLAYER_FORWARD_KEYS, PLAYER_BACKWARD_KEYS, ControlSources.Keyboard);
         const pitchAxis = controls.getAxis(PLAYER_PITCH_DOWN_KEYS, PLAYER_PITCH_UP_KEYS, ControlSources.Keyboard);
+        const yawAxis = controls.getAxis(PLAYER_LOOK_RIGHT_KEYS, PLAYER_LOOK_LEFT_KEYS, ControlSources.Keyboard);
         const localAcceleration = {
             x: moveX * PLAYER_ACCELERATION,
             y: 0,
@@ -133,13 +137,19 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
         velocity.y[eid] = clamp(velocity.y[eid] + worldAcceleration.y * dt, -PLAYER_MAX_SPEED, PLAYER_MAX_SPEED);
         velocity.z[eid] = clamp(velocity.z[eid] + worldAcceleration.z * dt, -PLAYER_MAX_SPEED, PLAYER_MAX_SPEED);
 
-        if (pitchAxis !== 0) {
-            const nextPitch = clamp(
-                Rotation.pitch[eid] + pitchAxis * PLAYER_PITCH_SPEED * dt,
-                -PLAYER_MAX_PITCH,
-                PLAYER_MAX_PITCH,
-            );
-            setEntityRotation(activeWorld, eid, { pitch: nextPitch });
+        if (pitchAxis !== 0 || yawAxis !== 0) {
+            const nextRotation: Parameters<typeof setEntityRotation>[2] = {};
+            if (pitchAxis !== 0) {
+                nextRotation.pitch = clamp(
+                    Rotation.pitch[eid] + pitchAxis * PLAYER_PITCH_SPEED * dt,
+                    -PLAYER_MAX_PITCH,
+                    PLAYER_MAX_PITCH,
+                );
+            }
+            if (yawAxis !== 0) {
+                nextRotation.yaw = Rotation.yaw[eid] + yawAxis * PLAYER_YAW_SPEED * dt;
+            }
+            setEntityRotation(activeWorld, eid, nextRotation);
         }
     });
 

@@ -146,7 +146,9 @@ export const PointerControls = {
 } as const
 
 export const KeyboardControls = {
+    KeyQ: "KeyQ",
     KeyW: "KeyW",
+    KeyE: "KeyE",
     KeyA: "KeyA",
     KeyS: "KeyS",
     KeyD: "KeyD",

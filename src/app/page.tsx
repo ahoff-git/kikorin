@@ -69,7 +69,7 @@ export default function Home() {
 function Header({ onBoostForward }: { onBoostForward: (event: MouseEvent<HTMLButtonElement>) => void }): ReactNode {
   return (
     <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-      <span>WASD / Arrow keys build momentum on the floor. I / K pitch up and down. Press Space or click the canvas to jump.</span>
+      <span>W / S move forward and back, Q / E strafe, A / D or Left / Right turn, and I / K pitch up and down. Press Space or click the canvas to jump.</span>
       <button type="button" onClick={onBoostForward}>
         React Boost Forward
       </button>
@@ -84,9 +84,10 @@ function LeftNav() {
       </div>
       <div style={{ lineHeight: 1.6, color: "#555" }}>
         Everything now falls until it lands on the floor, but floor contact alone will not trigger the orange touch
-        highlight. Move with WASD or the arrow keys, use I and K to pitch up and down, and press Space or click
-        inside the canvas to jump. The React Boost Forward button in the header also feeds the same control system,
-        so you can compare UI input with keyboard and pointer input.
+        highlight. Move forward and back with W and S, strafe with Q and E, turn with A and D or the left and right
+        arrow keys, use I and K to pitch up and down, and press Space or click inside the canvas to jump. The React
+        Boost Forward button in the header also feeds the same control system, so you can compare UI input with
+        keyboard and pointer input.
       </div>
     </div>
   )
