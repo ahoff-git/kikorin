@@ -38,6 +38,10 @@ export function rng(low: number, high: number, decimals: number | null = null): 
     return Math.round(randomValue * factor) / factor;
 }
 
+export function clamp(value: number, low: number, high: number) {
+    return Math.max(low, Math.min(high, value));
+}
+
 /**
  * Selects a random item from an array of a specific type.
  *

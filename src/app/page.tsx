@@ -1,9 +1,10 @@
 "use client"
-import { ReactNode, useEffect, useRef, useState } from "react"
+import { MouseEvent, ReactNode, useEffect, useRef, useState } from "react"
 import { setupWorld, WorldBox } from "./kikorin"
+import { PlayerReactControls } from "./kikorinControls";
 import { PageLayout } from "./kikorinLayout";
 import { eventBus } from "@/packages/core/mitt";
-import { Player, Position, Time } from "@/packages/core/types";
+import { ControlSources, ControlState, Player, Position, Time } from "@/packages/core/types";
 
 export default function Home() {
   console.log("render");
@@ -20,14 +21,26 @@ export default function Home() {
     worldRef.current = world
     console.log(world);
     return () => {
-      world.stop();
+      world.dispose();
     };
   }, [])
+
+  const handleBoostForward = (event: MouseEvent<HTMLButtonElement>) => {
+    worldRef.current?.world.controls.enqueue({
+      timestamp: event.timeStamp,
+      source: ControlSources.React,
+      controlId: PlayerReactControls.BoostForward,
+      phase: "trigger",
+      payload: {
+        kind: "button-click"
+      }
+    });
+  };
 
   return (
     <>
       <PageLayout
-        header={<Header />}
+        header={<Header onBoostForward={handleBoostForward} />}
         left={<LeftNav />}
         right={<RightPanel />}
         footer={<Footer />}
@@ -53,8 +66,15 @@ export default function Home() {
   }
 }
 
-function Header(): ReactNode {
-  return (<>Hi - I'm the Header</>)
+function Header({ onBoostForward }: { onBoostForward: (event: MouseEvent<HTMLButtonElement>) => void }): ReactNode {
+  return (
+    <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      <span>WASD / Arrow keys build momentum. I / K pitch up and down. Click the canvas to hop.</span>
+      <button type="button" onClick={onBoostForward}>
+        React Boost Forward
+      </button>
+    </div>
+  )
 }
 function LeftNav() {
   return (<>Hi - I'm the LeftNav</>)
@@ -64,18 +84,22 @@ function RightPanel() {
   const [playerData, setPlayerData] = useState<Player | null>(null);
   const [playerLoc, setPlayerLoc] = useState<Position | null>(null);
   const [timeData, setTimeData] = useState<Time | null>(null);
+  const [controlStates, setControlStates] = useState<ControlState[]>([]);
 
   useEffect(() => {
     const onTime = (v: any) => setTimeData(v.time);
     const onPlayer = (v: any) => setPlayerData(v.Player);
     const onPlayerLoc = (v: any) => { setPlayerLoc(v.Player) };
+    const onControls = (v: any) => setControlStates(v.controls);
     eventBus.on("ui:timeMetricsUpdate", onTime);
     eventBus.on("ui:playerUpdate", onPlayer);
     eventBus.on("ui:playerUpdateLoc", onPlayerLoc);
+    eventBus.on("ui:controlsUpdate", onControls);
     return () => {
       eventBus.off("ui:timeMetricsUpdate", onTime);
       eventBus.off("ui:playerUpdate", onPlayer);
       eventBus.off("ui:playerUpdateLoc", onPlayerLoc);
+      eventBus.off("ui:controlsUpdate", onControls);
     };
   }, []);
 
@@ -88,6 +112,18 @@ function RightPanel() {
         <div> XP:{(Math.round((playerData?.experience ?? 0) * 100) / 100)}</div>
         <div> Level:{Math.round(playerData?.level ?? 0)}</div>
         <div> Position: {playerLoc?.x ?? 0}, {playerLoc?.y ?? 0}, {playerLoc?.z ?? 0}</div>
+      </div>
+      <div style={{ marginTop: 12 }}>
+        <div>Controls:</div>
+        {controlStates.length === 0 ? (
+          <div>No controls seen yet</div>
+        ) : (
+          controlStates.map((controlState) => (
+            <div key={controlState.key}>
+              {controlState.key}: {controlState.active ? "active" : controlState.phase} for {Math.round(controlState.durationMs)}ms
+            </div>
+          ))
+        )}
       </div>
     </div>
   )

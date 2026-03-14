@@ -1,5 +1,19 @@
-import { rng } from "@/packages/util/random";
-import { configureCuboidCollider, setupCoreWorld, CoreWorld, CoreWorldBox, Position, Velocity, Player } from "../packages/core/core";
+import { clamp, rng } from "@/packages/util/random";
+import { PlayerReactControls } from "./kikorinControls";
+import {
+    configureCuboidCollider,
+    ControlSources,
+    KeyboardControls,
+    PointerControls,
+    rotateLocalVectorByEntityRotation,
+    setEntityRotation,
+    setupCoreWorld,
+    CoreWorld,
+    CoreWorldBox,
+    Position,
+    Velocity,
+    Player
+} from "../packages/core/core";
 import { addComponent, addEntity} from "bitecs";
 import { BoxGeometry, Mesh, MeshBasicMaterial } from "three";
 import { setObjectTransformByEid, upsertObjectByEid } from "../packages/core/systems/render";
@@ -7,6 +21,19 @@ import { setObjectTransformByEid, upsertObjectByEid } from "../packages/core/sys
 const PERSON_GEOMETRY = new BoxGeometry(1, 1, 1);
 const PERSON_BASE_MATERIAL = new MeshBasicMaterial({ color: 0x66ccff });
 const PERSON_TOUCH_MATERIAL = new MeshBasicMaterial({ color: 0xff6b3d });
+const PLAYER_ACCELERATION = 30;
+const PLAYER_MAX_SPEED = 18;
+const PLAYER_DRAG_PER_SECOND = 4;
+const PLAYER_CLICK_LIFT = 8;
+const PLAYER_FORWARD_BOOST = 10;
+const PLAYER_FORWARD_KEYS = [KeyboardControls.KeyW, KeyboardControls.ArrowUp];
+const PLAYER_BACKWARD_KEYS = [KeyboardControls.KeyS, KeyboardControls.ArrowDown];
+const PLAYER_LEFT_KEYS = [KeyboardControls.KeyA, KeyboardControls.ArrowLeft];
+const PLAYER_RIGHT_KEYS = [KeyboardControls.KeyD, KeyboardControls.ArrowRight];
+const PLAYER_PITCH_UP_KEYS = [KeyboardControls.KeyI];
+const PLAYER_PITCH_DOWN_KEYS = [KeyboardControls.KeyK];
+const PLAYER_PITCH_SPEED = 1.5;
+const PLAYER_MAX_PITCH = Math.PI * 0.45;
 
 function createPersonRenderMesh() {
     const mesh = new Mesh(PERSON_GEOMETRY, PERSON_BASE_MATERIAL);
@@ -21,6 +48,7 @@ function setupWorld(canvas: HTMLCanvasElement | null) {
     console.log("DOING SETUP")
     const worldBox = setupCoreWorld(canvas) as WorldBox;
     const prime = createPerson(worldBox.world, { x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 0}, 100, { level: 0, experience: 0, name: `DoomPrime` });
+    registerPrimeControls(worldBox.world, prime);
     worldBox.setCameraFollowTarget(prime);
     const numBlocks = 10000;
     for (let i = 0; i < numBlocks; i++) {
@@ -36,6 +64,53 @@ function setupWorld(canvas: HTMLCanvasElement | null) {
     }
     
     return worldBox;
+}
+
+function registerPrimeControls(world: CoreWorld, eid: number) {
+    world.controls.onTick((activeWorld, tick, controls) => {
+        const dt = tick.deltaSeconds;
+        if (dt === 0) return;
+
+        const drag = Math.max(0, 1 - PLAYER_DRAG_PER_SECOND * dt);
+        const { Velocity, Rotation } = activeWorld.components;
+        const velocity = Velocity;
+        velocity.x[eid] *= drag;
+        velocity.y[eid] *= drag;
+        velocity.z[eid] *= drag;
+
+        const moveX = controls.getAxis(PLAYER_LEFT_KEYS, PLAYER_RIGHT_KEYS, ControlSources.Keyboard);
+        const moveZ = controls.getAxis(PLAYER_FORWARD_KEYS, PLAYER_BACKWARD_KEYS, ControlSources.Keyboard);
+        const pitchAxis = controls.getAxis(PLAYER_PITCH_DOWN_KEYS, PLAYER_PITCH_UP_KEYS, ControlSources.Keyboard);
+        const localAcceleration = {
+            x: moveX * PLAYER_ACCELERATION,
+            y: 0,
+            z: moveZ * PLAYER_ACCELERATION,
+        };
+        const worldAcceleration = rotateLocalVectorByEntityRotation(activeWorld, eid, localAcceleration);
+
+        velocity.x[eid] = clamp(velocity.x[eid] + worldAcceleration.x * dt, -PLAYER_MAX_SPEED, PLAYER_MAX_SPEED);
+        velocity.y[eid] = clamp(velocity.y[eid] + worldAcceleration.y * dt, -PLAYER_MAX_SPEED, PLAYER_MAX_SPEED);
+        velocity.z[eid] = clamp(velocity.z[eid] + worldAcceleration.z * dt, -PLAYER_MAX_SPEED, PLAYER_MAX_SPEED);
+
+        if (pitchAxis !== 0) {
+            const nextPitch = clamp(
+                Rotation.pitch[eid] + pitchAxis * PLAYER_PITCH_SPEED * dt,
+                -PLAYER_MAX_PITCH,
+                PLAYER_MAX_PITCH,
+            );
+            setEntityRotation(activeWorld, eid, { pitch: nextPitch });
+        }
+    });
+
+    world.controls.on({ source: ControlSources.Pointer, controlId: PointerControls.Primary, phase: "trigger" }, (activeWorld) => {
+        const velocity = activeWorld.components.Velocity;
+        velocity.y[eid] = clamp(velocity.y[eid] + PLAYER_CLICK_LIFT, -PLAYER_MAX_SPEED, PLAYER_MAX_SPEED);
+    });
+
+    world.controls.on({ source: ControlSources.React, controlId: PlayerReactControls.BoostForward, phase: "trigger" }, (activeWorld) => {
+        const velocity = activeWorld.components.Velocity;
+        velocity.z[eid] = clamp(velocity.z[eid] - PLAYER_FORWARD_BOOST, -PLAYER_MAX_SPEED, PLAYER_MAX_SPEED);
+    });
 }
 
 function createPerson(world: World, position: Position, velocity: Velocity, health: number, player: Player) {

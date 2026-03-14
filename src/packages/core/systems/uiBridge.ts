@@ -21,6 +21,14 @@ export function uiBridgeSystem (world: CoreWorld) {
             value: { x: components.Position.x[1], y: components.Position.y[1], z: components.Position.z[1] },
             minMS: 200
         });
+        chillUpdater.setUpdate({
+            updateKey: "controlsUpdate",
+            updateFunction: sendControlsUpdate,
+            value: world.controls.getStates().filter((state) => {
+                return state.active || state.triggerCount > 0 || state.activationCount > 0;
+            }).slice(0, 8),
+            minMS: 100
+        });
         chillUpdater.check();
     }
 
@@ -34,4 +42,10 @@ export function uiBridgeSystem (world: CoreWorld) {
 
     function sendPlayerLocUpdate(value: CoreWorld["components"]["Position"]) {
         eventBus.emit("ui:playerUpdateLoc", { Player: value });
+    }
+
+    function sendControlsUpdate(
+        value: ReturnType<CoreWorld["controls"]["getStates"]>
+    ) {
+        eventBus.emit("ui:controlsUpdate", { controls: value });
     }

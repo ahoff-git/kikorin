@@ -7,6 +7,12 @@ export type Positions = {
     z: Float32Array
 }
 
+export type Vec3 = {
+    x: number,
+    y: number,
+    z: number
+}
+
 export type Position = {
     x: number,
     y: number,
@@ -91,6 +97,12 @@ export type Rotations = {
                 roll: Float32Array
 }
 
+export type Rotation = {
+    yaw: number,
+    pitch: number,
+    roll: number
+}
+
 export type CoreCommand = {
     sequence: number,
     timestamp: number,
@@ -117,6 +129,124 @@ export type CoreCommands<TWorld> = {
     clear: () => void
 }
 
+export const ControlSources = {
+    Keyboard: "keyboard",
+    Pointer: "pointer",
+    React: "react",
+} as const
+
+export const PointerControls = {
+    Primary: "primary",
+    Middle: "middle",
+    Secondary: "secondary",
+} as const
+
+export const KeyboardControls = {
+    KeyW: "KeyW",
+    KeyA: "KeyA",
+    KeyS: "KeyS",
+    KeyD: "KeyD",
+    KeyI: "KeyI",
+    KeyK: "KeyK",
+    ArrowUp: "ArrowUp",
+    ArrowDown: "ArrowDown",
+    ArrowLeft: "ArrowLeft",
+    ArrowRight: "ArrowRight",
+    Space: "Space",
+    Enter: "Enter",
+    Escape: "Escape",
+} as const
+
+export type ControlSourceId = typeof ControlSources[keyof typeof ControlSources]
+export type PointerControlId = typeof PointerControls[keyof typeof PointerControls]
+export type KeyboardControlId = typeof KeyboardControls[keyof typeof KeyboardControls]
+
+export type ControlPhase = "start" | "change" | "end" | "trigger" | "cancel"
+
+export type ControlEvent = {
+    sequence: number,
+    timestamp: number,
+    source: string,
+    controlId: string,
+    phase: ControlPhase,
+    value: number,
+    payload?: unknown
+}
+
+export type ControlEventInput = {
+    timestamp?: number,
+    source: string,
+    controlId: string,
+    phase: ControlPhase,
+    value?: number,
+    payload?: unknown
+}
+
+export type ControlState = {
+    key: string,
+    source: string,
+    controlId: string,
+    active: boolean,
+    value: number,
+    startedAt: number,
+    updatedAt: number,
+    durationMs: number,
+    totalDurationMs: number,
+    activationCount: number,
+    triggerCount: number,
+    lastTriggeredAt: number,
+    phase: ControlPhase,
+    payload?: unknown
+}
+
+export type ControlMatch<TValue extends string> = TValue | TValue[] | "*"
+
+export type ControlFilter = {
+    source?: ControlMatch<string>,
+    controlId?: ControlMatch<string>
+}
+
+export type ControlEventFilter = ControlFilter & {
+    phase?: ControlMatch<ControlPhase>
+}
+
+export type ControlEventHandler<TWorld> = (
+    world: TWorld,
+    event: ControlEvent,
+    state: ControlState,
+    controls: CoreControls<TWorld>
+) => void
+
+export type ControlTickHandler<TWorld> = (
+    world: TWorld,
+    tick: ControlTick,
+    controls: CoreControls<TWorld>
+) => void
+
+export type ControlTick = {
+    timestamp: number,
+    deltaMs: number,
+    deltaSeconds: number,
+    elapsedMs: number
+}
+
+export type CoreControls<TWorld> = {
+    queue: ControlEvent[],
+    states: Map<string, ControlState>,
+    enqueue: (event: ControlEventInput) => number,
+    on: (filter: ControlEventFilter, handler: ControlEventHandler<TWorld>) => () => void,
+    onTick: (handler: ControlTickHandler<TWorld>) => () => void,
+    process: (world: TWorld, tick?: ControlTick) => void,
+    getState: (controlId: string, source?: string) => ControlState | undefined,
+    getStates: () => ControlState[],
+    getActiveStates: () => ControlState[],
+    isActive: (controlId: string, source?: string) => boolean,
+    isAnyActive: (controlIds: string[], source?: string) => boolean,
+    getAxis: (negativeControlIds: string[], positiveControlIds: string[], source?: string) => number,
+    cancelActive: (filter?: ControlFilter, timestamp?: number) => void,
+    clear: () => void
+}
+
 export type CoreWorld = {
     components: {
         Position: Positions,
@@ -132,6 +262,7 @@ export type CoreWorld = {
     collision: CollisionState,
     time: Time,
     commands: CoreCommands<CoreWorld>,
+    controls: CoreControls<CoreWorld>,
     chillUpdater: ReturnType<typeof import('../util/chillUpdate').createChillUpdater<any>>
 }
 
@@ -139,6 +270,7 @@ export type CoreWorldBox = {
     world: CoreWorld
     start: () => void
     stop: () => void
+    dispose: () => void
     setCameraFollowTarget: (eid: number, opts?: { offset?: Partial<Position> }) => void
     setCameraLookAtTarget: (eid: number, opts?: { position?: Partial<Position> }) => void
     resetCameraTarget: () => void

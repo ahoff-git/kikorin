@@ -12,11 +12,26 @@ import { healthSystem } from './systems/health'
 import { renderSystem, setupRenderer } from './systems/render'
 import { dirtyTransformsSystem } from './systems/dirtyTransforms'
 import { commandsSystem, createCoreCommands } from './systems/commands'
+import { controlsSystem, createControls, setupControlInputs } from './systems/controls'
 import { cameraFollowSystem, resetCameraTarget, setCameraFollowTarget, setCameraLookAtTarget } from './systems/cameraFollow'
 import { collisionSystem, createCollisionState, setupCollisionSystem } from './systems/collision'
+import { markTransformDirty, rotateLocalVectorByEntityRotation, setEntityRotation } from './systems/transforms'
 import type { CoreWorld, Player } from './types'
 export type {
     CollisionDirtyFlags,
+    ControlEvent,
+    ControlEventFilter,
+    ControlEventHandler,
+    ControlEventInput,
+    ControlFilter,
+    ControlMatch,
+    ControlPhase,
+    ControlSourceId,
+    ControlState,
+    ControlTick,
+    ControlTickHandler,
+    CoreControls,
+    KeyboardControlId,
     CollisionState,
     ColliderShapes,
     CoreCommand,
@@ -29,12 +44,17 @@ export type {
     Players,
     Position,
     Positions,
+    PointerControlId,
+    Rotation,
     Time,
     TouchPairList,
+    Vec3,
     Velocities,
     Velocity,
 } from './types'
+export { ControlSources, KeyboardControls, PointerControls } from './types'
 export { configureCuboidCollider, getTouchPairs, getTouchingEntities, markCollisionTransformDirty } from './systems/collision'
+export { markTransformDirty, rotateLocalVectorByEntityRotation, setEntityRotation } from './systems/transforms'
 
 function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000) {
     let runGameLoop = false;
@@ -94,14 +114,17 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
             ticksPerSecond: 0
         },
         commands: createCoreCommands<CoreWorld>(),
+        controls: createControls<CoreWorld>(),
         chillUpdater: createChillUpdater<any>(),
     };
     const world = createWorld<CoreWorld>(worldConfig);
+    const controlInputs = setupControlInputs(world, canvas);
 
 
     function worldTick(world: CoreWorld) {
-        commandsSystem(world);
         timeSystem(world)
+        controlsSystem(world)
+        commandsSystem(world);
         movementSystem(world)
         collisionSystem(world)
         experienceSystem(world)
@@ -147,6 +170,12 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
         Crono.Stop();
     }
 
+    function dispose() {
+        stop();
+        controlInputs.disconnect();
+        world.controls.clear();
+    }
+
     setupRenderer(canvas);
     setupCollisionSystem(world);
     resetCameraTarget();
@@ -158,7 +187,7 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
 
     // addToScene(cube);
 
-    return { world, start, stop, setCameraFollowTarget, setCameraLookAtTarget, resetCameraTarget };
+    return { world, start, stop, dispose, setCameraFollowTarget, setCameraLookAtTarget, resetCameraTarget };
 
 }
 
