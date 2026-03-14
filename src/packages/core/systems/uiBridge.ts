@@ -1,4 +1,4 @@
-import { CoreWorld } from "../core";
+import type { CoreWorld, Position } from "../core";
 import { eventBus } from "../mitt";
 
 export function uiBridgeSystem (world: CoreWorld) {
@@ -40,7 +40,7 @@ export function uiBridgeSystem (world: CoreWorld) {
         eventBus.emit("ui:playerUpdate", { Player: value });
     }
 
-    function sendPlayerLocUpdate(value: CoreWorld["components"]["Position"]) {
+    function sendPlayerLocUpdate(value: Position) {
         eventBus.emit("ui:playerUpdateLoc", { Player: value });
     }
 

@@ -4,7 +4,6 @@ import {
     configureCuboidCollider,
     ControlSources,
     KeyboardControls,
-    PointerControls,
     rotateLocalVectorByEntityRotation,
     setEntityRotation,
     setupCoreWorld,
@@ -151,10 +150,6 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
             }
             setEntityRotation(activeWorld, eid, nextRotation);
         }
-    });
-
-    world.controls.on({ source: ControlSources.Pointer, controlId: PointerControls.Primary, phase: "trigger" }, (activeWorld) => {
-        jump(activeWorld);
     });
 
     world.controls.on({ source: ControlSources.Keyboard, controlId: KeyboardControls.Space, phase: "start" }, (activeWorld) => {

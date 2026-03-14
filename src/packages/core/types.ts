@@ -271,7 +271,7 @@ export type CoreWorld = {
     time: Time,
     commands: CoreCommands<CoreWorld>,
     controls: CoreControls<CoreWorld>,
-    chillUpdater: ReturnType<typeof import('../util/chillUpdate').createChillUpdater<any>>
+    chillUpdater: ReturnType<typeof import('../util/chillUpdate').createChillUpdater>
 }
 
 export type CoreWorldBox = {
@@ -280,6 +280,7 @@ export type CoreWorldBox = {
     stop: () => void
     dispose: () => void
     setCameraFollowTarget: (eid: number, opts?: { offset?: Partial<Position> }) => void
+    adjustCameraFollowOrbit: (deltaYaw: number, deltaPitch: number) => void
     setCameraLookAtTarget: (eid: number, opts?: { position?: Partial<Position> }) => void
     resetCameraTarget: () => void
 }

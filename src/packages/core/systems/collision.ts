@@ -4,7 +4,6 @@ import RAPIER, {
     ColliderDesc,
     type Rotation as RapierRotation,
     type Vector as RapierVector,
-    type World as RapierWorld,
 } from '@dimforge/rapier3d-compat'
 import { hasComponent } from 'bitecs'
 import type { CollisionState, CoreWorld } from '../types'

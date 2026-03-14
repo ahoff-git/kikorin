@@ -21,9 +21,9 @@ export function movementSystem(world: CoreWorld) {
         const vx = velX[eid]
         const vy = velY[eid]
         const vz = velZ[eid]
-        let nextX = posX[eid] + vx * dt
+        const nextX = posX[eid] + vx * dt
         let nextY = posY[eid] + vy * dt
-        let nextZ = posZ[eid] + vz * dt
+        const nextZ = posZ[eid] + vz * dt
 
         if (
             hasComponent(world, eid, Gravity) &&

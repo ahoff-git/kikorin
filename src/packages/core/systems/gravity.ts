@@ -50,7 +50,7 @@ function fillWorldHalfExtents(world: CoreWorld, eid: number, out: WorldHalfExten
 
 function findSupportingFloorY(
     world: CoreWorld,
-    floorEids: readonly number[],
+    floorEids: ArrayLike<number>,
     eid: number,
     currentY: number,
     desiredX: number,
@@ -97,7 +97,7 @@ function findSupportingFloorY(
 
 function hasFloorSupportAt(
     world: CoreWorld,
-    floorEids: readonly number[],
+    floorEids: ArrayLike<number>,
     eid: number,
     x: number,
     y: number,
@@ -117,7 +117,7 @@ function hasFloorSupportAt(
 
 export function resolveFloorPosition(
     world: CoreWorld,
-    floorEids: readonly number[],
+    floorEids: ArrayLike<number>,
     eid: number,
     desiredX: number,
     desiredY: number,

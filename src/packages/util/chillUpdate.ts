@@ -7,20 +7,20 @@ export type ChillUpdaterSetParams<TValue> = {
   minMS?: number;
 };
 
-export type ChillUpdater<TValue> = {
+export type ChillUpdater = {
   check: () => boolean;
-  setUpdate: (params: ChillUpdaterSetParams<TValue>) => void;
+  setUpdate: <TValue>(params: ChillUpdaterSetParams<TValue>) => void;
 };
 
-type UpdateRecord<TValue> = {
-  updateFunction: ChillUpdateFn<TValue>;
-  value: TValue;
+type UpdateRecord = {
+  updateFunction: ChillUpdateFn<unknown>;
+  value: unknown;
   minMS: number;
   lastSentAt: number;
 };
 
-function createChillUpdater<TValue>(): ChillUpdater<TValue> {
-  const records = new Map<string, UpdateRecord<TValue>>();
+function createChillUpdater(): ChillUpdater {
+  const records = new Map<string, UpdateRecord>();
   const pendingKeys = new Set<string>();
   const getNow = (): number => {
     if (typeof performance !== "undefined" && typeof performance.now === "function") {
@@ -58,12 +58,17 @@ function createChillUpdater<TValue>(): ChillUpdater<TValue> {
     return didSend;
   };
 
-  const setUpdate = ({ updateKey, updateFunction, value, minMS = 0 }: ChillUpdaterSetParams<TValue>): void => {
+  const setUpdate = <TValue>({
+    updateKey,
+    updateFunction,
+    value,
+    minMS = 0,
+  }: ChillUpdaterSetParams<TValue>): void => {
     const safeMinMS = minMS > 0 ? minMS : 0;
     const existing = records.get(updateKey);
 
     if (existing !== undefined) {
-      existing.updateFunction = updateFunction;
+      existing.updateFunction = updateFunction as ChillUpdateFn<unknown>;
       existing.value = value;
       if (safeMinMS !== 0) existing.minMS = safeMinMS;
       pendingKeys.add(updateKey);
@@ -72,7 +77,7 @@ function createChillUpdater<TValue>(): ChillUpdater<TValue> {
 
     pendingKeys.add(updateKey);
     records.set(updateKey, {
-      updateFunction,
+      updateFunction: updateFunction as ChillUpdateFn<unknown>,
       value,
       minMS: safeMinMS,
       lastSentAt: 0

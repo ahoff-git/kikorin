@@ -13,10 +13,9 @@ import { renderSystem, setupRenderer } from './systems/render'
 import { dirtyTransformsSystem } from './systems/dirtyTransforms'
 import { commandsSystem, createCoreCommands } from './systems/commands'
 import { controlsSystem, createControls, setupControlInputs } from './systems/controls'
-import { cameraFollowSystem, resetCameraTarget, setCameraFollowTarget, setCameraLookAtTarget } from './systems/cameraFollow'
+import { adjustCameraFollowOrbit, cameraFollowSystem, resetCameraTarget, setCameraFollowTarget, setCameraLookAtTarget } from './systems/cameraFollow'
 import { collisionSystem, createCollisionState, setupCollisionSystem } from './systems/collision'
 import { gravitySystem } from './systems/gravity'
-import { markTransformDirty, rotateLocalVectorByEntityRotation, setEntityRotation } from './systems/transforms'
 import type { CoreWorld, Player } from './types'
 export type {
     CollisionDirtyFlags,
@@ -121,7 +120,7 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
         },
         commands: createCoreCommands<CoreWorld>(),
         controls: createControls<CoreWorld>(),
-        chillUpdater: createChillUpdater<any>(),
+        chillUpdater: createChillUpdater(),
     };
     const world = createWorld<CoreWorld>(worldConfig);
     const controlInputs = setupControlInputs(world, canvas);
@@ -194,7 +193,7 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, MAX_ENTITIES = 100000)
 
     // addToScene(cube);
 
-    return { world, start, stop, dispose, setCameraFollowTarget, setCameraLookAtTarget, resetCameraTarget };
+    return { world, start, stop, dispose, setCameraFollowTarget, adjustCameraFollowOrbit, setCameraLookAtTarget, resetCameraTarget };
 
 }
 
