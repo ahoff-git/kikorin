@@ -1,5 +1,6 @@
 import type { RingBuffer } from '../util/ringBuffer'
 import type { Collider as RapierCollider, World as RapierWorld } from '@dimforge/rapier3d-compat'
+import type { Object3D } from 'three'
 import type { FlaginatorState } from './systems/flaginator'
 
 export type Positions = {
@@ -38,6 +39,36 @@ export type Player = {
     level: number;
     experience: number;
     name: string;
+}
+
+export type CoreColliderConfig = {
+    halfWidth: number,
+    halfHeight: number,
+    halfDepth: number,
+    sensor?: boolean,
+    active?: boolean
+}
+
+export type CoreEntityBlueprint = {
+    position?: Partial<Position>,
+    velocity?: Partial<Velocity>,
+    rotation?: Partial<Rotation>,
+    collider?: CoreColliderConfig,
+    render?: boolean,
+    renderMesh?: Object3D | (() => Object3D),
+    gravity?: boolean | {
+        grounded?: boolean
+    },
+    floor?: boolean,
+    health?: number,
+    player?: Player
+}
+
+export type SetupCoreWorldOptions = {
+    canvas?: HTMLCanvasElement | null,
+    maxEntities?: number,
+    autoStart?: boolean,
+    worldTickRate?: number
 }
 
 export type Time = {
@@ -276,13 +307,23 @@ export type CoreWorld = {
     flaginator: FlaginatorState<CoreWorld, string>
 }
 
+export type CoreComponentName = keyof CoreWorld["components"]
+
 export type CoreWorldBox = {
     world: CoreWorld
     start: () => void
     stop: () => void
     dispose: () => void
+    isRunning: () => boolean
+    spawnEntity: (definition: CoreEntityBlueprint) => number
+    destroyEntity: (eid: number) => void
+    queryEntities: (componentNames: readonly CoreComponentName[]) => number[]
+    hasEntityComponents: (eid: number, componentNames: readonly CoreComponentName[]) => boolean
+    setEntityPosition: (eid: number, position: Partial<Position>) => boolean
+    setEntityVelocity: (eid: number, velocity: Partial<Velocity>) => boolean
     setCameraFollowTarget: (eid: number, opts?: { offset?: Partial<Position> }) => void
     adjustCameraFollowOrbit: (deltaYaw: number, deltaPitch: number) => void
     setCameraLookAtTarget: (eid: number, opts?: { position?: Partial<Position> }) => void
+    setEntityRotation: (eid: number, rotation: Partial<Rotation>) => boolean
     resetCameraTarget: () => void
 }

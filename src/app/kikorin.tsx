@@ -1,16 +1,15 @@
-import { addComponent, addEntity, hasComponent, query } from "bitecs";
 import {
   CoreFlags,
-  configureCuboidCollider,
   ControlSources,
   evaluateFlaginatorFlag,
+  hasEntityComponents,
   KeyboardControls,
   markFlaginatorComponentChanged,
-  markFlaginatorMarkerChanged,
-  resetFlaginatorEntity,
+  queryEntities,
   rotateLocalVectorByEntityRotation,
   setEntityRotation,
   setupCoreWorld,
+  spawnEntity,
   type CoreWorld,
   type CoreWorldBox,
   type Player,
@@ -19,12 +18,7 @@ import {
   type Velocity,
 } from "@/packages/core/core";
 import { findHighestFloorTopAtPosition } from "@/packages/core/systems/gravity";
-import {
-  setObjectTransformByEid,
-  upsertObjectByEid,
-} from "@/packages/core/systems/render";
 import { clamp, rng } from "@/packages/util/random";
-import type { Object3D } from "three";
 import {
   BoxGeometry,
   EdgesGeometry,
@@ -99,7 +93,6 @@ const PLAYER_PITCH_SPEED = 1.5;
 const PLAYER_YAW_SPEED = 1.5;
 const PLAYER_MAX_PITCH = Math.PI * 0.45;
 const AMBIENT_PERSON_COUNT = 8000;
-const ZERO_ROTATION: Rotation = { pitch: 0, yaw: 0, roll: 0 };
 
 function createPersonFaceMaterials(bodyColor: number, frontColor: number) {
   return [
@@ -123,14 +116,7 @@ const PERSON_TOUCH_MATERIALS = createPersonFaceMaterials(
 export type World = CoreWorld;
 export type WorldBox = CoreWorldBox;
 
-type EntityComponent = World["components"][keyof World["components"]];
 type FloorEids = ArrayLike<number>;
-type RenderableEntityOptions = {
-  position: Position;
-  rotation?: Rotation;
-  collider: Parameters<typeof configureCuboidCollider>[2];
-  createRenderMesh: () => Object3D;
-};
 
 function createPersonRenderMesh() {
   const mesh = new Mesh(PERSON_GEOMETRY, PERSON_BASE_MATERIALS);
@@ -153,7 +139,10 @@ function createFloorRenderMesh() {
 }
 
 function setupWorld(canvas: HTMLCanvasElement | null) {
-  const worldBox: WorldBox = setupCoreWorld(canvas);
+  const worldBox: WorldBox = setupCoreWorld({
+    canvas,
+    autoStart: true,
+  });
   createFloor(worldBox.world, FLOOR_POSITION);
 
   const floorEids = queryFloorEids(worldBox.world);
@@ -166,12 +155,7 @@ function setupWorld(canvas: HTMLCanvasElement | null) {
 }
 
 function queryFloorEids(world: World): FloorEids {
-  return query(world, [
-    world.components.Floor,
-    world.components.Position,
-    world.components.Rotation,
-    world.components.Collider,
-  ]);
+  return queryEntities(world, ["Floor", "Position", "Rotation", "Collider"]);
 }
 
 function createPrimePlayer(world: CoreWorld, floorEids: FloorEids) {
@@ -223,13 +207,13 @@ function spawnAmbientPeople(
 
 function registerPrimeControls(world: CoreWorld, eid: number) {
   const isControllingPrime = (activeWorld: CoreWorld) => {
-    const { Gravity, Player, Rotation, Velocity } = activeWorld.components;
     return (
-      hasComponent(activeWorld, eid, Player) &&
-      hasComponent(activeWorld, eid, Velocity) &&
-      hasComponent(activeWorld, eid, Rotation) &&
-      hasComponent(activeWorld, eid, Gravity) &&
-      Player[eid]?.name === "DoomPrime"
+      hasEntityComponents(activeWorld, eid, [
+        "Player",
+        "Velocity",
+        "Rotation",
+        "Gravity",
+      ]) && activeWorld.components.Player[eid]?.name === "DoomPrime"
     );
   };
 
@@ -365,86 +349,6 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
   );
 }
 
-function createEntityWithComponents(
-  world: World,
-  components: readonly EntityComponent[],
-) {
-  const eid = addEntity(world);
-  resetFlaginatorEntity(world, eid);
-  for (const component of components) {
-    addComponent(world, eid, component as never);
-  }
-  return eid;
-}
-
-function assignPosition(
-  world: World,
-  eid: number,
-  position: Position,
-) {
-  world.components.Position.x[eid] = position.x;
-  world.components.Position.y[eid] = position.y;
-  world.components.Position.z[eid] = position.z;
-  markFlaginatorComponentChanged(world, "Position", eid);
-}
-
-function assignVelocity(
-  world: World,
-  eid: number,
-  velocity: Velocity,
-) {
-  world.components.Velocity.x[eid] = velocity.x;
-  world.components.Velocity.y[eid] = velocity.y;
-  world.components.Velocity.z[eid] = velocity.z;
-  markFlaginatorComponentChanged(world, "Velocity", eid);
-}
-
-function assignRotation(
-  world: World,
-  eid: number,
-  rotation: Rotation = ZERO_ROTATION,
-) {
-  world.components.Rotation.pitch[eid] = rotation.pitch;
-  world.components.Rotation.yaw[eid] = rotation.yaw;
-  world.components.Rotation.roll[eid] = rotation.roll;
-  markFlaginatorComponentChanged(world, "Rotation", eid);
-}
-
-function syncRenderMesh(
-  eid: number,
-  position: Position,
-  rotation: Rotation,
-  createRenderMesh: () => Object3D,
-) {
-  upsertObjectByEid(eid, createRenderMesh);
-  setObjectTransformByEid(
-    eid,
-    position.x,
-    position.y,
-    position.z,
-    rotation.pitch,
-    rotation.yaw,
-    rotation.roll,
-  );
-}
-
-function initializeRenderableEntity(
-  world: World,
-  eid: number,
-  {
-    position,
-    rotation = ZERO_ROTATION,
-    collider,
-    createRenderMesh,
-  }: RenderableEntityOptions,
-) {
-  assignPosition(world, eid, position);
-  assignRotation(world, eid, rotation);
-  world.components.Render[eid] = 1;
-  configureCuboidCollider(world, eid, collider);
-  syncRenderMesh(eid, position, rotation, createRenderMesh);
-}
-
 function clampPersonSpawnPositionToFloor(
   world: World,
   position: Position,
@@ -475,69 +379,30 @@ function createPerson(
   player: Player,
   floorEids: FloorEids = queryFloorEids(world),
 ) {
-  const {
-    Position,
-    Velocity,
-    Rotation,
-    Player,
-    Health,
-    Render,
-    Collider,
-    Gravity,
-  } = world.components;
   const spawnPosition = clampPersonSpawnPositionToFloor(
     world,
     position,
     floorEids,
   );
-  const eid = createEntityWithComponents(world, [
-    Position,
-    Velocity,
-    Rotation,
-    Collider,
-    Gravity,
-    Player,
-    Health,
-    Render,
-  ]);
 
-  assignVelocity(world, eid, velocity);
-  Gravity.Grounded[eid] = 0;
-  markFlaginatorComponentChanged(world, "Gravity", eid);
-  Health[eid] = health;
-  markFlaginatorComponentChanged(world, "Health", eid);
-  markFlaginatorMarkerChanged(world, "HealthChanged", eid);
-  Player[eid] = player;
-  markFlaginatorComponentChanged(world, "Player", eid);
-
-  initializeRenderableEntity(world, eid, {
+  return spawnEntity(world, {
     position: spawnPosition,
+    velocity,
+    gravity: true,
+    health,
+    player,
     collider: PERSON_COLLIDER,
-    createRenderMesh: createPersonRenderMesh,
+    renderMesh: createPersonRenderMesh,
   });
-
-  return eid;
 }
 
 function createFloor(world: World, position: Position) {
-  const { Position, Rotation, Render, Collider, Floor } = world.components;
-  const eid = createEntityWithComponents(world, [
-    Position,
-    Rotation,
-    Collider,
-    Render,
-    Floor,
-  ]);
-
-  Floor[eid] = 1;
-  markFlaginatorComponentChanged(world, "Floor", eid);
-  initializeRenderableEntity(world, eid, {
+  return spawnEntity(world, {
     position,
+    floor: true,
     collider: FLOOR_COLLIDER,
-    createRenderMesh: createFloorRenderMesh,
+    renderMesh: createFloorRenderMesh,
   });
-
-  return eid;
 }
 
 export { setupWorld };

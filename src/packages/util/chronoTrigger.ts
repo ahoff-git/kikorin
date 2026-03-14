@@ -11,7 +11,7 @@ interface ScheduledTask {
     lastCatchupWarningMs: number;
 }
 
-interface ChronoTrigger {
+export interface ChronoTrigger {
     Start: () => void;
     Stop: () => void;
     runAt: (options: { name?: string; callback: (deltaMs: number) => void; fpsTarget?: number }) => number;
@@ -20,7 +20,7 @@ interface ChronoTrigger {
     AverageFPS: () => number;
 }
 
-function createChronoTrigger(): ChronoTrigger {
+export function createChronoTrigger(): ChronoTrigger {
     const scheduledTasks: ScheduledTask[] = [];
     const taskIndexById = new Map<number, number>();
     let nextTaskId = 1;
@@ -152,5 +152,4 @@ function createChronoTrigger(): ChronoTrigger {
     return { Start, Stop, runAt, dispose, CurrentFPS, AverageFPS };
 }
 
-// Exporting the library
 export const Crono = createChronoTrigger();

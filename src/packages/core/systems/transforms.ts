@@ -1,5 +1,5 @@
 import { Euler, Vector3 } from "three";
-import type { CoreWorld, Rotation, Vec3 } from "../types";
+import type { CoreWorld, Position, Rotation, Vec3, Velocity } from "../types";
 import {
   markFlaginatorComponentChanged,
   markFlaginatorMarkerChanged,
@@ -24,6 +24,67 @@ export function markTransformDirty(world: CoreWorld, eid: number) {
   if (Collider.Active[eid]) {
     markCollisionTransformDirty(world, eid);
   }
+}
+
+export function setEntityPosition(
+  world: CoreWorld,
+  eid: number,
+  position: Partial<Position>,
+): boolean {
+  const { Position } = world.components;
+  let didChange = false;
+
+  if (position.x !== undefined && Position.x[eid] !== position.x) {
+    Position.x[eid] = position.x;
+    didChange = true;
+  }
+
+  if (position.y !== undefined && Position.y[eid] !== position.y) {
+    Position.y[eid] = position.y;
+    didChange = true;
+  }
+
+  if (position.z !== undefined && Position.z[eid] !== position.z) {
+    Position.z[eid] = position.z;
+    didChange = true;
+  }
+
+  if (didChange) {
+    markFlaginatorComponentChanged(world, "Position", eid);
+    markTransformDirty(world, eid);
+  }
+
+  return didChange;
+}
+
+export function setEntityVelocity(
+  world: CoreWorld,
+  eid: number,
+  velocity: Partial<Velocity>,
+): boolean {
+  const { Velocity } = world.components;
+  let didChange = false;
+
+  if (velocity.x !== undefined && Velocity.x[eid] !== velocity.x) {
+    Velocity.x[eid] = velocity.x;
+    didChange = true;
+  }
+
+  if (velocity.y !== undefined && Velocity.y[eid] !== velocity.y) {
+    Velocity.y[eid] = velocity.y;
+    didChange = true;
+  }
+
+  if (velocity.z !== undefined && Velocity.z[eid] !== velocity.z) {
+    Velocity.z[eid] = velocity.z;
+    didChange = true;
+  }
+
+  if (didChange) {
+    markFlaginatorComponentChanged(world, "Velocity", eid);
+  }
+
+  return didChange;
 }
 
 export function setEntityRotation(

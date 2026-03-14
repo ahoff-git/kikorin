@@ -1,8 +1,17 @@
 import { createWorld, hasComponent } from "bitecs";
-import { Crono } from "../util/chronoTrigger";
+import { createChronoTrigger } from "../util/chronoTrigger";
 import { createChillUpdater } from "../util/chillUpdate";
 import { createRingBuffer } from "../util/ringBuffer";
 import { CoreFlagCustomSources, CoreFlags } from "./coreFlags";
+import {
+  destroyEntity,
+  hasEntityComponents,
+  queryEntities,
+  setEntityPosition,
+  setEntityRotation,
+  setEntityVelocity,
+  spawnEntity,
+} from "./entities";
 import {
   adjustCameraFollowOrbit,
   cameraFollowSystem,
@@ -39,12 +48,19 @@ import { movementSystem } from "./systems/movement";
 import { disposeRenderer, renderSystem, setupRenderer } from "./systems/render";
 import { timeSystem } from "./systems/time";
 import { uiBridgeSystem } from "./systems/uiBridge";
-import type { CoreWorld, Player } from "./types";
+import type {
+  CoreWorld,
+  CoreWorldBox,
+  Player,
+  SetupCoreWorldOptions,
+} from "./types";
 
 export type {
+  CoreColliderConfig,
   CollisionDirtyFlags,
   CollisionState,
   ColliderShapes,
+  CoreComponentName,
   ControlEvent,
   ControlEventFilter,
   ControlEventHandler,
@@ -61,6 +77,7 @@ export type {
   CoreCommandInput,
   CoreCommands,
   CoreControls,
+  CoreEntityBlueprint,
   CoreWorld,
   CoreWorldBox,
   GravityState,
@@ -76,6 +93,7 @@ export type {
   Vec3,
   Velocities,
   Velocity,
+  SetupCoreWorldOptions,
 } from "./types";
 export type { CoreFlagCustomSourceName, CoreFlagName } from "./coreFlags";
 export type {
@@ -100,9 +118,17 @@ export {
   markCollisionTransformDirty,
 } from "./systems/collision";
 export {
+  destroyEntity,
+  hasEntityComponents,
+  queryEntities,
+  spawnEntity,
+} from "./entities";
+export {
   markTransformDirty,
+  setEntityPosition,
   rotateLocalVectorByEntityRotation,
   setEntityRotation,
+  setEntityVelocity,
 } from "./systems/transforms";
 export {
   advanceFlaginatorTick,
@@ -270,13 +296,78 @@ function createCoreWorldConfig(maxEntities: number): CoreWorld {
   };
 }
 
-function setupCoreWorld(canvas: HTMLCanvasElement | null, maxEntities = 100000) {
-  let runGameLoop = false;
-  let schedulerRegistered = false;
+function normalizeSetupCoreWorldOptions(
+  canvasOrOptions:
+    | HTMLCanvasElement
+    | null
+    | SetupCoreWorldOptions
+    | undefined,
+  legacyMaxEntities: number,
+): Required<SetupCoreWorldOptions> {
+  if (isSetupCoreWorldOptions(canvasOrOptions)) {
+    return {
+      canvas: canvasOrOptions.canvas ?? null,
+      maxEntities: canvasOrOptions.maxEntities ?? legacyMaxEntities,
+      autoStart: canvasOrOptions.autoStart ?? false,
+      worldTickRate: canvasOrOptions.worldTickRate ?? 60,
+    };
+  }
 
-  const world = createWorld<CoreWorld>(createCoreWorldConfig(maxEntities));
+  if (
+    canvasOrOptions === null ||
+    canvasOrOptions === undefined ||
+    (typeof HTMLCanvasElement !== "undefined" &&
+      canvasOrOptions instanceof HTMLCanvasElement)
+  ) {
+    return {
+      canvas: canvasOrOptions ?? null,
+      maxEntities: legacyMaxEntities,
+      autoStart: false,
+      worldTickRate: 60,
+    };
+  }
+
+  return {
+    canvas: null,
+    maxEntities: legacyMaxEntities,
+    autoStart: false,
+    worldTickRate: 60,
+  };
+}
+
+function isSetupCoreWorldOptions(
+  value: HTMLCanvasElement | null | SetupCoreWorldOptions | undefined,
+): value is SetupCoreWorldOptions {
+  if (value === null || value === undefined) return false;
+  if (
+    typeof HTMLCanvasElement !== "undefined" &&
+    value instanceof HTMLCanvasElement
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function setupCoreWorld(
+  canvasOrOptions: HTMLCanvasElement | null | SetupCoreWorldOptions = null,
+  legacyMaxEntities = 100000,
+) {
+  const options = normalizeSetupCoreWorldOptions(
+    canvasOrOptions,
+    legacyMaxEntities,
+  );
+  let runGameLoop = false;
+  let disposed = false;
+  const scheduler = createChronoTrigger();
+  let worldTaskId: number | null = null;
+  let renderTaskId: number | null = null;
+
+  const world = createWorld<CoreWorld>(
+    createCoreWorldConfig(options.maxEntities),
+  );
   registerCoreFlags(world);
-  const controlInputs = setupControlInputs(world, canvas);
+  const controlInputs = setupControlInputs(world, options.canvas);
 
   function worldTick(activeWorld: CoreWorld) {
     runSystems(activeWorld, WORLD_SYSTEMS);
@@ -290,39 +381,50 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, maxEntities = 100000) 
     runSystems(activeWorld, RENDER_SYSTEMS);
   }
 
+  function ensureSchedulerTasks() {
+    if (worldTaskId !== null && renderTaskId !== null) return;
+
+    worldTaskId = scheduler.runAt({
+      name: "worldTick",
+      fpsTarget: options.worldTickRate,
+      callback: () => {
+        if (!runGameLoop) return;
+        worldTick(world);
+      },
+    });
+    renderTaskId = scheduler.runAt({
+      name: "renderSystem",
+      callback: () => {
+        if (!runGameLoop) return;
+        renderTick(world);
+      },
+    });
+  }
+
   function start() {
-    if (runGameLoop) return;
+    if (disposed || runGameLoop) return;
     runGameLoop = true;
-
-    if (!schedulerRegistered) {
-      Crono.runAt({
-        name: "worldTick",
-        fpsTarget: 60,
-        callback: () => {
-          if (!runGameLoop) return;
-          worldTick(world);
-        },
-      });
-      Crono.runAt({
-        name: "renderSystem",
-        callback: () => {
-          if (!runGameLoop) return;
-          renderTick(world);
-        },
-      });
-      schedulerRegistered = true;
-    }
-
-    Crono.Start();
+    ensureSchedulerTasks();
+    scheduler.Start();
   }
 
   function stop() {
     runGameLoop = false;
-    Crono.Stop();
+    scheduler.Stop();
   }
 
   function dispose() {
+    if (disposed) return;
+    disposed = true;
     stop();
+    if (worldTaskId !== null) {
+      scheduler.dispose(worldTaskId);
+      worldTaskId = null;
+    }
+    if (renderTaskId !== null) {
+      scheduler.dispose(renderTaskId);
+      renderTaskId = null;
+    }
     controlInputs.disconnect();
     world.commands.clear();
     world.controls.clear();
@@ -330,20 +432,38 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, maxEntities = 100000) 
     resetCameraTarget();
   }
 
-  setupRenderer(canvas);
+  setupRenderer(options.canvas);
   setupCollisionSystem(world);
   resetCameraTarget();
 
-  return {
+  const worldBox: CoreWorldBox = {
     world,
     start,
     stop,
     dispose,
+    isRunning: () => runGameLoop,
+    spawnEntity: (definition) => spawnEntity(world, definition),
+    destroyEntity: (eid) => {
+      destroyEntity(world, eid);
+    },
+    queryEntities: (componentNames) => queryEntities(world, componentNames),
+    hasEntityComponents: (eid, componentNames) => {
+      return hasEntityComponents(world, eid, componentNames);
+    },
+    setEntityPosition: (eid, position) => setEntityPosition(world, eid, position),
+    setEntityVelocity: (eid, velocity) => setEntityVelocity(world, eid, velocity),
     setCameraFollowTarget,
     adjustCameraFollowOrbit,
     setCameraLookAtTarget,
+    setEntityRotation: (eid, rotation) => setEntityRotation(world, eid, rotation),
     resetCameraTarget,
   };
+
+  if (options.autoStart) {
+    start();
+  }
+
+  return worldBox;
 }
 
 export { setupCoreWorld };

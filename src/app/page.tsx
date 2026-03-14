@@ -99,7 +99,6 @@ export default function Home() {
     canvas.style.cursor = "grab";
     const world = setupWorld(canvas);
     worldRef.current = world;
-    world.start();
 
     const cameraDragController = createCameraDragController(
       canvas,
