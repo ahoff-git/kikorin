@@ -48,6 +48,42 @@ function fillWorldHalfExtents(world: CoreWorld, eid: number, out: WorldHalfExten
     out.z = Math.abs(m31) * hx + Math.abs(m32) * hy + Math.abs(m33) * hz
 }
 
+export function findHighestFloorTopAtPosition(
+    world: CoreWorld,
+    floorEids: ArrayLike<number>,
+    desiredX: number,
+    desiredZ: number,
+    maxFloorTop = Number.POSITIVE_INFINITY,
+) {
+    const { Position } = world.components
+    let bestFloorTop = Number.NEGATIVE_INFINITY
+
+    for (let i = 0; i < floorEids.length; i += 1) {
+        const floorEid = floorEids[i]!
+        fillWorldHalfExtents(world, floorEid, floorHalfExtents)
+
+        if (
+            Math.abs(desiredX - Position.x[floorEid]) > floorHalfExtents.x ||
+            Math.abs(desiredZ - Position.z[floorEid]) > floorHalfExtents.z
+        ) {
+            continue
+        }
+
+        const floorTop = Position.y[floorEid] + floorHalfExtents.y
+        if (floorTop > maxFloorTop) continue
+
+        if (floorTop > bestFloorTop) {
+            bestFloorTop = floorTop
+        }
+    }
+
+    if (!Number.isFinite(bestFloorTop)) {
+        return null
+    }
+
+    return bestFloorTop
+}
+
 function findSupportingFloorY(
     world: CoreWorld,
     floorEids: ArrayLike<number>,

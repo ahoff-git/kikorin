@@ -1,4 +1,6 @@
+import { query } from "bitecs";
 import type { CoreWorld } from "../core";
+import { findHighestFloorTopAtPosition } from "./gravity";
 import { lookCameraAt, readCameraPosition, setCameraPosition } from "./render";
 
 type Vec3 = { x: number; y: number; z: number };
@@ -9,6 +11,9 @@ const DEFAULT_FOLLOW_OFFSET: Vec3 = { x: 0, y: 4, z: 10 };
 const DEFAULT_STATIONARY_POSITION: Vec3 = { x: 0, y: 4, z: 10 };
 const MIN_FOLLOW_DISTANCE = 0.1;
 const MAX_FOLLOW_PITCH = Math.PI * 0.48;
+const CAMERA_GROUND_CLEARANCE = 0.1;
+const CAMERA_PITCH_DRAG_MIN_RESPONSE = 0.2;
+const CAMERA_PITCH_DRAG_EDGE_EXPONENT = 2;
 const CAMERA_DEBUG = false;
 const CAMERA_DEBUG_FRAME_INTERVAL = 30;
 
@@ -82,6 +87,48 @@ function clearSkipReason() {
   lastSkipReason = null;
 }
 
+function reduceFollowPitchDelta(deltaPitch: number): number {
+  if (deltaPitch === 0) return 0;
+
+  const normalizedPitch = Math.min(
+    1,
+    Math.abs(cameraState.followPitch) / MAX_FOLLOW_PITCH,
+  );
+  const response =
+    CAMERA_PITCH_DRAG_MIN_RESPONSE +
+    (1 - CAMERA_PITCH_DRAG_MIN_RESPONSE) *
+      (1 - Math.pow(normalizedPitch, CAMERA_PITCH_DRAG_EDGE_EXPONENT));
+
+  return deltaPitch * response;
+}
+
+function clampCameraHeightToFloor(
+  world: CoreWorld,
+  desiredPosition: Vec3,
+  currentCameraPosition: Vec3,
+): boolean {
+  const { Collider, Floor, Position, Rotation } = world.components;
+  const floorEids = query(world, [Floor, Position, Rotation, Collider]);
+  if (floorEids.length === 0) return false;
+
+  // Ignore floors above the current camera height so the camera does not jump to ceilings.
+  const maxFloorTop = Math.max(currentCameraPosition.y, desiredPosition.y) + CAMERA_GROUND_CLEARANCE;
+  const floorTop = findHighestFloorTopAtPosition(
+    world,
+    floorEids,
+    desiredPosition.x,
+    desiredPosition.z,
+    maxFloorTop,
+  );
+  if (floorTop === null) return false;
+
+  const minCameraY = floorTop + CAMERA_GROUND_CLEARANCE;
+  if (desiredPosition.y >= minCameraY) return false;
+
+  desiredPosition.y = minCameraY;
+  return true;
+}
+
 syncFollowOrbitFromOffset();
 
 export function resetCameraTarget() {
@@ -120,13 +167,15 @@ export function adjustCameraFollowOrbit(deltaYaw: number, deltaPitch: number) {
   if (cameraState.mode !== "follow") return;
   if (deltaYaw === 0 && deltaPitch === 0) return;
 
+  const reducedDeltaPitch = reduceFollowPitchDelta(deltaPitch);
   cameraState.followYaw += deltaYaw;
-  cameraState.followPitch = clampFollowPitch(cameraState.followPitch + deltaPitch);
+  cameraState.followPitch = clampFollowPitch(cameraState.followPitch + reducedDeltaPitch);
   syncFollowOffsetFromOrbit();
 
   logCameraDebug("adjust follow orbit", {
     deltaYaw,
     deltaPitch,
+    reducedDeltaPitch,
     followOffset: {
       x: cameraState.followOffset.x,
       y: cameraState.followOffset.y,
@@ -206,6 +255,18 @@ export function cameraFollowSystem(world: CoreWorld) {
     desiredCameraZ = p.z;
   }
 
+  const desiredCameraPosition = { x: desiredCameraX, y: desiredCameraY, z: desiredCameraZ };
+  const currentCameraPosition = { ...desiredCameraPosition };
+  readCameraPosition(currentCameraPosition);
+  const cameraClampedToFloor = clampCameraHeightToFloor(
+    world,
+    desiredCameraPosition,
+    currentCameraPosition,
+  );
+  desiredCameraX = desiredCameraPosition.x;
+  desiredCameraY = desiredCameraPosition.y;
+  desiredCameraZ = desiredCameraPosition.z;
+
   const setPositionOk = setCameraPosition(
     desiredCameraX,
     desiredCameraY,
@@ -230,6 +291,7 @@ export function cameraFollowSystem(world: CoreWorld) {
         y: desiredCameraY,
         z: desiredCameraZ,
       },
+      cameraClampedToFloor,
       cameraReadBackOk: readBackOk,
       cameraReadBackPosition: {
         x: cameraPosition.x,

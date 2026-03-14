@@ -26,8 +26,10 @@ import { setObjectTransformByEid, upsertObjectByEid } from "../packages/core/sys
 
 const PERSON_GEOMETRY = new BoxGeometry(1, 1, 1);
 const PERSON_EDGE_GEOMETRY = new EdgesGeometry(PERSON_GEOMETRY);
-const PERSON_BASE_MATERIAL = new MeshBasicMaterial({ color: 0x66ccff });
-const PERSON_TOUCH_MATERIAL = new MeshBasicMaterial({ color: 0xff6b3d });
+const PERSON_BODY_COLOR = 0x66ccff;
+const PERSON_FRONT_COLOR = 0xffe082;
+const PERSON_TOUCH_COLOR = 0xff6b3d;
+const PERSON_TOUCH_FRONT_COLOR = 0xffc46b;
 const PERSON_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x16324f });
 const FLOOR_HALF_WIDTH = 240;
 const FLOOR_HALF_HEIGHT = 1;
@@ -58,13 +60,28 @@ const PLAYER_PITCH_SPEED = 1.5;
 const PLAYER_YAW_SPEED = 1.5;
 const PLAYER_MAX_PITCH = Math.PI * 0.45;
 
+function createPersonFaceMaterials(bodyColor: number, frontColor: number) {
+    return [
+        new MeshBasicMaterial({ color: bodyColor }),
+        new MeshBasicMaterial({ color: bodyColor }),
+        new MeshBasicMaterial({ color: bodyColor }),
+        new MeshBasicMaterial({ color: bodyColor }),
+        new MeshBasicMaterial({ color: bodyColor }),
+        // BoxGeometry groups are +X, -X, +Y, -Y, +Z, -Z. This project treats -Z as forward.
+        new MeshBasicMaterial({ color: frontColor }),
+    ];
+}
+
+const PERSON_BASE_MATERIALS = createPersonFaceMaterials(PERSON_BODY_COLOR, PERSON_FRONT_COLOR);
+const PERSON_TOUCH_MATERIALS = createPersonFaceMaterials(PERSON_TOUCH_COLOR, PERSON_TOUCH_FRONT_COLOR);
+
 function createPersonRenderMesh() {
-    const mesh = new Mesh(PERSON_GEOMETRY, PERSON_BASE_MATERIAL);
+    const mesh = new Mesh(PERSON_GEOMETRY, PERSON_BASE_MATERIALS);
     const outline = new LineSegments(PERSON_EDGE_GEOMETRY, PERSON_EDGE_MATERIAL);
     outline.renderOrder = 1;
     outline.scale.setScalar(1.001);
-    mesh.userData.baseMaterial = PERSON_BASE_MATERIAL;
-    mesh.userData.touchMaterial = PERSON_TOUCH_MATERIAL;
+    mesh.userData.baseMaterial = PERSON_BASE_MATERIALS;
+    mesh.userData.touchMaterial = PERSON_TOUCH_MATERIALS;
     mesh.add(outline);
     return mesh;
 }
