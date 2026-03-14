@@ -16,6 +16,7 @@ import {
   adjustCameraFollowOrbit,
   cameraFollowSystem,
   resetCameraTarget,
+  setCameraFollowOrbitControlActive,
   setCameraFollowTarget,
   setCameraLookAtTarget,
 } from "./systems/cameraFollow";
@@ -454,6 +455,7 @@ function setupCoreWorld(
     setEntityVelocity: (eid, velocity) => setEntityVelocity(world, eid, velocity),
     setCameraFollowTarget,
     adjustCameraFollowOrbit,
+    setCameraFollowOrbitControlActive,
     setCameraLookAtTarget,
     setEntityRotation: (eid, rotation) => setEntityRotation(world, eid, rotation),
     resetCameraTarget,

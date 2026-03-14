@@ -2,7 +2,7 @@
 
 import type {
   CSSProperties,
-  MouseEvent,
+  MouseEvent as ReactMouseEvent,
   RefObject,
 } from "react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
@@ -19,6 +19,8 @@ import { PlayerReactControls } from "./kikorinControls";
 import { PageLayout } from "./kikorinLayout";
 
 const CAMERA_DRAG_SENSITIVITY = 0.006;
+const PRIMARY_POINTER_BUTTON_MASK = 1;
+const SECONDARY_POINTER_BUTTON_MASK = 2;
 
 const canvasViewportStyle: CSSProperties = {
   flex: 1,
@@ -32,7 +34,7 @@ const canvasStyle: CSSProperties = {
   height: "100%",
   display: "block",
   touchAction: "none",
-  cursor: "grab",
+  cursor: "default",
 };
 
 const headerStyle: CSSProperties = {
@@ -66,10 +68,10 @@ const controlsSectionStyle: CSSProperties = {
 };
 
 const CONTROL_INSTRUCTIONS =
-  "W / S move forward and back, Q / E strafe, A / D or Left / Right turn, I / K pitch up and down, drag inside the canvas to orbit the camera, and press Space to jump.";
+  "W / S move forward and back, Q / E strafe, A / D or Left / Right turn, I / K pitch up and down, left click to fire pointer events, right drag inside the canvas to orbit the camera, and press Space to jump.";
 
 const LEFT_NAV_CONTROL_INSTRUCTIONS =
-  "Move forward and back with W and S, strafe with Q and E, turn with A and D or the left and right arrow keys, use I and K to pitch up and down, drag inside the canvas to orbit the camera, and press Space to jump.";
+  "Move forward and back with W and S, strafe with Q and E, turn with A and D or the left and right arrow keys, use I and K to pitch up and down, left click to fire pointer events, right drag inside the canvas to orbit the camera, and press Space to jump.";
 
 const CONTROL_SYSTEM_NOTE =
   "The React Boost Forward button in the header also feeds the same control system, so you can compare UI input with keyboard input.";
@@ -96,7 +98,7 @@ export default function Home() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    canvas.style.cursor = "grab";
+    canvas.style.cursor = "default";
     const world = setupWorld(canvas);
     worldRef.current = world;
 
@@ -108,6 +110,9 @@ export default function Home() {
           -deltaY * CAMERA_DRAG_SENSITIVITY,
         );
       },
+      (active) => {
+        world.setCameraFollowOrbitControlActive(active);
+      },
     );
 
     return () => {
@@ -118,7 +123,7 @@ export default function Home() {
     };
   }, []);
 
-  function handleBoostForward(event: MouseEvent<HTMLButtonElement>) {
+  function handleBoostForward(event: ReactMouseEvent<HTMLButtonElement>) {
     worldRef.current?.world.controls.enqueue({
       timestamp: event.timeStamp,
       source: ControlSources.React,
@@ -205,24 +210,43 @@ function useEventBusState<TValue, TEventName extends EventBusEventName>(
 function createCameraDragController(
   canvas: HTMLCanvasElement,
   onDrag: (deltaX: number, deltaY: number) => void,
+  onDragActiveChange?: (active: boolean) => void,
 ): CameraDragController {
   let activePointerId: number | null = null;
+  let activeButtonsMask = 0;
   let lastClientX = 0;
   let lastClientY = 0;
 
+  function getCameraDragButton(event: PointerEvent): number {
+    return event.pointerType === "mouse" ? 2 : 0;
+  }
+
+  function getCameraDragButtonsMask(event: PointerEvent): number {
+    return event.pointerType === "mouse"
+      ? SECONDARY_POINTER_BUTTON_MASK
+      : PRIMARY_POINTER_BUTTON_MASK;
+  }
+
   function stopDragging(pointerId?: number) {
     if (pointerId !== undefined && activePointerId !== pointerId) return;
+    const wasDragging = activePointerId !== null;
     activePointerId = null;
-    canvas.style.cursor = "grab";
+    activeButtonsMask = 0;
+    canvas.style.cursor = "default";
+    if (wasDragging) {
+      onDragActiveChange?.(false);
+    }
   }
 
   function onPointerDown(event: PointerEvent) {
-    if (event.button !== 0) return;
+    if (event.button !== getCameraDragButton(event)) return;
 
     activePointerId = event.pointerId;
+    activeButtonsMask = getCameraDragButtonsMask(event);
     lastClientX = event.clientX;
     lastClientY = event.clientY;
     canvas.style.cursor = "grabbing";
+    onDragActiveChange?.(true);
 
     try {
       canvas.setPointerCapture(event.pointerId);
@@ -235,7 +259,7 @@ function createCameraDragController(
 
   function onPointerMove(event: PointerEvent) {
     if (activePointerId !== event.pointerId) return;
-    if ((event.buttons & 1) === 0) {
+    if ((event.buttons & activeButtonsMask) === 0) {
       stopDragging(event.pointerId);
       return;
     }
@@ -269,11 +293,16 @@ function createCameraDragController(
     stopDragging();
   }
 
+  function onContextMenu(event: MouseEvent) {
+    event.preventDefault();
+  }
+
   canvas.addEventListener("pointerdown", onPointerDown);
   canvas.addEventListener("pointermove", onPointerMove);
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("pointercancel", onPointerCancel);
   canvas.addEventListener("lostpointercapture", onLostPointerCapture);
+  canvas.addEventListener("contextmenu", onContextMenu);
 
   return {
     disconnect() {
@@ -282,6 +311,7 @@ function createCameraDragController(
       canvas.removeEventListener("pointerup", onPointerUp);
       canvas.removeEventListener("pointercancel", onPointerCancel);
       canvas.removeEventListener("lostpointercapture", onLostPointerCapture);
+      canvas.removeEventListener("contextmenu", onContextMenu);
       stopDragging();
     },
   };
@@ -302,7 +332,7 @@ function CanvasViewport({
 function Header({
   onBoostForward,
 }: {
-  onBoostForward: (event: MouseEvent<HTMLButtonElement>) => void;
+  onBoostForward: (event: ReactMouseEvent<HTMLButtonElement>) => void;
 }) {
   return (
     <div style={headerStyle}>

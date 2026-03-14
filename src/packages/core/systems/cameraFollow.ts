@@ -27,6 +27,8 @@ const cameraState: {
   followDistance: number;
   followYaw: number;
   followPitch: number;
+  lastTargetYaw: number;
+  orbitControlActive: boolean;
   stationaryPosition: Vec3;
 } = {
   mode: "off",
@@ -35,6 +37,8 @@ const cameraState: {
   followDistance: 1,
   followYaw: 0,
   followPitch: 0,
+  lastTargetYaw: Number.NaN,
+  orbitControlActive: false,
   stationaryPosition: { ...DEFAULT_STATIONARY_POSITION },
 };
 
@@ -47,6 +51,14 @@ function assignVec3(target: Vec3, source?: PartialVec3) {
 
 function clampFollowPitch(pitch: number): number {
   return Math.max(-MAX_FOLLOW_PITCH, Math.min(MAX_FOLLOW_PITCH, pitch));
+}
+
+function normalizeAngleDelta(delta: number): number {
+  if (!Number.isFinite(delta)) return 0;
+  if (delta <= -Math.PI || delta > Math.PI) {
+    return Math.atan2(Math.sin(delta), Math.cos(delta));
+  }
+  return delta;
 }
 
 function syncFollowOrbitFromOffset() {
@@ -134,6 +146,8 @@ syncFollowOrbitFromOffset();
 export function resetCameraTarget() {
   cameraState.mode = "off";
   cameraState.targetEid = -1;
+  cameraState.lastTargetYaw = Number.NaN;
+  cameraState.orbitControlActive = false;
   logCameraDebug("reset target", {
     mode: cameraState.mode,
     targetEid: cameraState.targetEid,
@@ -146,6 +160,7 @@ export function setCameraFollowTarget(
 ) {
   cameraState.mode = "follow";
   cameraState.targetEid = eid;
+  cameraState.lastTargetYaw = Number.NaN;
   assignVec3(cameraState.followOffset, opts.offset);
   syncFollowOrbitFromOffset();
   logCameraDebug("set follow target", {
@@ -189,6 +204,11 @@ export function adjustCameraFollowOrbit(deltaYaw: number, deltaPitch: number) {
   });
 }
 
+export function setCameraFollowOrbitControlActive(active: boolean) {
+  if (cameraState.mode !== "follow") return;
+  cameraState.orbitControlActive = active;
+}
+
 export function setCameraLookAtTarget(
   eid: number,
   opts: { position?: PartialVec3 } = {}
@@ -229,7 +249,7 @@ export function cameraFollowSystem(world: CoreWorld) {
     return;
   }
 
-  const { Position } = world.components;
+  const { Position, Rotation } = world.components;
   if (!hasComponent(world, eid, Position)) {
     resetCameraTarget();
     logSkipOnce("target entity no longer exists", { eid });
@@ -250,6 +270,26 @@ export function cameraFollowSystem(world: CoreWorld) {
   let desiredCameraZ: number;
 
   if (cameraState.mode === "follow") {
+    if (hasComponent(world, eid, Rotation)) {
+      const targetYaw = Rotation.yaw[eid];
+      if (Number.isFinite(targetYaw)) {
+        if (
+          Number.isFinite(cameraState.lastTargetYaw) &&
+          !cameraState.orbitControlActive
+        ) {
+          cameraState.followYaw += normalizeAngleDelta(
+            targetYaw - cameraState.lastTargetYaw,
+          );
+          syncFollowOffsetFromOrbit();
+        }
+        cameraState.lastTargetYaw = targetYaw;
+      } else {
+        cameraState.lastTargetYaw = Number.NaN;
+      }
+    } else {
+      cameraState.lastTargetYaw = Number.NaN;
+    }
+
     const offset = cameraState.followOffset;
     desiredCameraX = tx + offset.x;
     desiredCameraY = ty + offset.y;
@@ -318,6 +358,7 @@ export function cameraFollowSystem(world: CoreWorld) {
               distance: cameraState.followDistance,
               yaw: cameraState.followYaw,
               pitch: cameraState.followPitch,
+              orbitControlActive: cameraState.orbitControlActive,
             }
           : null,
       worldTimeDelta: world.time.delta,
