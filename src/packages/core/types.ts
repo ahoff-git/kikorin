@@ -114,6 +114,16 @@ export type TouchPairList = {
     B: Int32Array
 }
 
+export type BounceSuggestionState = {
+    Active: Int8Array,
+    x: Float32Array,
+    y: Float32Array,
+    z: Float32Array,
+    DirtyList: Int32Array,
+    DirtyCount: number,
+    DirtyFlagSet: Int8Array
+}
+
 export type CollisionState = {
     ready: boolean,
     initStarted: boolean,
@@ -126,6 +136,7 @@ export type CollisionState = {
     touchPairIndexByKey: Map<number, number>,
     touchPairKeysByIndex: number[],
     scratchTouching: number[],
+    bounceSuggestions: BounceSuggestionState,
 }
 
 export type Rotations = {

@@ -57,6 +57,7 @@ import type {
 } from "./types";
 
 export type {
+  BounceSuggestionState,
   CoreColliderConfig,
   CollisionDirtyFlags,
   CollisionState,
@@ -114,6 +115,7 @@ export { CoreFlagCustomSources, CoreFlags } from "./coreFlags";
 export { ControlSources, KeyboardControls, PointerControls } from "./types";
 export {
   configureCuboidCollider,
+  getBounceSuggestion,
   getTouchPairs,
   getTouchingEntities,
   markCollisionTransformDirty,
