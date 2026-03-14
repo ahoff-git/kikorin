@@ -1,8 +1,12 @@
 "use client";
 
-import type { CSSProperties, MouseEvent, RefObject } from "react";
-import { useEffect, useRef, useState } from "react";
-import { eventBus } from "@/packages/core/mitt";
+import type {
+  CSSProperties,
+  MouseEvent,
+  RefObject,
+} from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { eventBus, type EventBusEvents } from "@/packages/core/mitt";
 import {
   ControlSources,
   type ControlState,
@@ -61,6 +65,15 @@ const controlsSectionStyle: CSSProperties = {
   marginTop: 12,
 };
 
+const CONTROL_INSTRUCTIONS =
+  "W / S move forward and back, Q / E strafe, A / D or Left / Right turn, I / K pitch up and down, drag inside the canvas to orbit the camera, and press Space to jump.";
+
+const LEFT_NAV_CONTROL_INSTRUCTIONS =
+  "Move forward and back with W and S, strafe with Q and E, turn with A and D or the left and right arrow keys, use I and K to pitch up and down, drag inside the canvas to orbit the camera, and press Space to jump.";
+
+const CONTROL_SYSTEM_NOTE =
+  "The React Boost Forward button in the header also feeds the same control system, so you can compare UI input with keyboard input.";
+
 type WorldUiState = {
   player: Player | null;
   playerPosition: Position | null;
@@ -71,6 +84,8 @@ type WorldUiState = {
 type CameraDragController = {
   disconnect: () => void;
 };
+
+type EventBusEventName = keyof EventBusEvents;
 
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -134,40 +149,30 @@ function useWorldUiState(): WorldUiState {
   const [timeMetrics, setTimeMetrics] = useState<Time | null>(null);
   const [controlStates, setControlStates] = useState<ControlState[]>([]);
 
-  useEffect(() => {
-    const onTimeMetrics = ({ timeMetrics }: { timeMetrics: Time }) => {
-      setTimeMetrics(timeMetrics);
-    };
-    const onPlayer = ({ player }: { player: Player | null }) => {
-      setPlayer(player);
-    };
-    const onPlayerPosition = ({
-      playerPosition,
-    }: {
-      playerPosition: Position | null;
-    }) => {
-      setPlayerPosition(playerPosition);
-    };
-    const onControls = ({
-      controlStates,
-    }: {
-      controlStates: ControlState[];
-    }) => {
-      setControlStates(controlStates);
-    };
-
-    eventBus.on("ui:timeMetricsUpdate", onTimeMetrics);
-    eventBus.on("ui:playerUpdate", onPlayer);
-    eventBus.on("ui:playerPositionUpdate", onPlayerPosition);
-    eventBus.on("ui:controlsUpdate", onControls);
-
-    return () => {
-      eventBus.off("ui:timeMetricsUpdate", onTimeMetrics);
-      eventBus.off("ui:playerUpdate", onPlayer);
-      eventBus.off("ui:playerPositionUpdate", onPlayerPosition);
-      eventBus.off("ui:controlsUpdate", onControls);
-    };
-  }, []);
+  useEventBusState(
+    "ui:timeMetricsUpdate",
+    setTimeMetrics,
+    ({ timeMetrics }) => {
+      return timeMetrics;
+    },
+  );
+  useEventBusState("ui:playerUpdate", setPlayer, ({ player }) => {
+    return player;
+  });
+  useEventBusState(
+    "ui:playerPositionUpdate",
+    setPlayerPosition,
+    ({ playerPosition: nextPlayerPosition }) => {
+      return nextPlayerPosition;
+    },
+  );
+  useEventBusState(
+    "ui:controlsUpdate",
+    setControlStates,
+    ({ controlStates }) => {
+      return controlStates;
+    },
+  );
 
   return {
     player,
@@ -175,6 +180,27 @@ function useWorldUiState(): WorldUiState {
     timeMetrics,
     controlStates,
   };
+}
+
+function useEventBusState<TValue, TEventName extends EventBusEventName>(
+  eventName: TEventName,
+  setValue: (value: TValue) => void,
+  selectValue: (event: EventBusEvents[TEventName]) => TValue,
+) {
+  const onEvent = useEffectEvent((event: EventBusEvents[TEventName]) => {
+    setValue(selectValue(event));
+  });
+
+  useEffect(() => {
+    const listener = (event: EventBusEvents[TEventName]) => {
+      onEvent(event);
+    };
+
+    eventBus.on(eventName, listener);
+    return () => {
+      eventBus.off(eventName, listener);
+    };
+  }, [eventName]);
 }
 
 function createCameraDragController(
@@ -281,11 +307,7 @@ function Header({
 }) {
   return (
     <div style={headerStyle}>
-      <span>
-        W / S move forward and back, Q / E strafe, A / D or Left / Right turn,
-        I / K pitch up and down, drag inside the canvas to orbit the camera,
-        and press Space to jump.
-      </span>
+      <span>{CONTROL_INSTRUCTIONS}</span>
       <button type="button" onClick={onBoostForward}>
         React Boost Forward
       </button>
@@ -299,12 +321,8 @@ function LeftNav() {
       <div style={sectionLabelStyle}>Controls</div>
       <div style={helperTextStyle}>
         Everything now falls until it lands on the floor, but floor contact
-        alone will not trigger the orange touch highlight. Move forward and back
-        with W and S, strafe with Q and E, turn with A and D or the left and
-        right arrow keys, use I and K to pitch up and down, drag inside the
-        canvas to orbit the camera, and press Space to jump. The React Boost
-        Forward button in the header also feeds the same control system, so you
-        can compare UI input with keyboard input.
+        alone will not trigger the orange touch highlight.{" "}
+        {LEFT_NAV_CONTROL_INSTRUCTIONS} {CONTROL_SYSTEM_NOTE}
       </div>
     </div>
   );
@@ -358,7 +376,11 @@ function Footer() {
 
 function formatPosition(position: Position | null) {
   if (!position) return "0, 0, 0";
-  return `${formatCoordinate(position.x)}, ${formatCoordinate(position.y)}, ${formatCoordinate(position.z)}`;
+  return [
+    formatCoordinate(position.x),
+    formatCoordinate(position.y),
+    formatCoordinate(position.z),
+  ].join(", ");
 }
 
 function formatCoordinate(value: number) {
