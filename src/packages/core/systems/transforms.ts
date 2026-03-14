@@ -1,5 +1,9 @@
 import { Euler, Vector3 } from "three";
 import type { CoreWorld, Rotation, Vec3 } from "../types";
+import {
+  markFlaginatorComponentChanged,
+  markFlaginatorMarkerChanged,
+} from "./flaginator";
 import { markCollisionTransformDirty } from "./collision";
 
 const scratchEuler = new Euler();
@@ -7,6 +11,8 @@ const scratchVector = new Vector3();
 
 export function markTransformDirty(world: CoreWorld, eid: number) {
   const { RenderDirtyFlags, Render, Collider } = world.components;
+  markFlaginatorMarkerChanged(world, "Moved", eid);
+
   if (Render[eid] && !RenderDirtyFlags.DirtyFlagSet[eid]) {
     const dirtyIndex = RenderDirtyFlags.DirtyCount;
     RenderDirtyFlags.DirtyTransformFlag[eid] = 1;
@@ -44,6 +50,7 @@ export function setEntityRotation(
   }
 
   if (didChange) {
+    markFlaginatorComponentChanged(world, "Rotation", eid);
     markTransformDirty(world, eid);
   }
 

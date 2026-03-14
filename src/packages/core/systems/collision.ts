@@ -6,7 +6,13 @@ import RAPIER, {
     type Vector as RapierVector,
 } from '@dimforge/rapier3d-compat'
 import { hasComponent } from 'bitecs'
+import { CoreFlagCustomSources, CoreFlags } from '../coreFlags'
 import type { CollisionState, CoreWorld } from '../types'
+import {
+    evaluateFlaginatorFlag,
+    markFlaginatorComponentChanged,
+    markFlaginatorCustomSourceChanged,
+} from './flaginator'
 import { setObjectTouchingByEid } from './render'
 
 const INITIAL_TOUCH_PAIR_CAPACITY = 1024
@@ -86,21 +92,12 @@ function removeValueInPlace(list: number[], value: number) {
     return true
 }
 
-function shouldShowTouchingState(world: CoreWorld, eid: number) {
-    if (world.components.Floor[eid]) return false
-
-    const list = getTouchList(world.collision, eid)
-    for (let i = 0; i < list.length; i += 1) {
-        if (!world.components.Floor[list[i]!]) {
-            return true
-        }
-    }
-
-    return false
-}
-
 function syncTouchingVisual(world: CoreWorld, eid: number) {
-    setObjectTouchingByEid(eid, shouldShowTouchingState(world, eid))
+    markFlaginatorCustomSourceChanged(world, CoreFlagCustomSources.Touching, eid)
+    setObjectTouchingByEid(
+        eid,
+        evaluateFlaginatorFlag(world, CoreFlags.TouchingNonFloor, eid),
+    )
 }
 
 function addTouchPair(world: CoreWorld, a: number, b: number) {
@@ -338,6 +335,7 @@ export function configureCuboidCollider(
     Collider.HalfDepth[eid] = opts.halfDepth
     Collider.Sensor[eid] = opts.sensor ? 1 : 0
     Collider.Active[eid] = opts.active === false ? 0 : 1
+    markFlaginatorComponentChanged(world, "Collider", eid)
     markCollisionConfigDirty(world, eid)
 }
 

@@ -1,8 +1,13 @@
 import { addComponent, addEntity, hasComponent, query } from "bitecs";
 import {
+  CoreFlags,
   configureCuboidCollider,
   ControlSources,
+  evaluateFlaginatorFlag,
   KeyboardControls,
+  markFlaginatorComponentChanged,
+  markFlaginatorMarkerChanged,
+  resetFlaginatorEntity,
   rotateLocalVectorByEntityRotation,
   setEntityRotation,
   setupCoreWorld,
@@ -232,7 +237,7 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
     if (!isControllingPrime(activeWorld)) return;
 
     const { Gravity, Velocity } = activeWorld.components;
-    if (Gravity.Grounded[eid] === 0) return;
+    if (!evaluateFlaginatorFlag(activeWorld, CoreFlags.OnGround, eid)) return;
 
     Velocity.y[eid] = clamp(
       PLAYER_JUMP_SPEED,
@@ -240,6 +245,8 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
       PLAYER_MAX_SPEED,
     );
     Gravity.Grounded[eid] = 0;
+    markFlaginatorComponentChanged(activeWorld, "Velocity", eid);
+    markFlaginatorComponentChanged(activeWorld, "Gravity", eid);
   };
 
   world.controls.onTick((activeWorld, tick, controls) => {
@@ -250,6 +257,9 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
 
     const drag = Math.max(0, 1 - PLAYER_DRAG_PER_SECOND * dt);
     const { Velocity, Rotation } = activeWorld.components;
+    const previousVelocityX = Velocity.x[eid];
+    const previousVelocityY = Velocity.y[eid];
+    const previousVelocityZ = Velocity.z[eid];
     Velocity.x[eid] *= drag;
     Velocity.z[eid] *= drag;
 
@@ -300,6 +310,14 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
       PLAYER_MAX_SPEED,
     );
 
+    if (
+      Velocity.x[eid] !== previousVelocityX ||
+      Velocity.y[eid] !== previousVelocityY ||
+      Velocity.z[eid] !== previousVelocityZ
+    ) {
+      markFlaginatorComponentChanged(activeWorld, "Velocity", eid);
+    }
+
     if (pitchAxis === 0 && yawAxis === 0) return;
 
     const nextRotation: Partial<Rotation> = {};
@@ -342,6 +360,7 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
         -PLAYER_MAX_SPEED,
         PLAYER_MAX_SPEED,
       );
+      markFlaginatorComponentChanged(activeWorld, "Velocity", eid);
     },
   );
 }
@@ -351,6 +370,7 @@ function createEntityWithComponents(
   components: readonly EntityComponent[],
 ) {
   const eid = addEntity(world);
+  resetFlaginatorEntity(world, eid);
   for (const component of components) {
     addComponent(world, eid, component as never);
   }
@@ -358,33 +378,36 @@ function createEntityWithComponents(
 }
 
 function assignPosition(
-  positions: World["components"]["Position"],
+  world: World,
   eid: number,
   position: Position,
 ) {
-  positions.x[eid] = position.x;
-  positions.y[eid] = position.y;
-  positions.z[eid] = position.z;
+  world.components.Position.x[eid] = position.x;
+  world.components.Position.y[eid] = position.y;
+  world.components.Position.z[eid] = position.z;
+  markFlaginatorComponentChanged(world, "Position", eid);
 }
 
 function assignVelocity(
-  velocities: World["components"]["Velocity"],
+  world: World,
   eid: number,
   velocity: Velocity,
 ) {
-  velocities.x[eid] = velocity.x;
-  velocities.y[eid] = velocity.y;
-  velocities.z[eid] = velocity.z;
+  world.components.Velocity.x[eid] = velocity.x;
+  world.components.Velocity.y[eid] = velocity.y;
+  world.components.Velocity.z[eid] = velocity.z;
+  markFlaginatorComponentChanged(world, "Velocity", eid);
 }
 
 function assignRotation(
-  rotations: World["components"]["Rotation"],
+  world: World,
   eid: number,
   rotation: Rotation = ZERO_ROTATION,
 ) {
-  rotations.pitch[eid] = rotation.pitch;
-  rotations.yaw[eid] = rotation.yaw;
-  rotations.roll[eid] = rotation.roll;
+  world.components.Rotation.pitch[eid] = rotation.pitch;
+  world.components.Rotation.yaw[eid] = rotation.yaw;
+  world.components.Rotation.roll[eid] = rotation.roll;
+  markFlaginatorComponentChanged(world, "Rotation", eid);
 }
 
 function syncRenderMesh(
@@ -415,8 +438,8 @@ function initializeRenderableEntity(
     createRenderMesh,
   }: RenderableEntityOptions,
 ) {
-  assignPosition(world.components.Position, eid, position);
-  assignRotation(world.components.Rotation, eid, rotation);
+  assignPosition(world, eid, position);
+  assignRotation(world, eid, rotation);
   world.components.Render[eid] = 1;
   configureCuboidCollider(world, eid, collider);
   syncRenderMesh(eid, position, rotation, createRenderMesh);
@@ -478,10 +501,14 @@ function createPerson(
     Render,
   ]);
 
-  assignVelocity(Velocity, eid, velocity);
+  assignVelocity(world, eid, velocity);
   Gravity.Grounded[eid] = 0;
+  markFlaginatorComponentChanged(world, "Gravity", eid);
   Health[eid] = health;
+  markFlaginatorComponentChanged(world, "Health", eid);
+  markFlaginatorMarkerChanged(world, "HealthChanged", eid);
   Player[eid] = player;
+  markFlaginatorComponentChanged(world, "Player", eid);
 
   initializeRenderableEntity(world, eid, {
     position: spawnPosition,
@@ -503,6 +530,7 @@ function createFloor(world: World, position: Position) {
   ]);
 
   Floor[eid] = 1;
+  markFlaginatorComponentChanged(world, "Floor", eid);
   initializeRenderableEntity(world, eid, {
     position,
     collider: FLOOR_COLLIDER,

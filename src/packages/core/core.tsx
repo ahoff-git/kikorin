@@ -1,7 +1,8 @@
-import { createWorld } from "bitecs";
+import { createWorld, hasComponent } from "bitecs";
 import { Crono } from "../util/chronoTrigger";
 import { createChillUpdater } from "../util/chillUpdate";
 import { createRingBuffer } from "../util/ringBuffer";
+import { CoreFlagCustomSources, CoreFlags } from "./coreFlags";
 import {
   adjustCameraFollowOrbit,
   cameraFollowSystem,
@@ -23,6 +24,15 @@ import {
 import { dirtyTransformsSystem } from "./systems/dirtyTransforms";
 import { fallCleanupSystem } from "./systems/entityCleanup";
 import { experienceSystem } from "./systems/experience";
+import {
+  createFlaginator,
+  flagComponentDependency,
+  flagCustomDependency,
+  flagDependency,
+  flagMarkerDependency,
+  flaginatorSystem,
+  registerFlaginatorFlag,
+} from "./systems/flaginator";
 import { gravitySystem } from "./systems/gravity";
 import { healthSystem } from "./systems/health";
 import { movementSystem } from "./systems/movement";
@@ -67,6 +77,21 @@ export type {
   Velocities,
   Velocity,
 } from "./types";
+export type { CoreFlagCustomSourceName, CoreFlagName } from "./coreFlags";
+export type {
+  FlaginatorBatchResult,
+  FlaginatorDependency,
+  FlaginatorEvaluationContext,
+  FlaginatorFlagDefinition,
+  FlaginatorFlagMeta,
+  FlaginatorFlagStore,
+  FlaginatorSourceDependency,
+  FlaginatorSourceKind,
+  FlaginatorSourceState,
+  FlaginatorState,
+  FlaginatorWorld,
+} from "./systems/flaginator";
+export { CoreFlagCustomSources, CoreFlags } from "./coreFlags";
 export { ControlSources, KeyboardControls, PointerControls } from "./types";
 export {
   configureCuboidCollider,
@@ -79,11 +104,29 @@ export {
   rotateLocalVectorByEntityRotation,
   setEntityRotation,
 } from "./systems/transforms";
+export {
+  advanceFlaginatorTick,
+  evaluateAllFlaginatorFlags,
+  evaluateFlaginatorFlag,
+  flagComponentDependency,
+  flagCustomDependency,
+  flagDependency,
+  flagMarkerDependency,
+  getFlaginatorFlagMeta,
+  getFlaginatorFlagStore,
+  markFlaginatorComponentChanged,
+  markFlaginatorCustomSourceChanged,
+  markFlaginatorMarkerChanged,
+  markFlaginatorSourceChanged,
+  registerFlaginatorFlag,
+  resetFlaginatorEntity,
+} from "./systems/flaginator";
 
 type CoreSystem = (world: CoreWorld) => void;
 
 const WORLD_SYSTEMS = [
   timeSystem,
+  flaginatorSystem,
   controlsSystem,
   commandsSystem,
   gravitySystem,
@@ -103,6 +146,64 @@ function runSystems(world: CoreWorld, systems: readonly CoreSystem[]) {
   for (const system of systems) {
     system(world);
   }
+}
+
+function registerCoreFlags(world: CoreWorld) {
+  registerFlaginatorFlag(world, CoreFlags.OnGround, {
+    dependencies: [flagComponentDependency("Gravity")],
+    evaluate: ({ world: activeWorld, eid }) => {
+      const { Gravity } = activeWorld.components;
+      return (
+        hasComponent(activeWorld, eid, Gravity) && Gravity.Grounded[eid] === 1
+      );
+    },
+  });
+
+  registerFlaginatorFlag(world, CoreFlags.InAir, {
+    dependencies: [
+      flagComponentDependency("Gravity"),
+      flagDependency(CoreFlags.OnGround),
+    ],
+    evaluate: ({ world: activeWorld, eid, evaluateFlag }) => {
+      return (
+        hasComponent(activeWorld, eid, activeWorld.components.Gravity) &&
+        !evaluateFlag(CoreFlags.OnGround)
+      );
+    },
+  });
+
+  registerFlaginatorFlag(world, CoreFlags.Dead, {
+    dependencies: [
+      flagComponentDependency("Health"),
+      flagMarkerDependency("HealthChanged"),
+    ],
+    evaluate: ({ world: activeWorld, eid }) => {
+      const { Health } = activeWorld.components;
+      return hasComponent(activeWorld, eid, Health) && Health[eid] <= 0;
+    },
+  });
+
+  registerFlaginatorFlag(world, CoreFlags.TouchingNonFloor, {
+    dependencies: [
+      flagComponentDependency("Floor"),
+      flagCustomDependency(CoreFlagCustomSources.Touching),
+    ],
+    evaluate: ({ world: activeWorld, eid }) => {
+      const { Floor } = activeWorld.components;
+      if (hasComponent(activeWorld, eid, Floor) && Floor[eid] === 1) {
+        return false;
+      }
+
+      const touching = activeWorld.collision.touchingByEid[eid] ?? [];
+      for (let i = 0; i < touching.length; i += 1) {
+        if (!activeWorld.components.Floor[touching[i]!]) {
+          return true;
+        }
+      }
+
+      return false;
+    },
+  });
 }
 
 function createCoreWorldConfig(maxEntities: number): CoreWorld {
@@ -165,6 +266,7 @@ function createCoreWorldConfig(maxEntities: number): CoreWorld {
     commands: createCoreCommands<CoreWorld>(),
     controls: createControls<CoreWorld>(),
     chillUpdater: createChillUpdater(),
+    flaginator: createFlaginator<CoreWorld>(maxEntities),
   };
 }
 
@@ -173,6 +275,7 @@ function setupCoreWorld(canvas: HTMLCanvasElement | null, maxEntities = 100000) 
   let schedulerRegistered = false;
 
   const world = createWorld<CoreWorld>(createCoreWorldConfig(maxEntities));
+  registerCoreFlags(world);
   const controlInputs = setupControlInputs(world, canvas);
 
   function worldTick(activeWorld: CoreWorld) {

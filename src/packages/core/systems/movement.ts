@@ -1,5 +1,6 @@
 import { hasComponent, query } from "bitecs"
 import type { CoreWorld } from "../types"
+import { markFlaginatorComponentChanged } from "./flaginator"
 import { resolveFloorPosition } from "./gravity"
 import { markTransformDirty } from "./transforms"
 
@@ -24,6 +25,7 @@ export function movementSystem(world: CoreWorld) {
         const nextX = posX[eid] + vx * dt
         let nextY = posY[eid] + vy * dt
         const nextZ = posZ[eid] + vz * dt
+        let velocityChanged = false
 
         if (
             hasComponent(world, eid, Gravity) &&
@@ -32,12 +34,17 @@ export function movementSystem(world: CoreWorld) {
         ) {
             const resolvedY = resolveFloorPosition(world, floorEids, eid, nextX, nextY, nextZ)
             const grounded = resolvedY !== null
-            Gravity.Grounded[eid] = grounded ? 1 : 0
+            const groundedValue = grounded ? 1 : 0
+            if (Gravity.Grounded[eid] !== groundedValue) {
+                Gravity.Grounded[eid] = groundedValue
+                markFlaginatorComponentChanged(world, "Gravity", eid)
+            }
 
             if (grounded) {
                 nextY = resolvedY
                 if (velY[eid] < 0) {
                     velY[eid] = 0
+                    velocityChanged = true
                 }
             }
         }
@@ -47,13 +54,21 @@ export function movementSystem(world: CoreWorld) {
             nextY === posY[eid] &&
             nextZ === posZ[eid]
         ) {
+            if (velocityChanged) {
+                markFlaginatorComponentChanged(world, "Velocity", eid)
+            }
             continue
         }
 
         posX[eid] = nextX
         posY[eid] = nextY
         posZ[eid] = nextZ
+        markFlaginatorComponentChanged(world, "Position", eid)
 
         markTransformDirty(world, eid)
+
+        if (velocityChanged) {
+            markFlaginatorComponentChanged(world, "Velocity", eid)
+        }
     }
 }

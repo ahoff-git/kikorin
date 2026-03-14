@@ -1,5 +1,6 @@
 import { query } from "bitecs"
 import { CoreWorld } from "../core"
+import { markFlaginatorComponentChanged } from "./flaginator"
 
 export function experienceSystem(world: CoreWorld) {
         const { Player } = world.components
@@ -10,5 +11,6 @@ export function experienceSystem(world: CoreWorld) {
                 Player[eid].level++
                 Player[eid].experience = 0
             }
+            markFlaginatorComponentChanged(world, "Player", eid)
         }
     }

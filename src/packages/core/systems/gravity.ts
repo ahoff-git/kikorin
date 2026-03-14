@@ -1,5 +1,6 @@
 import { query } from "bitecs"
 import type { CoreWorld } from "../types"
+import { markFlaginatorComponentChanged } from "./flaginator"
 
 const WORLD_GRAVITY = 24
 const MAX_FALL_SPEED = 48
@@ -183,15 +184,24 @@ export function gravitySystem(world: CoreWorld) {
         const nextX = Position.x[eid] + Velocity.x[eid] * dt
         const nextZ = Position.z[eid] + Velocity.z[eid] * dt
         const grounded = hasFloorSupportAt(world, floorEids, eid, nextX, Position.y[eid], nextZ)
+        const groundedValue = grounded ? 1 : 0
 
-        Gravity.Grounded[eid] = grounded ? 1 : 0
+        if (Gravity.Grounded[eid] !== groundedValue) {
+            Gravity.Grounded[eid] = groundedValue
+            markFlaginatorComponentChanged(world, "Gravity", eid)
+        }
         if (grounded) {
             if (Velocity.y[eid] < 0) {
                 Velocity.y[eid] = 0
+                markFlaginatorComponentChanged(world, "Velocity", eid)
             }
             continue
         }
 
-        Velocity.y[eid] = Math.max(Velocity.y[eid] - WORLD_GRAVITY * dt, -MAX_FALL_SPEED)
+        const nextVelocityY = Math.max(Velocity.y[eid] - WORLD_GRAVITY * dt, -MAX_FALL_SPEED)
+        if (Velocity.y[eid] !== nextVelocityY) {
+            Velocity.y[eid] = nextVelocityY
+            markFlaginatorComponentChanged(world, "Velocity", eid)
+        }
     }
 }

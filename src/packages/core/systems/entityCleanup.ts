@@ -2,6 +2,7 @@ import { query, removeEntity } from "bitecs"
 import type { CoreWorld } from "../types"
 import { findHighestFloorTopAtPosition } from "./gravity"
 import { removeColliderByEid } from "./collision"
+import { resetFlaginatorEntity } from "./flaginator"
 import { removeObjectByEid } from "./render"
 
 const MAX_FALL_DISTANCE_BELOW_FLOOR = 32
@@ -31,6 +32,7 @@ function findWorldHighestFloorTop(world: CoreWorld, floorEids: ArrayLike<number>
 }
 
 export function destroyEntity(world: CoreWorld, eid: number) {
+    resetFlaginatorEntity(world, eid)
     removeColliderByEid(world, eid)
     removeObjectByEid(eid)
     removeEntity(world, eid)

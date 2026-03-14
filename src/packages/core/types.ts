@@ -1,5 +1,6 @@
 import type { RingBuffer } from '../util/ringBuffer'
 import type { Collider as RapierCollider, World as RapierWorld } from '@dimforge/rapier3d-compat'
+import type { FlaginatorState } from './systems/flaginator'
 
 export type Positions = {
     x: Float32Array,
@@ -271,7 +272,8 @@ export type CoreWorld = {
     time: Time,
     commands: CoreCommands<CoreWorld>,
     controls: CoreControls<CoreWorld>,
-    chillUpdater: ReturnType<typeof import('../util/chillUpdate').createChillUpdater>
+    chillUpdater: ReturnType<typeof import('../util/chillUpdate').createChillUpdater>,
+    flaginator: FlaginatorState<CoreWorld, string>
 }
 
 export type CoreWorldBox = {
