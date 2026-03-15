@@ -1,0 +1,17 @@
+.main {
+  grid-template-columns: 1fr;
+}
+
+.sidePanel {
+  display: none;
+}
+
+@media (min-width: 900px) {
+  .main {
+    grid-template-columns: clamp(200px, 20%, 300px) minmax(0, 1fr) clamp(200px, 20%, 300px);
+  }
+
+  .sidePanel {
+    display: block;
+  }
+}

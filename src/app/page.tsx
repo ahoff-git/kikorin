@@ -2,14 +2,14 @@
 
 import type {
   CSSProperties,
-  MouseEvent as ReactMouseEvent,
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
   RefObject,
 } from "react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { eventBus, type EventBusEvents } from "@/packages/core/mitt";
 import {
   ControlSources,
-  type ControlState,
   type Player,
   type Position,
   type Time,
@@ -63,10 +63,6 @@ const helperTextStyle: CSSProperties = {
   color: "#555",
 };
 
-const controlsSectionStyle: CSSProperties = {
-  marginTop: 12,
-};
-
 const CONTROL_INSTRUCTIONS =
   "W / S move forward and back, Q / E strafe, A / D or Left / Right turn, I / K pitch up and down, left click to fire a small block, right drag inside the canvas to orbit the camera, and press Space to jump.";
 
@@ -80,7 +76,6 @@ type WorldUiState = {
   player: Player | null;
   playerPosition: Position | null;
   timeMetrics: Time | null;
-  controlStates: ControlState[];
 };
 
 type CameraDragController = {
@@ -123,21 +118,107 @@ export default function Home() {
     };
   }, []);
 
-  function handleBoostForward(event: ReactMouseEvent<HTMLButtonElement>) {
-    worldRef.current?.world.controls.enqueue({
-      timestamp: event.timeStamp,
+  function enqueueReactControlEvent(
+    active: boolean,
+    timestamp: number,
+    payload: Record<string, unknown>,
+    inactivePhase?: "end" | "cancel",
+  ) {
+    worldRef.current?.world.controls.setInputState({
+      timestamp,
       source: ControlSources.React,
       controlId: PlayerReactControls.BoostForward,
-      phase: "trigger",
-      payload: {
-        kind: "button-click",
-      },
+      active,
+      inactivePhase,
+      payload,
+    });
+  }
+
+  function handleBoostForwardPointerDown(
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ) {
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Safe to ignore if the browser rejects capture.
+    }
+
+    enqueueReactControlEvent(true, event.timeStamp, {
+      kind: "button-pointer",
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+    });
+  }
+
+  function handleBoostForwardPointerUp(
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ) {
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // Safe to ignore if capture has already been released.
+    }
+
+    enqueueReactControlEvent(false, event.timeStamp, {
+      kind: "button-pointer",
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+    });
+  }
+
+  function handleBoostForwardPointerCancel(
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ) {
+    enqueueReactControlEvent(false, event.timeStamp, {
+      kind: "button-pointer",
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+    }, "cancel");
+  }
+
+  function handleBoostForwardKeyDown(
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) {
+    if (event.key !== " " && event.key !== "Enter") return;
+    event.preventDefault();
+    if (
+      worldRef.current?.world.controls.isInputActive(
+        PlayerReactControls.BoostForward,
+        ControlSources.React,
+      )
+    ) {
+      return;
+    }
+
+    enqueueReactControlEvent(true, event.timeStamp, {
+      kind: "button-key",
+      key: event.key,
+    });
+  }
+
+  function handleBoostForwardKeyUp(
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) {
+    if (event.key !== " " && event.key !== "Enter") return;
+    event.preventDefault();
+
+    enqueueReactControlEvent(false, event.timeStamp, {
+      kind: "button-key",
+      key: event.key,
     });
   }
 
   return (
     <PageLayout
-      header={<Header onBoostForward={handleBoostForward} />}
+      header={
+        <Header
+          onBoostForwardKeyDown={handleBoostForwardKeyDown}
+          onBoostForwardKeyUp={handleBoostForwardKeyUp}
+          onBoostForwardPointerCancel={handleBoostForwardPointerCancel}
+          onBoostForwardPointerDown={handleBoostForwardPointerDown}
+          onBoostForwardPointerUp={handleBoostForwardPointerUp}
+        />
+      }
       left={<LeftNav />}
       right={<RightPanel {...uiState} />}
       footer={<Footer />}
@@ -151,7 +232,6 @@ function useWorldUiState(): WorldUiState {
   const [player, setPlayer] = useState<Player | null>(null);
   const [playerPosition, setPlayerPosition] = useState<Position | null>(null);
   const [timeMetrics, setTimeMetrics] = useState<Time | null>(null);
-  const [controlStates, setControlStates] = useState<ControlState[]>([]);
 
   useEventBusState(
     "ui:timeMetricsUpdate",
@@ -170,19 +250,11 @@ function useWorldUiState(): WorldUiState {
       return nextPlayerPosition;
     },
   );
-  useEventBusState(
-    "ui:controlsUpdate",
-    setControlStates,
-    ({ controlStates }) => {
-      return controlStates;
-    },
-  );
 
   return {
     player,
     playerPosition,
     timeMetrics,
-    controlStates,
   };
 }
 
@@ -330,14 +402,33 @@ function CanvasViewport({
 }
 
 function Header({
-  onBoostForward,
+  onBoostForwardKeyDown,
+  onBoostForwardKeyUp,
+  onBoostForwardPointerCancel,
+  onBoostForwardPointerDown,
+  onBoostForwardPointerUp,
 }: {
-  onBoostForward: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onBoostForwardKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+  onBoostForwardKeyUp: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+  onBoostForwardPointerCancel: (
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ) => void;
+  onBoostForwardPointerDown: (
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ) => void;
+  onBoostForwardPointerUp: (event: ReactPointerEvent<HTMLButtonElement>) => void;
 }) {
   return (
     <div style={headerStyle}>
       <span>{CONTROL_INSTRUCTIONS}</span>
-      <button type="button" onClick={onBoostForward}>
+      <button
+        type="button"
+        onKeyDown={onBoostForwardKeyDown}
+        onKeyUp={onBoostForwardKeyUp}
+        onPointerCancel={onBoostForwardPointerCancel}
+        onPointerDown={onBoostForwardPointerDown}
+        onPointerUp={onBoostForwardPointerUp}
+      >
         React Boost Forward
       </button>
     </div>
@@ -361,7 +452,6 @@ function RightPanel({
   player,
   playerPosition,
   timeMetrics,
-  controlStates,
 }: WorldUiState) {
   const averageDelta = Math.round(timeMetrics?.avgDelta ?? 0);
   const ticksPerSecond = Math.round(timeMetrics?.ticksPerSecond ?? 0);
@@ -380,20 +470,6 @@ function RightPanel({
         <div>XP: {playerExperience}</div>
         <div>Level: {playerLevel}</div>
         <div>Position: {positionLabel}</div>
-      </div>
-      <div style={controlsSectionStyle}>
-        <div>Controls:</div>
-        {controlStates.length === 0 ? (
-          <div>No controls seen yet</div>
-        ) : (
-          controlStates.map((controlState) => (
-            <div key={controlState.key}>
-              {controlState.key}:{" "}
-              {controlState.active ? "active" : controlState.phase} for{" "}
-              {Math.round(controlState.durationMs)}ms
-            </div>
-          ))
-        )}
       </div>
     </div>
   );

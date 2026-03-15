@@ -15,12 +15,28 @@ type WorldHalfExtents = {
     z: number
 }
 
+type HalfExtentsCache = {
+    tickKey: number,
+    tickStamp: number,
+    stamps: Uint32Array,
+    x: Float32Array,
+    y: Float32Array,
+    z: Float32Array
+}
+
+type FloorQueryCache = {
+    tickKey: number,
+    eids: number[]
+}
+
 const entityHalfExtents: WorldHalfExtents = { x: 0, y: 0, z: 0 }
 const floorHalfExtents: WorldHalfExtents = { x: 0, y: 0, z: 0 }
 const scratchEuler = new Euler(0, 0, 0, "YXZ")
 const scratchRotationMatrix = new Matrix4()
+const halfExtentsCacheByWorld = new WeakMap<CoreWorld, HalfExtentsCache>()
+const floorQueryCacheByWorld = new WeakMap<CoreWorld, FloorQueryCache>()
 
-function fillWorldHalfExtents(world: CoreWorld, eid: number, out: WorldHalfExtents) {
+function computeWorldHalfExtents(world: CoreWorld, eid: number, out: WorldHalfExtents) {
     const { Collider, Rotation } = world.components
     const hx = Collider.HalfWidth[eid]
     const hy = Collider.HalfHeight[eid]
@@ -47,6 +63,73 @@ function fillWorldHalfExtents(world: CoreWorld, eid: number, out: WorldHalfExten
     out.x = Math.abs(m11) * hx + Math.abs(m12) * hy + Math.abs(m13) * hz
     out.y = Math.abs(m21) * hx + Math.abs(m22) * hy + Math.abs(m23) * hz
     out.z = Math.abs(m31) * hx + Math.abs(m32) * hy + Math.abs(m33) * hz
+}
+
+function getHalfExtentsCache(world: CoreWorld) {
+    let cache = halfExtentsCacheByWorld.get(world)
+    if (cache) {
+        return cache
+    }
+
+    const maxEntities = world.components.Collider.HalfWidth.length
+    cache = {
+        tickKey: Number.NaN,
+        tickStamp: 0,
+        stamps: new Uint32Array(maxEntities),
+        x: new Float32Array(maxEntities),
+        y: new Float32Array(maxEntities),
+        z: new Float32Array(maxEntities),
+    }
+    halfExtentsCacheByWorld.set(world, cache)
+    return cache
+}
+
+function fillWorldHalfExtents(world: CoreWorld, eid: number, out: WorldHalfExtents) {
+    const cache = getHalfExtentsCache(world)
+    if (cache.tickKey !== world.time.elapsed) {
+        cache.tickKey = world.time.elapsed
+        cache.tickStamp += 1
+        if (cache.tickStamp === 0) {
+            cache.tickStamp = 1
+            cache.stamps.fill(0)
+        }
+    }
+
+    if (cache.stamps[eid] !== cache.tickStamp) {
+        computeWorldHalfExtents(world, eid, out)
+        cache.stamps[eid] = cache.tickStamp
+        cache.x[eid] = out.x
+        cache.y[eid] = out.y
+        cache.z[eid] = out.z
+        return
+    }
+
+    out.x = cache.x[eid]!
+    out.y = cache.y[eid]!
+    out.z = cache.z[eid]!
+}
+
+export function getFloorCollisionEids(world: CoreWorld): readonly number[] {
+    let cache = floorQueryCacheByWorld.get(world)
+    if (!cache) {
+        cache = {
+            tickKey: Number.NaN,
+            eids: [],
+        }
+        floorQueryCacheByWorld.set(world, cache)
+    }
+
+    if (cache.tickKey === world.time.elapsed) {
+        return cache.eids
+    }
+
+    cache.tickKey = world.time.elapsed
+    const queriedFloorEids = query(world, [world.components.Floor, world.components.Position, world.components.Rotation, world.components.Collider])
+    cache.eids.length = queriedFloorEids.length
+    for (let i = 0; i < queriedFloorEids.length; i += 1) {
+        cache.eids[i] = queriedFloorEids[i]!
+    }
+    return cache.eids
 }
 
 export function findHighestFloorTopAtPosition(
@@ -177,8 +260,8 @@ export function gravitySystem(world: CoreWorld) {
     if (delta === 0) return
 
     const dt = delta * 0.001
-    const { Floor, Gravity, Position, Velocity } = world.components
-    const floorEids = query(world, [Floor, Position, world.components.Rotation, world.components.Collider])
+    const { Gravity, Position, Velocity } = world.components
+    const floorEids = getFloorCollisionEids(world)
 
     for (const eid of query(world, [Position, Velocity, Gravity])) {
         const nextX = Position.x[eid] + Velocity.x[eid] * dt

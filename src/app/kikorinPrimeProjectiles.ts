@@ -1,4 +1,5 @@
 import {
+  type ControlEvent,
   ControlSources,
   destroyEntity,
   hasEntityComponents,
@@ -35,16 +36,27 @@ const PROJECTILE_FORWARD_SPAWN_OFFSET =
 const PROJECTILE_SPAWN_HEIGHT = PERSON_COLLIDER.halfHeight * 0.35;
 
 type ProjectileState = ProjectileBounceState & {
+  ownerEid: number;
   remainingTicks: number;
 };
 
 type ProjectileRegistry = Map<number, ProjectileState>;
+type ProjectileSpawnResult = {
+  projectileEid: number;
+  position: Position;
+  velocity: Velocity;
+};
 
-function createProjectileState(): ProjectileState {
+function createProjectileState(ownerEid: number): ProjectileState {
   return {
+    ownerEid,
     remainingTicks: PROJECTILE_TTL_TICKS,
     bounceCooldownsByTarget: new Map(),
   };
+}
+
+export function createPrimeProjectileRegistry() {
+  return new Map<number, ProjectileState>();
 }
 
 function createProjectileSpawnPosition(
@@ -71,9 +83,9 @@ function spawnProjectileFromEntity(
   world: CoreWorld,
   eid: number,
   projectiles: ProjectileRegistry,
-) {
+): ProjectileSpawnResult | null {
   if (!hasEntityComponents(world, eid, ["Position", "Rotation", "Velocity"])) {
-    return;
+    return null;
   }
 
   const { Rotation } = world.components;
@@ -84,9 +96,11 @@ function spawnProjectileFromEntity(
       z: -1,
     }),
   );
+  const position = createProjectileSpawnPosition(world, eid, forward);
+  const velocity = scaleVector(forward, PROJECTILE_SPEED);
   const projectileEid = spawnEntity(world, {
-    position: createProjectileSpawnPosition(world, eid, forward),
-    velocity: scaleVector(forward, PROJECTILE_SPEED),
+    position,
+    velocity,
     rotation: {
       pitch: Rotation.pitch[eid],
       yaw: Rotation.yaw[eid],
@@ -97,7 +111,12 @@ function spawnProjectileFromEntity(
     renderMesh: createProjectileRenderMesh,
   });
 
-  projectiles.set(projectileEid, createProjectileState());
+  projectiles.set(projectileEid, createProjectileState(eid));
+  return {
+    projectileEid,
+    position,
+    velocity,
+  };
 }
 
 function isProjectileActive(world: CoreWorld, projectileEid: number) {
@@ -185,22 +204,34 @@ function updateProjectiles(
   }
 }
 
-export function registerPrimeProjectileControls(world: CoreWorld, eid: number) {
-  const projectiles: ProjectileRegistry = new Map();
+export function handlePrimeProjectileControlEvent(
+  world: CoreWorld,
+  eid: number,
+  projectiles: ProjectileRegistry,
+  event: ControlEvent,
+) {
+  if (
+    event.source !== ControlSources.Pointer ||
+    event.controlId !== PointerControls.Primary ||
+    event.phase !== "start"
+  ) {
+    return;
+  }
 
-  world.controls.onTick((activeWorld, tick) => {
-    updateProjectiles(activeWorld, projectiles, tick.deltaSeconds);
-  });
+  if (!isPrimePlayerControlled(world, eid)) {
+    return;
+  }
 
-  world.controls.on(
-    {
-      source: ControlSources.Pointer,
-      controlId: PointerControls.Primary,
-      phase: "trigger",
-    },
-    (activeWorld) => {
-      if (!isPrimePlayerControlled(activeWorld, eid)) return;
-      spawnProjectileFromEntity(activeWorld, eid, projectiles);
-    },
-  );
+  const spawned = spawnProjectileFromEntity(world, eid, projectiles);
+  if (!spawned) {
+    return;
+  }
+}
+
+export function updatePrimeProjectiles(
+  world: CoreWorld,
+  projectiles: ProjectileRegistry,
+  deltaSeconds: number,
+) {
+  updateProjectiles(world, projectiles, deltaSeconds);
 }

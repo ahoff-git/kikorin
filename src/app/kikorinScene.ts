@@ -20,7 +20,7 @@ import {
 
 export { FLOOR_POSITION } from "./kikorinSceneMeshes";
 
-const AMBIENT_PERSON_COUNT = 8000;
+const AMBIENT_PERSON_COUNT = 10000;
 
 export type FloorEids = ArrayLike<number>;
 

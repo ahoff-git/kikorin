@@ -78,9 +78,11 @@ export type {
   ControlState,
   ControlTick,
   ControlTickHandler,
+  CoreControlStats,
   CoreCommand,
   CoreCommandHandler,
   CoreCommandInput,
+  CoreCommandStats,
   CoreCommands,
   CoreControls,
   CoreEntityBlueprint,
@@ -163,6 +165,7 @@ type CoreWorldLifecycle = Pick<
   CoreWorldBox,
   "start" | "stop" | "dispose" | "isRunning"
 >;
+type CoreSystemGroupName = "world" | "render";
 
 const WORLD_SYSTEMS = [
   timeSystem,
@@ -182,9 +185,49 @@ const RENDER_SYSTEMS = [
   renderSystem,
 ] as const satisfies readonly CoreSystem[];
 
-function runSystems(world: CoreWorld, systems: readonly CoreSystem[]) {
-  for (const system of systems) {
-    system(world);
+function getSystemName(
+  system: CoreSystem,
+  groupName: CoreSystemGroupName,
+  index: number,
+) {
+  return system.name || `${groupName}-system-${index}`;
+}
+
+function runSystems(
+  world: CoreWorld,
+  systems: readonly CoreSystem[],
+  groupName: CoreSystemGroupName,
+) {
+  for (let index = 0; index < systems.length; index += 1) {
+    const system = systems[index]!;
+    const systemName = getSystemName(system, groupName, index);
+    try {
+      system(world);
+    } catch (error) {
+      console.error(`[core] ${groupName} system failed: ${systemName}`, {
+        groupName,
+        systemName,
+        systemIndex: index,
+        time: {
+          delta: world.time.delta,
+          elapsed: world.time.elapsed,
+          then: world.time.then,
+        },
+        controls: {
+          liveQueueLength: world.controls.queue.length,
+          lastQueueLength: world.controls.stats.lastQueueLength,
+          totalEnqueuedCount: world.controls.stats.totalEnqueuedCount,
+          totalProcessedCount: world.controls.stats.totalProcessedCount,
+        },
+        commands: {
+          liveQueueLength: world.commands.queue.length,
+          lastQueueLength: world.commands.stats.lastQueueLength,
+          totalEnqueuedCount: world.commands.stats.totalEnqueuedCount,
+          totalProcessedCount: world.commands.stats.totalProcessedCount,
+        },
+      }, error);
+      throw error;
+    }
   }
 }
 
@@ -372,7 +415,7 @@ function createCoreWorld(maxEntities: number) {
 }
 
 function runWorldTick(world: CoreWorld) {
-  runSystems(world, WORLD_SYSTEMS);
+  runSystems(world, WORLD_SYSTEMS, "world");
   if (world.components.RenderDirtyFlags.DirtyCount > 0) {
     dirtyTransformsSystem(world);
   }
@@ -380,7 +423,7 @@ function runWorldTick(world: CoreWorld) {
 }
 
 function runRenderTick(world: CoreWorld) {
-  runSystems(world, RENDER_SYSTEMS);
+  runSystems(world, RENDER_SYSTEMS, "render");
 }
 
 function initializeCoreWorld(world: CoreWorld, canvas: HTMLCanvasElement | null) {

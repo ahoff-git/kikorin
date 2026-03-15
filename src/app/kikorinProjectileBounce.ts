@@ -61,6 +61,10 @@ export function createFreshProjectileBounceTargetFilter(
 ) {
   const { Floor } = world.components;
   return (targetEid: number) => {
+    if ("ownerEid" in projectile && targetEid === projectile.ownerEid) {
+      return false;
+    }
+
     return (
       !Floor[targetEid] &&
       (projectile.bounceCooldownsByTarget.get(targetEid) ?? 0) === 0

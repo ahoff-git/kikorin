@@ -1,5 +1,6 @@
 import {
   CoreFlags,
+  type ControlEvent,
   ControlSources,
   evaluateFlaginatorFlag,
   hasEntityComponents,
@@ -191,30 +192,34 @@ function boostPrimeForward(world: CoreWorld, eid: number) {
   markFlaginatorComponentChanged(world, "Velocity", eid);
 }
 
-export function registerPrimeMovementControls(world: CoreWorld, eid: number) {
-  world.controls.onTick((activeWorld, tick, controls) => {
-    applyPrimeMovementControls(activeWorld, eid, tick.deltaSeconds, controls);
-  });
+export function handlePrimeMovementControlEvent(
+  world: CoreWorld,
+  eid: number,
+  event: ControlEvent,
+) {
+  if (
+    event.source === ControlSources.Keyboard &&
+    event.controlId === KeyboardControls.Space &&
+    event.phase === "start"
+  ) {
+    jumpPrimePlayer(world, eid);
+    return;
+  }
 
-  world.controls.on(
-    {
-      source: ControlSources.Keyboard,
-      controlId: KeyboardControls.Space,
-      phase: "start",
-    },
-    (activeWorld) => {
-      jumpPrimePlayer(activeWorld, eid);
-    },
-  );
+  if (
+    event.source === ControlSources.React &&
+    event.controlId === PlayerReactControls.BoostForward &&
+    event.phase === "start"
+  ) {
+    boostPrimeForward(world, eid);
+  }
+}
 
-  world.controls.on(
-    {
-      source: ControlSources.React,
-      controlId: PlayerReactControls.BoostForward,
-      phase: "trigger",
-    },
-    (activeWorld) => {
-      boostPrimeForward(activeWorld, eid);
-    },
-  );
+export function updatePrimeMovementControls(
+  world: CoreWorld,
+  eid: number,
+  deltaSeconds: number,
+  controls: CoreWorld["controls"],
+) {
+  applyPrimeMovementControls(world, eid, deltaSeconds, controls);
 }

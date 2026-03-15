@@ -4,6 +4,7 @@ import type {
   ControlEventHandler,
   ControlEventInput,
   ControlFilter,
+  ControlInputStateChange,
   ControlMatch,
   ControlPhase,
   ControlState,
@@ -12,7 +13,7 @@ import type {
   CoreControls,
   CoreWorld,
 } from "../types";
-import { ControlSources, PointerControls } from "../types";
+import { ControlSources, KeyboardControls, PointerControls } from "../types";
 
 type EventListenerRecord<TWorld> = {
   id: number;
@@ -33,6 +34,20 @@ type ControlInputConnection = {
   disconnect: () => void;
 };
 
+type InputStateEntry = {
+  key: string;
+  source: string;
+  controlId: string;
+  active: boolean;
+  updatedAt: number;
+  payload?: unknown;
+};
+
+const MANAGED_KEYBOARD_CONTROL_IDS = new Set<string>(
+  Object.values(KeyboardControls),
+);
+const INPUT_TIMESTAMP_MAX_DRIFT_MS = 60_000;
+
 function getNow(): number {
   if (typeof performance !== "undefined" && typeof performance.now === "function") {
     return performance.now();
@@ -41,10 +56,13 @@ function getNow(): number {
 }
 
 function normalizeTimestamp(timestamp?: number): number {
+  const now = getNow();
   if (typeof timestamp === "number" && Number.isFinite(timestamp)) {
-    return timestamp;
+    if (Math.abs(timestamp - now) <= INPUT_TIMESTAMP_MAX_DRIFT_MS) {
+      return timestamp;
+    }
   }
-  return getNow();
+  return now;
 }
 
 function normalizeValue(phase: ControlPhase, value?: number): number {
@@ -64,6 +82,10 @@ function makeStateKey(source: string, controlId: string): string {
 
 function cloneState(state: ControlState): ControlState {
   return { ...state };
+}
+
+function cloneEvent(event: ControlEvent): ControlEvent {
+  return { ...event };
 }
 
 function findState(
@@ -195,11 +217,19 @@ function createControlEvent(
   };
 }
 
+function compareQueuedEvents(left: ControlEvent, right: ControlEvent): number {
+  if (left.timestamp !== right.timestamp) {
+    return left.timestamp - right.timestamp;
+  }
+
+  return left.sequence - right.sequence;
+}
+
 function insertQueuedEvent(queue: ControlEvent[], nextEvent: ControlEvent) {
   const queueLength = queue.length;
   if (
     queueLength === 0 ||
-    queue[queueLength - 1]!.timestamp <= nextEvent.timestamp
+    compareQueuedEvents(queue[queueLength - 1]!, nextEvent) <= 0
   ) {
     queue.push(nextEvent);
     return;
@@ -209,7 +239,7 @@ function insertQueuedEvent(queue: ControlEvent[], nextEvent: ControlEvent) {
   let high = queueLength;
   while (low < high) {
     const mid = (low + high) >> 1;
-    if (queue[mid]!.timestamp <= nextEvent.timestamp) {
+    if (compareQueuedEvents(queue[mid]!, nextEvent) <= 0) {
       low = mid + 1;
     } else {
       high = mid;
@@ -260,6 +290,7 @@ function processQueuedControlEvents<TWorld>(
   world: TWorld,
   tickTime: number,
   queue: ControlEvent[],
+  frameEvents: ControlEvent[],
   states: Map<string, ControlState>,
   eventListeners: EventListenerRecord<TWorld>[],
   controls: CoreControls<TWorld>,
@@ -271,6 +302,8 @@ function processQueuedControlEvents<TWorld>(
 
     const state = upsertState(states, event);
     applyEventToState(state, event);
+    frameEvents.push(event);
+    controls.stats.lastProcessedEvent = cloneEvent(event);
     notifyControlEventListeners(world, event, state, eventListeners, controls);
     processedCount += 1;
   }
@@ -321,21 +354,45 @@ function getMatchingActiveStates(
   });
 }
 
+function matchesInputState(
+  filter: ControlFilter | undefined,
+  state: InputStateEntry,
+): boolean {
+  if (!filter) return true;
+  return (
+    matchesValue(filter.source, state.source) &&
+    matchesValue(filter.controlId, state.controlId)
+  );
+}
+
 export function createControls<TWorld>(): CoreControls<TWorld> {
   const queue: ControlEvent[] = [];
+  const frameEvents: ControlEvent[] = [];
   const states = new Map<string, ControlState>();
+  const inputState = new Map<string, InputStateEntry>();
   const eventListeners: EventListenerRecord<TWorld>[] = [];
   const tickListeners: TickListenerRecord<TWorld>[] = [];
+  const stats = {
+    lastQueueLength: 0,
+    lastProcessedCount: 0,
+    lastProcessedEvent: null as ControlEvent | null,
+    totalEnqueuedCount: 0,
+    totalProcessedCount: 0,
+  };
   let sequence = 0;
   let listenerSequence = 0;
 
   const controls = {
     queue,
     states,
+    stats,
     enqueue,
+    setInputState,
+    isInputActive,
     on,
     onTick,
     process,
+    getFrameEvents,
     getState,
     getStates,
     getActiveStates,
@@ -349,8 +406,54 @@ export function createControls<TWorld>(): CoreControls<TWorld> {
   function enqueue(event: ControlEventInput): number {
     const nextEvent = createControlEvent(event, sequence);
     sequence += 1;
+    stats.totalEnqueuedCount += 1;
     insertQueuedEvent(queue, nextEvent);
     return nextEvent.sequence;
+  }
+
+  function setInputState(event: ControlInputStateChange): number | null {
+    const timestamp = normalizeTimestamp(event.timestamp);
+    const key = makeStateKey(event.source, event.controlId);
+    const existing = inputState.get(key);
+    if (existing?.active === event.active) {
+      return null;
+    }
+
+    const nextState: InputStateEntry = existing ?? {
+      key,
+      source: event.source,
+      controlId: event.controlId,
+      active: false,
+      updatedAt: timestamp,
+      payload: event.payload,
+    };
+    nextState.active = event.active;
+    nextState.updatedAt = timestamp;
+    nextState.payload = event.payload;
+    inputState.set(key, nextState);
+
+    return enqueue({
+      timestamp,
+      source: event.source,
+      controlId: event.controlId,
+      phase: event.active ? "start" : (event.inactivePhase ?? "end"),
+      value: event.active ? 1 : 0,
+      payload: event.payload,
+    });
+  }
+
+  function isInputActive(controlId: string, source?: string): boolean {
+    if (source) {
+      return inputState.get(makeStateKey(source, controlId))?.active ?? false;
+    }
+
+    for (const state of inputState.values()) {
+      if (state.controlId === controlId && state.active) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   function on(
@@ -383,22 +486,28 @@ export function createControls<TWorld>(): CoreControls<TWorld> {
     };
   }
 
-  function process(
-    world: TWorld,
-    tick: ControlTick = getDefaultTick(),
-  ) {
+  function process(world: TWorld, tick: ControlTick = getDefaultTick()) {
     const tickTime = tick.timestamp;
+    stats.lastQueueLength = queue.length;
+    frameEvents.length = 0;
     const processedCount = processQueuedControlEvents(
       world,
       tickTime,
       queue,
+      frameEvents,
       states,
       eventListeners,
       controls,
     );
+    stats.lastProcessedCount = processedCount;
+    stats.totalProcessedCount += processedCount;
     discardProcessedControlEvents(queue, processedCount);
     syncActiveControlDurations(states, tickTime);
     notifyControlTickListeners(world, tick, tickListeners, controls);
+  }
+
+  function getFrameEvents(): ControlEvent[] {
+    return frameEvents.map(cloneEvent);
   }
 
   function getState(controlId: string, source?: string): ControlState | undefined {
@@ -444,10 +553,33 @@ export function createControls<TWorld>(): CoreControls<TWorld> {
 
   function cancelActive(filter: ControlFilter = {}, timestamp?: number) {
     const cancelTimestamp = normalizeTimestamp(timestamp);
-    const activeStates = getMatchingActiveStates(states, filter);
+    const cancelledKeys = new Set<string>();
 
+    for (const state of inputState.values()) {
+      if (!state.active || !matchesInputState(filter, state)) {
+        continue;
+      }
+
+      state.active = false;
+      state.updatedAt = cancelTimestamp;
+      state.payload = { reason: "cancelActive" };
+      cancelledKeys.add(state.key);
+      enqueue({
+        timestamp: cancelTimestamp,
+        source: state.source,
+        controlId: state.controlId,
+        phase: "cancel",
+        value: 0,
+        payload: state.payload,
+      });
+    }
+
+    const activeStates = getMatchingActiveStates(states, filter);
     for (let i = 0; i < activeStates.length; i += 1) {
       const state = activeStates[i]!;
+      if (cancelledKeys.has(state.key) || inputState.has(state.key)) {
+        continue;
+      }
       enqueue({
         timestamp: cancelTimestamp,
         source: state.source,
@@ -461,6 +593,13 @@ export function createControls<TWorld>(): CoreControls<TWorld> {
 
   function clear() {
     queue.length = 0;
+    frameEvents.length = 0;
+    stats.lastQueueLength = 0;
+    stats.lastProcessedCount = 0;
+    stats.lastProcessedEvent = null;
+    stats.totalEnqueuedCount = 0;
+    stats.totalProcessedCount = 0;
+    inputState.clear();
     states.clear();
     eventListeners.length = 0;
     tickListeners.length = 0;
@@ -481,6 +620,10 @@ function shouldIgnoreKeyboardEventTarget(event: KeyboardEvent): boolean {
   );
 }
 
+function isManagedKeyboardControl(controlId: string): boolean {
+  return MANAGED_KEYBOARD_CONTROL_IDS.has(controlId);
+}
+
 function mouseButtonToControlId(button: number): string {
   switch (button) {
     case 0:
@@ -494,17 +637,14 @@ function mouseButtonToControlId(button: number): string {
   }
 }
 
-function createKeyboardPayload(
-  event: KeyboardEvent,
-  includeRepeat = false,
-) {
+function createKeyboardPayload(event: KeyboardEvent) {
   return {
     key: event.key,
     altKey: event.altKey,
     ctrlKey: event.ctrlKey,
     metaKey: event.metaKey,
+    repeat: event.repeat,
     shiftKey: event.shiftKey,
-    ...(includeRepeat ? { repeat: event.repeat } : {}),
   };
 }
 
@@ -519,20 +659,19 @@ function createPointerPayload(event: PointerEvent) {
   };
 }
 
-function createClickPayload(event: MouseEvent) {
+function createMousePayload(event: MouseEvent) {
   return {
     button: event.button,
+    buttons: event.buttons,
     clientX: event.clientX,
     clientY: event.clientY,
-    detail: event.detail,
-    kind: "click",
+    pointerId: -1,
+    pointerType: "mouse",
+    fallback: true,
   };
 }
 
-function trySetPointerCapture(
-  element: HTMLElement,
-  pointerId: number,
-) {
+function trySetPointerCapture(element: HTMLElement, pointerId: number) {
   if (!("setPointerCapture" in element)) {
     return;
   }
@@ -544,10 +683,7 @@ function trySetPointerCapture(
   }
 }
 
-function tryReleasePointerCapture(
-  element: HTMLElement,
-  pointerId: number,
-) {
+function tryReleasePointerCapture(element: HTMLElement, pointerId: number) {
   if (!("releasePointerCapture" in element)) {
     return;
   }
@@ -559,30 +695,68 @@ function tryReleasePointerCapture(
   }
 }
 
+function isEventTargetWithinElement(
+  element: HTMLElement,
+  event: Event,
+): boolean {
+  const eventTarget = event.target;
+  if (eventTarget instanceof Node && element.contains(eventTarget)) {
+    return true;
+  }
+
+  if (typeof event.composedPath === "function") {
+    return event.composedPath().includes(element);
+  }
+
+  return false;
+}
+
+function isPointerInsideElement(
+  element: HTMLElement,
+  event: MouseEvent | PointerEvent,
+): boolean {
+  if (isEventTargetWithinElement(element, event)) {
+    return true;
+  }
+
+  const bounds = element.getBoundingClientRect();
+  return (
+    event.clientX >= bounds.left &&
+    event.clientX <= bounds.right &&
+    event.clientY >= bounds.top &&
+    event.clientY <= bounds.bottom
+  );
+}
+
 function connectKeyboardControlInputs(
   world: CoreWorld,
   disconnectors: Array<() => void>,
 ) {
   const onKeyDown = (event: KeyboardEvent) => {
     if (shouldIgnoreKeyboardEventTarget(event)) return;
-    world.controls.enqueue({
+    if (!isManagedKeyboardControl(event.code)) return;
+    event.preventDefault();
+    if (world.controls.isInputActive(event.code, ControlSources.Keyboard)) {
+      return;
+    }
+    world.controls.setInputState({
       timestamp: event.timeStamp,
       source: ControlSources.Keyboard,
       controlId: event.code,
-      phase: event.repeat ? "change" : "start",
-      value: 1,
-      payload: createKeyboardPayload(event, true),
+      active: true,
+      payload: createKeyboardPayload(event),
     });
   };
 
   const onKeyUp = (event: KeyboardEvent) => {
     if (shouldIgnoreKeyboardEventTarget(event)) return;
-    world.controls.enqueue({
+    if (!isManagedKeyboardControl(event.code)) return;
+    event.preventDefault();
+    world.controls.setInputState({
       timestamp: event.timeStamp,
       source: ControlSources.Keyboard,
       controlId: event.code,
-      phase: "end",
-      value: 0,
+      active: false,
       payload: createKeyboardPayload(event),
     });
   };
@@ -607,56 +781,96 @@ function connectPointerControlInputs(
   element: HTMLElement,
   disconnectors: Array<() => void>,
 ) {
-  const onPointerDown = (event: PointerEvent) => {
+  const applyPointerDown = (event: PointerEvent) => {
+    if (!isPointerInsideElement(element, event)) {
+      return;
+    }
+
     trySetPointerCapture(element, event.pointerId);
-    world.controls.enqueue({
+    world.controls.setInputState({
       timestamp: event.timeStamp,
       source: ControlSources.Pointer,
       controlId: mouseButtonToControlId(event.button),
-      phase: "start",
-      value: 1,
+      active: true,
       payload: createPointerPayload(event),
     });
   };
 
-  const onPointerUp = (event: PointerEvent) => {
+  const applyPointerUp = (event: PointerEvent) => {
     tryReleasePointerCapture(element, event.pointerId);
-    world.controls.enqueue({
+    world.controls.setInputState({
       timestamp: event.timeStamp,
       source: ControlSources.Pointer,
       controlId: mouseButtonToControlId(event.button),
-      phase: "end",
-      value: 0,
+      active: false,
       payload: createPointerPayload(event),
     });
   };
 
-  const onPointerCancel = (event: PointerEvent) => {
-    world.controls.cancelActive(
-      { source: ControlSources.Pointer },
-      event.timeStamp,
-    );
+  const applyPointerCancel = (event: PointerEvent) => {
+    world.controls.cancelActive({ source: ControlSources.Pointer }, event.timeStamp);
   };
 
-  const onClick = (event: MouseEvent) => {
-    world.controls.enqueue({
+  const applyMouseDown = (event: MouseEvent) => {
+    if (!isPointerInsideElement(element, event)) {
+      return;
+    }
+
+    world.controls.setInputState({
       timestamp: event.timeStamp,
       source: ControlSources.Pointer,
       controlId: mouseButtonToControlId(event.button),
-      phase: "trigger",
-      value: 1,
-      payload: createClickPayload(event),
+      active: true,
+      payload: createMousePayload(event),
     });
   };
 
-  element.addEventListener("pointerdown", onPointerDown);
-  element.addEventListener("pointerup", onPointerUp);
-  element.addEventListener("pointercancel", onPointerCancel);
-  element.addEventListener("click", onClick);
-  disconnectors.push(() => element.removeEventListener("pointerdown", onPointerDown));
-  disconnectors.push(() => element.removeEventListener("pointerup", onPointerUp));
-  disconnectors.push(() => element.removeEventListener("pointercancel", onPointerCancel));
-  disconnectors.push(() => element.removeEventListener("click", onClick));
+  const applyMouseUp = (event: MouseEvent) => {
+    world.controls.setInputState({
+      timestamp: event.timeStamp,
+      source: ControlSources.Pointer,
+      controlId: mouseButtonToControlId(event.button),
+      active: false,
+      payload: createMousePayload(event),
+    });
+  };
+
+  const onWindowBlur = () => {
+    world.controls.cancelActive({ source: ControlSources.Pointer }, getNow());
+  };
+
+  element.addEventListener("pointerdown", applyPointerDown);
+  element.addEventListener("pointerup", applyPointerUp);
+  element.addEventListener("pointercancel", applyPointerCancel);
+  element.addEventListener("mousedown", applyMouseDown);
+  element.addEventListener("mouseup", applyMouseUp);
+  window.addEventListener("pointerdown", applyPointerDown, true);
+  window.addEventListener("pointerup", applyPointerUp, true);
+  window.addEventListener("pointercancel", applyPointerCancel, true);
+  window.addEventListener("mousedown", applyMouseDown, true);
+  window.addEventListener("mouseup", applyMouseUp, true);
+  window.addEventListener("blur", onWindowBlur);
+  disconnectors.push(() => element.removeEventListener("pointerdown", applyPointerDown));
+  disconnectors.push(() => element.removeEventListener("pointerup", applyPointerUp));
+  disconnectors.push(() => element.removeEventListener("pointercancel", applyPointerCancel));
+  disconnectors.push(() => element.removeEventListener("mousedown", applyMouseDown));
+  disconnectors.push(() => element.removeEventListener("mouseup", applyMouseUp));
+  disconnectors.push(() =>
+    window.removeEventListener("pointerdown", applyPointerDown, true),
+  );
+  disconnectors.push(() =>
+    window.removeEventListener("pointerup", applyPointerUp, true),
+  );
+  disconnectors.push(() =>
+    window.removeEventListener("pointercancel", applyPointerCancel, true),
+  );
+  disconnectors.push(() =>
+    window.removeEventListener("mousedown", applyMouseDown, true),
+  );
+  disconnectors.push(() =>
+    window.removeEventListener("mouseup", applyMouseUp, true),
+  );
+  disconnectors.push(() => window.removeEventListener("blur", onWindowBlur));
 }
 
 function disconnectControlInputs(disconnectors: Array<() => void>) {

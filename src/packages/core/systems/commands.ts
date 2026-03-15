@@ -9,6 +9,13 @@ import type {
 export function createCoreCommands<TWorld>(): CoreCommands<TWorld> {
     const queue: CoreCommand[] = [];
     const handlers = new Map<string, CoreCommandHandler<TWorld>[]>();
+    const stats = {
+        lastQueueLength: 0,
+        lastProcessedCount: 0,
+        lastProcessedCommand: null as CoreCommand | null,
+        totalEnqueuedCount: 0,
+        totalProcessedCount: 0,
+    };
     let sequence = 0;
 
     function enqueue(command: CoreCommandInput) {
@@ -21,6 +28,7 @@ export function createCoreCommands<TWorld>(): CoreCommands<TWorld> {
             payload: command.payload
         };
         sequence += 1;
+        stats.totalEnqueuedCount += 1;
 
         const queueLength = queue.length;
         if (queueLength === 0 || queue[queueLength - 1]!.timestamp <= timestamp) {
@@ -63,32 +71,37 @@ export function createCoreCommands<TWorld>(): CoreCommands<TWorld> {
         };
     }
 
+    function invokeHandlers(
+        world: TWorld,
+        command: CoreCommand,
+        handlersForCommand: CoreCommandHandler<TWorld>[] | undefined,
+    ) {
+        if (!handlersForCommand) return;
+
+        for (let i = 0; i < handlersForCommand.length; i += 1) {
+            try {
+                handlersForCommand[i]!(world, command);
+            }
+            catch (error) {
+                console.error("command handler failed", command, error);
+            }
+        }
+    }
+
     function process(world: TWorld) {
         const queueLength = queue.length;
+        stats.lastQueueLength = queueLength;
+        stats.lastProcessedCount = queueLength;
+        stats.totalProcessedCount += queueLength;
         if (queueLength === 0) return;
 
         const anyHandlers = handlers.get('*');
         for (let i = 0; i < queueLength; i += 1) {
             const command = queue[i]!;
-            const typeHandlers = handlers.get(command.type);
-            if (typeHandlers) {
-                for (let j = 0; j < typeHandlers.length; j += 1) {
-                    typeHandlers[j]!(world, command);
-                }
-            }
-
-            const sourceHandlers = handlers.get(`source:${command.source}`);
-            if (sourceHandlers) {
-                for (let j = 0; j < sourceHandlers.length; j += 1) {
-                    sourceHandlers[j]!(world, command);
-                }
-            }
-
-            if (anyHandlers) {
-                for (let j = 0; j < anyHandlers.length; j += 1) {
-                    anyHandlers[j]!(world, command);
-                }
-            }
+            stats.lastProcessedCommand = { ...command };
+            invokeHandlers(world, command, handlers.get(command.type));
+            invokeHandlers(world, command, handlers.get(`source:${command.source}`));
+            invokeHandlers(world, command, anyHandlers);
         }
 
         queue.length = 0;
@@ -96,10 +109,15 @@ export function createCoreCommands<TWorld>(): CoreCommands<TWorld> {
 
     function clear() {
         queue.length = 0;
+        stats.lastQueueLength = 0;
+        stats.lastProcessedCount = 0;
+        stats.lastProcessedCommand = null;
+        stats.totalEnqueuedCount = 0;
+        stats.totalProcessedCount = 0;
         handlers.clear();
     }
 
-    return { queue, handlers, enqueue, on, process, clear };
+    return { queue, handlers, stats, enqueue, on, process, clear };
 }
 
 export function commandsSystem(world: CoreWorld) {

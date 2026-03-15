@@ -1,6 +1,6 @@
 import { hasComponent, query } from "bitecs";
 import type { CoreWorld } from "../core";
-import { findHighestFloorTopAtPosition } from "./gravity";
+import { findHighestFloorTopAtPosition, getFloorCollisionEids } from "./gravity";
 import { lookCameraAt, readCameraPosition, setCameraPosition } from "./render";
 
 type Vec3 = { x: number; y: number; z: number };
@@ -119,8 +119,7 @@ function clampCameraHeightToFloor(
   desiredPosition: Vec3,
   currentCameraPosition: Vec3,
 ): boolean {
-  const { Collider, Floor, Position, Rotation } = world.components;
-  const floorEids = query(world, [Floor, Position, Rotation, Collider]);
+  const floorEids = getFloorCollisionEids(world);
   if (floorEids.length === 0) return false;
 
   // Ignore floors above the current camera height so the camera does not jump to ceilings.

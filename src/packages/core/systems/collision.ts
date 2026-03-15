@@ -26,6 +26,7 @@ const COLLISION_MIN_BOUNCE_SPEED = 0.75
 const scratchEuler = new Euler(0, 0, 0, 'YXZ')
 const scratchQuaternion = new Quaternion()
 const scratchRotationMatrix = new Matrix4()
+const syncedProjectileEidsScratch: number[] = []
 
 type ColliderConfig = {
     halfWidth: number,
@@ -565,6 +566,20 @@ function computeBounceSuggestions(world: CoreWorld, seedEids: readonly number[])
     }
 }
 
+function collectSyncedProjectileEids(world: CoreWorld, syncedEids: readonly number[]) {
+    const { Projectile } = world.components
+    syncedProjectileEidsScratch.length = 0
+
+    for (let i = 0; i < syncedEids.length; i += 1) {
+        const eid = syncedEids[i]!
+        if (Projectile[eid]) {
+            syncedProjectileEidsScratch.push(eid)
+        }
+    }
+
+    return syncedProjectileEidsScratch
+}
+
 function readColliderConfig(world: CoreWorld, eid: number): ColliderConfig {
     const { Collider } = world.components
     return {
@@ -783,7 +798,10 @@ function refreshCollisionQueries(world: CoreWorld, syncedEids: readonly number[]
 
     // Keep Rapier's query structures fresh without advancing any physics simulation.
     rapierWorld.updateSceneQueries()
-    computeBounceSuggestions(world, syncedEids)
+    const syncedProjectileEids = collectSyncedProjectileEids(world, syncedEids)
+    if (syncedProjectileEids.length > 0) {
+        computeBounceSuggestions(world, syncedProjectileEids)
+    }
     rebuildTouchingForSyncedEids(world, syncedEids)
 }
 

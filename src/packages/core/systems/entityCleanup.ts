@@ -1,6 +1,6 @@
 import { query, removeEntity } from "bitecs"
 import type { CoreWorld } from "../types"
-import { findHighestFloorTopAtPosition } from "./gravity"
+import { findHighestFloorTopAtPosition, getFloorCollisionEids } from "./gravity"
 import { removeColliderByEid } from "./collision"
 import { resetFlaginatorEntity } from "./flaginator"
 import { removeObjectByEid } from "./render"
@@ -39,9 +39,35 @@ export function destroyEntity(world: CoreWorld, eid: number) {
 }
 
 export function fallCleanupSystem(world: CoreWorld) {
-    const { Collider, Floor, Position, Rotation } = world.components
-    const floorEids = query(world, [Floor, Position, Rotation, Collider])
+    const { Floor, Position } = world.components
+    const floorEids = getFloorCollisionEids(world)
     if (floorEids.length === 0) return
+
+    if (floorEids.length === 1) {
+        const onlyFloorEid = floorEids[0]!
+        const singleFloorTop = findHighestFloorTopAtPosition(
+            world,
+            floorEids,
+            Position.x[onlyFloorEid],
+            Position.z[onlyFloorEid],
+        )
+        if (singleFloorTop === null) return
+
+        const doomedEids: number[] = []
+        for (const eid of query(world, [Position])) {
+            if (Floor[eid]) continue
+            if (Position.y[eid] > singleFloorTop - MAX_FALL_DISTANCE_BELOW_FLOOR) {
+                continue
+            }
+
+            doomedEids.push(eid)
+        }
+
+        for (let i = 0; i < doomedEids.length; i += 1) {
+            destroyEntity(world, doomedEids[i]!)
+        }
+        return
+    }
 
     const worldHighestFloorTop = findWorldHighestFloorTop(world, floorEids)
     if (worldHighestFloorTop === null) return
