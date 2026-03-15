@@ -27,6 +27,46 @@ const scratchEuler = new Euler(0, 0, 0, 'YXZ')
 const scratchQuaternion = new Quaternion()
 const scratchRotationMatrix = new Matrix4()
 
+type ColliderConfig = {
+    halfWidth: number,
+    halfHeight: number,
+    halfDepth: number,
+    sensor: boolean,
+    active: boolean,
+}
+
+type ColliderTransform = {
+    translation: RapierVector,
+    rotation: RapierRotation,
+}
+
+type CastEntityColliderOptions = {
+    maxToi?: number,
+    stopAtPenetration?: boolean,
+    filterFlags?: QueryFilterFlags,
+    filterPredicate?: (otherEid: number) => boolean,
+}
+
+type CastEntityColliderHit = {
+    colliderEid: number,
+    toi: number,
+    witness1: Vec3,
+    witness2: Vec3,
+    normal1: Vec3,
+    normal2: Vec3,
+}
+
+type CollisionBounceResponse = {
+    a: RapierVector | null,
+    b: RapierVector | null,
+}
+
+type CollisionDynamicState = {
+    aDynamic: boolean,
+    bDynamic: boolean,
+    dynamicCount: number,
+}
+
 let rapierInitPromise: Promise<void> | null = null
 
 function ensureRapierInit() {
@@ -118,49 +158,47 @@ function syncTouchingVisual(world: CoreWorld, eid: number) {
     )
 }
 
-function addTouchPair(world: CoreWorld, a: number, b: number) {
+function syncTouchingVisualIfChanged(world: CoreWorld, eid: number, changed: boolean) {
+    if (changed) {
+        syncTouchingVisual(world, eid)
+    }
+}
+
+function addTouchingEntity(state: CollisionState, eid: number, otherEid: number) {
+    const list = getTouchList(state, eid)
+    if (list.includes(otherEid)) {
+        return false
+    }
+
+    list.push(otherEid)
+    return true
+}
+
+function removeTouchingEntity(state: CollisionState, eid: number, otherEid: number) {
+    return removeValueInPlace(getTouchList(state, eid), otherEid)
+}
+
+function getSortedPair(a: number, b: number) {
+    return a < b ? { min: a, max: b } : { min: b, max: a }
+}
+
+function registerTouchPairRecord(world: CoreWorld, a: number, b: number) {
     const state = world.collision
-    const aList = getTouchList(state, a)
-    if (!aList.includes(b)) {
-        aList.push(b)
-        syncTouchingVisual(world, a)
-    }
-
-    const bList = getTouchList(state, b)
-    if (!bList.includes(a)) {
-        bList.push(a)
-        syncTouchingVisual(world, b)
-    }
-
     const key = pairKeyFor(world, a, b)
     if (state.touchPairIndexByKey.has(key)) return
 
     const pairIndex = state.touchPairs.Count
+    const pair = getSortedPair(a, b)
     ensureTouchPairCapacity(state, pairIndex + 1)
-    const min = a < b ? a : b
-    const max = a < b ? b : a
-    state.touchPairs.A[pairIndex] = min
-    state.touchPairs.B[pairIndex] = max
+    state.touchPairs.A[pairIndex] = pair.min
+    state.touchPairs.B[pairIndex] = pair.max
     state.touchPairs.Count += 1
     state.touchPairIndexByKey.set(key, pairIndex)
     state.touchPairKeysByIndex[pairIndex] = key
 }
 
-function removeTouchPair(world: CoreWorld, a: number, b: number) {
+function unregisterTouchPairRecord(world: CoreWorld, a: number, b: number) {
     const state = world.collision
-
-    const aList = getTouchList(state, a)
-    const aRemoved = removeValueInPlace(aList, b)
-    if (aRemoved) {
-        syncTouchingVisual(world, a)
-    }
-
-    const bList = getTouchList(state, b)
-    const bRemoved = removeValueInPlace(bList, a)
-    if (bRemoved) {
-        syncTouchingVisual(world, b)
-    }
-
     const key = pairKeyFor(world, a, b)
     const pairIndex = state.touchPairIndexByKey.get(key)
     if (pairIndex === undefined) return
@@ -178,6 +216,20 @@ function removeTouchPair(world: CoreWorld, a: number, b: number) {
     state.touchPairs.Count = lastIndex
     state.touchPairKeysByIndex.length = lastIndex
     state.touchPairIndexByKey.delete(key)
+}
+
+function addTouchPair(world: CoreWorld, a: number, b: number) {
+    const state = world.collision
+    syncTouchingVisualIfChanged(world, a, addTouchingEntity(state, a, b))
+    syncTouchingVisualIfChanged(world, b, addTouchingEntity(state, b, a))
+    registerTouchPairRecord(world, a, b)
+}
+
+function removeTouchPair(world: CoreWorld, a: number, b: number) {
+    const state = world.collision
+    syncTouchingVisualIfChanged(world, a, removeTouchingEntity(state, a, b))
+    syncTouchingVisualIfChanged(world, b, removeTouchingEntity(state, b, a))
+    unregisterTouchPairRecord(world, a, b)
 }
 
 function clearTouchingForEntity(world: CoreWorld, eid: number) {
@@ -290,61 +342,74 @@ function addBounceSuggestion(world: CoreWorld, eid: number, delta: RapierVector)
     suggestions.z[eid] += delta.z
 }
 
-function computeCollisionBounceResponses(
+function shouldIgnoreCollisionBounce(world: CoreWorld, a: number, b: number) {
+    const { Collider, Floor } = world.components
+    return Collider.Sensor[a] || Collider.Sensor[b] || Floor[a] || Floor[b]
+}
+
+function resolveCollisionNormal(
     world: CoreWorld,
     a: number,
     b: number,
     normal: RapierVector,
 ) {
-    const { Collider, Floor, Position, Velocity } = world.components
-    if (Collider.Sensor[a] || Collider.Sensor[b] || Floor[a] || Floor[b]) {
-        return null
+    const normalizedNormal = normalize(normal)
+    if (normalizedNormal) {
+        return normalizedNormal
     }
 
-    let normalizedNormal = normalize(normal)
-    if (!normalizedNormal) {
-        normalizedNormal = normalize({
-            x: Position.x[b] - Position.x[a],
-            y: Position.y[b] - Position.y[a],
-            z: Position.z[b] - Position.z[a],
-        })
-    }
-    if (!normalizedNormal) {
-        return null
-    }
+    const { Position } = world.components
+    return normalize({
+        x: Position.x[b] - Position.x[a],
+        y: Position.y[b] - Position.y[a],
+        z: Position.z[b] - Position.z[a],
+    })
+}
 
+function readCollisionDynamicState(world: CoreWorld, a: number, b: number): CollisionDynamicState {
+    const { Velocity } = world.components
     const aDynamic = hasComponent(world, a, Velocity)
     const bDynamic = hasComponent(world, b, Velocity)
-    const dynamicCount = Number(aDynamic) + Number(bDynamic)
-    if (dynamicCount === 0) {
-        return null
+    return {
+        aDynamic,
+        bDynamic,
+        dynamicCount: Number(aDynamic) + Number(bDynamic),
     }
+}
 
-    const relativeVelocity = {
-        x: (aDynamic ? Velocity.x[a] : 0) - (bDynamic ? Velocity.x[b] : 0),
-        y: (aDynamic ? Velocity.y[a] : 0) - (bDynamic ? Velocity.y[b] : 0),
-        z: (aDynamic ? Velocity.z[a] : 0) - (bDynamic ? Velocity.z[b] : 0),
+function readRelativeCollisionVelocity(
+    world: CoreWorld,
+    a: number,
+    b: number,
+    dynamicState: CollisionDynamicState,
+): RapierVector {
+    const { Velocity } = world.components
+    return {
+        x: (dynamicState.aDynamic ? Velocity.x[a] : 0) - (dynamicState.bDynamic ? Velocity.x[b] : 0),
+        y: (dynamicState.aDynamic ? Velocity.y[a] : 0) - (dynamicState.bDynamic ? Velocity.y[b] : 0),
+        z: (dynamicState.aDynamic ? Velocity.z[a] : 0) - (dynamicState.bDynamic ? Velocity.z[b] : 0),
     }
-    const closingSpeed = dot(relativeVelocity, normalizedNormal)
-    if (closingSpeed <= COLLISION_MIN_BOUNCE_SPEED) {
-        return null
-    }
+}
 
-    const bounceImpulse = ((1 + COLLISION_BOUNCE_RESTITUTION) * closingSpeed) / dynamicCount
-    const response = {
-        a: aDynamic
-            ? {
-                x: -normalizedNormal.x * bounceImpulse,
-                y: -normalizedNormal.y * bounceImpulse,
-                z: -normalizedNormal.z * bounceImpulse,
-            }
+function createBounceDelta(normal: RapierVector, scalar: number): RapierVector {
+    return {
+        x: normal.x * scalar,
+        y: normal.y * scalar,
+        z: normal.z * scalar,
+    }
+}
+
+function createCollisionBounceResponse(
+    normal: RapierVector,
+    bounceImpulse: number,
+    dynamicState: CollisionDynamicState,
+): CollisionBounceResponse | null {
+    const response: CollisionBounceResponse = {
+        a: dynamicState.aDynamic
+            ? createBounceDelta(normal, -bounceImpulse)
             : null,
-        b: bDynamic
-            ? {
-                x: normalizedNormal.x * bounceImpulse,
-                y: normalizedNormal.y * bounceImpulse,
-                z: normalizedNormal.z * bounceImpulse,
-            }
+        b: dynamicState.bDynamic
+            ? createBounceDelta(normal, bounceImpulse)
             : null,
     }
 
@@ -353,6 +418,42 @@ function computeCollisionBounceResponses(
     }
 
     return response
+}
+
+function computeCollisionBounceResponses(
+    world: CoreWorld,
+    a: number,
+    b: number,
+    normal: RapierVector,
+) {
+    if (shouldIgnoreCollisionBounce(world, a, b)) {
+        return null
+    }
+
+    const normalizedNormal = resolveCollisionNormal(world, a, b, normal)
+    if (!normalizedNormal) {
+        return null
+    }
+
+    const dynamicState = readCollisionDynamicState(world, a, b)
+    if (dynamicState.dynamicCount === 0) {
+        return null
+    }
+
+    const relativeVelocity = readRelativeCollisionVelocity(world, a, b, dynamicState)
+    const closingSpeed = dot(relativeVelocity, normalizedNormal)
+    if (closingSpeed <= COLLISION_MIN_BOUNCE_SPEED) {
+        return null
+    }
+
+    const bounceImpulse =
+        ((1 + COLLISION_BOUNCE_RESTITUTION) * closingSpeed) /
+        dynamicState.dynamicCount
+    return createCollisionBounceResponse(
+        normalizedNormal,
+        bounceImpulse,
+        dynamicState,
+    )
 }
 
 function suggestCollisionBounce(world: CoreWorld, a: number, b: number) {
@@ -384,6 +485,73 @@ function suggestCollisionBounce(world: CoreWorld, a: number, b: number) {
     return true
 }
 
+function fillPredictedBounceQueryHalfExtents(
+    world: CoreWorld,
+    eid: number,
+    out: RapierVector,
+) {
+    fillWorldHalfExtents(world, eid, out)
+    out.x += COLLISION_RESPONSE_PREDICTION
+    out.y += COLLISION_RESPONSE_PREDICTION
+    out.z += COLLISION_RESPONSE_PREDICTION
+}
+
+function markBouncePairProcessed(
+    world: CoreWorld,
+    a: number,
+    b: number,
+    processedKeys: Set<number>,
+) {
+    const key = pairKeyFor(world, a, b)
+    if (processedKeys.has(key)) {
+        return false
+    }
+
+    processedKeys.add(key)
+    return true
+}
+
+function handleBounceCandidate(
+    world: CoreWorld,
+    eid: number,
+    candidateHandle: number,
+    processedKeys: Set<number>,
+) {
+    const otherEid = world.collision.eidByColliderHandle.get(candidateHandle)
+    if (otherEid === undefined || otherEid === eid) {
+        return
+    }
+
+    if (!markBouncePairProcessed(world, eid, otherEid, processedKeys)) {
+        return
+    }
+
+    suggestCollisionBounce(world, eid, otherEid)
+}
+
+function scanBounceCandidatesForEntity(
+    world: CoreWorld,
+    eid: number,
+    processedKeys: Set<number>,
+    aabbHalfExtents: RapierVector,
+) {
+    const state = world.collision
+    const collider = state.collidersByEid[eid]
+    if (!collider?.isValid() || !state.world) {
+        return
+    }
+
+    fillPredictedBounceQueryHalfExtents(world, eid, aabbHalfExtents)
+    state.world.collidersWithAabbIntersectingAabb(
+        collider.translation(),
+        aabbHalfExtents,
+        (candidate) => {
+            handleBounceCandidate(world, eid, candidate.handle, processedKeys)
+            return true
+        },
+    )
+}
+
 function computeBounceSuggestions(world: CoreWorld, seedEids: readonly number[]) {
     const state = world.collision
     if (!state.world) return
@@ -393,98 +561,102 @@ function computeBounceSuggestions(world: CoreWorld, seedEids: readonly number[])
 
     for (let i = 0; i < seedEids.length; i += 1) {
         const eid = seedEids[i]!
-        const collider = state.collidersByEid[eid]
-        if (!collider?.isValid()) continue
-
-        fillWorldHalfExtents(world, eid, aabbHalfExtents)
-
-        state.world.collidersWithAabbIntersectingAabb(
-            collider.translation(),
-            {
-                x: aabbHalfExtents.x + COLLISION_RESPONSE_PREDICTION,
-                y: aabbHalfExtents.y + COLLISION_RESPONSE_PREDICTION,
-                z: aabbHalfExtents.z + COLLISION_RESPONSE_PREDICTION,
-            },
-            (candidate) => {
-                const otherEid = state.eidByColliderHandle.get(candidate.handle)
-                if (otherEid === undefined || otherEid === eid) {
-                    return true
-                }
-
-                const key = pairKeyFor(world, eid, otherEid)
-                if (processedKeys.has(key)) {
-                    return true
-                }
-
-                processedKeys.add(key)
-                suggestCollisionBounce(world, eid, otherEid)
-                return true
-            },
-        )
+        scanBounceCandidatesForEntity(world, eid, processedKeys, aabbHalfExtents)
     }
+}
+
+function readColliderConfig(world: CoreWorld, eid: number): ColliderConfig {
+    const { Collider } = world.components
+    return {
+        halfWidth: Collider.HalfWidth[eid],
+        halfHeight: Collider.HalfHeight[eid],
+        halfDepth: Collider.HalfDepth[eid],
+        sensor: Boolean(Collider.Sensor[eid]),
+        active: Boolean(Collider.Active[eid]),
+    }
+}
+
+function readColliderTransform(world: CoreWorld, eid: number): ColliderTransform {
+    const { Position, Rotation } = world.components
+    return {
+        translation: {
+            x: Position.x[eid],
+            y: Position.y[eid],
+            z: Position.z[eid],
+        },
+        rotation: eulerToQuaternion(
+            Rotation.pitch[eid],
+            Rotation.yaw[eid],
+            Rotation.roll[eid],
+        ),
+    }
+}
+
+function createRapierColliderDesc(
+    config: ColliderConfig,
+    transform: ColliderTransform,
+) {
+    return ColliderDesc
+        .cuboid(config.halfWidth, config.halfHeight, config.halfDepth)
+        .setTranslation(
+            transform.translation.x,
+            transform.translation.y,
+            transform.translation.z,
+        )
+        .setRotation(transform.rotation)
+        .setSensor(config.sensor)
+        .setEnabled(config.active)
+        .setActiveCollisionTypes(ActiveCollisionTypes.ALL)
+}
+
+function syncExistingColliderConfig(
+    rapierCollider: RapierCollider,
+    config: ColliderConfig,
+) {
+    rapierCollider.setHalfExtents({
+        x: config.halfWidth,
+        y: config.halfHeight,
+        z: config.halfDepth,
+    })
+    rapierCollider.setSensor(config.sensor)
+    rapierCollider.setEnabled(config.active)
+    rapierCollider.setActiveCollisionTypes(ActiveCollisionTypes.ALL)
 }
 
 function syncCollider(world: CoreWorld, eid: number, needsConfigSync: boolean) {
     const rapierWorld = world.collision.world
     if (!rapierWorld) return null
 
-    const { Position, Rotation, Collider } = world.components
+    const config = readColliderConfig(world, eid)
+    const transform = readColliderTransform(world, eid)
     let rapierCollider = world.collision.collidersByEid[eid]
 
-    const hx = Collider.HalfWidth[eid]
-    const hy = Collider.HalfHeight[eid]
-    const hz = Collider.HalfDepth[eid]
-    const translation: RapierVector = {
-        x: Position.x[eid],
-        y: Position.y[eid],
-        z: Position.z[eid],
-    }
-    const rotation = eulerToQuaternion(
-        Rotation.pitch[eid],
-        Rotation.yaw[eid],
-        Rotation.roll[eid],
-    )
-
     if (!rapierCollider || !rapierCollider.isValid()) {
-        const desc = ColliderDesc
-            .cuboid(hx, hy, hz)
-            .setTranslation(translation.x, translation.y, translation.z)
-            .setRotation(rotation)
-            .setSensor(Boolean(Collider.Sensor[eid]))
-            .setEnabled(Boolean(Collider.Active[eid]))
-            .setActiveCollisionTypes(ActiveCollisionTypes.ALL)
-
-        rapierCollider = rapierWorld.createCollider(desc)
+        rapierCollider = rapierWorld.createCollider(
+            createRapierColliderDesc(config, transform),
+        )
         world.collision.collidersByEid[eid] = rapierCollider
         world.collision.eidByColliderHandle.set(rapierCollider.handle, eid)
         return rapierCollider
     }
 
-    rapierCollider.setTranslation(translation)
-    rapierCollider.setRotation(rotation)
+    rapierCollider.setTranslation(transform.translation)
+    rapierCollider.setRotation(transform.rotation)
 
     if (needsConfigSync) {
-        rapierCollider.setHalfExtents({ x: hx, y: hy, z: hz })
-        rapierCollider.setSensor(Boolean(Collider.Sensor[eid]))
-        rapierCollider.setEnabled(Boolean(Collider.Active[eid]))
-        rapierCollider.setActiveCollisionTypes(ActiveCollisionTypes.ALL)
+        syncExistingColliderConfig(rapierCollider, config)
     }
 
     return rapierCollider
 }
 
-function rebuildTouchingForEntity(world: CoreWorld, eid: number) {
-    const state = world.collision
-    const rapierCollider = state.collidersByEid[eid]
-    if (!rapierCollider || !rapierCollider.isValid() || !state.world) {
-        clearTouchingForEntity(world, eid)
-        return
-    }
-
-    const nextTouching = state.scratchTouching
-    nextTouching.length = 0
-
-    state.world.intersectionsWithShape(
+function collectTouchingEntities(
+    state: CollisionState,
+    eid: number,
+    rapierCollider: RapierCollider,
+    nextTouching: number[],
+) {
+    state.world!.intersectionsWithShape(
         rapierCollider.translation(),
         rapierCollider.rotation(),
         rapierCollider.shape,
@@ -501,15 +673,28 @@ function rebuildTouchingForEntity(world: CoreWorld, eid: number) {
         undefined,
         rapierCollider,
     )
+}
 
-    const currentTouching = getTouchList(state, eid)
+function removeStaleTouchPairs(
+    world: CoreWorld,
+    eid: number,
+    currentTouching: number[],
+    nextTouching: readonly number[],
+) {
     for (let i = currentTouching.length - 1; i >= 0; i -= 1) {
         const otherEid = currentTouching[i]!
         if (!nextTouching.includes(otherEid)) {
             removeTouchPair(world, eid, otherEid)
         }
     }
+}
 
+function addNewTouchPairs(
+    world: CoreWorld,
+    eid: number,
+    currentTouching: readonly number[],
+    nextTouching: readonly number[],
+) {
     for (let i = 0; i < nextTouching.length; i += 1) {
         const otherEid = nextTouching[i]!
         if (!currentTouching.includes(otherEid)) {
@@ -518,11 +703,88 @@ function rebuildTouchingForEntity(world: CoreWorld, eid: number) {
     }
 }
 
+function rebuildTouchingForEntity(world: CoreWorld, eid: number) {
+    const state = world.collision
+    const rapierCollider = state.collidersByEid[eid]
+    if (!rapierCollider || !rapierCollider.isValid() || !state.world) {
+        clearTouchingForEntity(world, eid)
+        return
+    }
+
+    const nextTouching = state.scratchTouching
+    nextTouching.length = 0
+
+    collectTouchingEntities(state, eid, rapierCollider, nextTouching)
+
+    const currentTouching = getTouchList(state, eid)
+    removeStaleTouchPairs(world, eid, currentTouching, nextTouching)
+    addNewTouchPairs(world, eid, currentTouching, nextTouching)
+}
+
 function clearCollisionDirtyFlag(world: CoreWorld, eid: number) {
     const { CollisionDirtyFlags } = world.components
     CollisionDirtyFlags.DirtyTransformFlag[eid] = 0
     CollisionDirtyFlags.ConfigDirtyFlag[eid] = 0
     CollisionDirtyFlags.DirtyFlagSet[eid] = 0
+}
+
+function shouldRemoveCollider(world: CoreWorld, eid: number) {
+    const { Collider, Position, Rotation } = world.components
+    return (
+        !hasComponent(world, eid, Collider) ||
+        !hasComponent(world, eid, Position) ||
+        !hasComponent(world, eid, Rotation) ||
+        !Collider.Active[eid]
+    )
+}
+
+function syncDirtyCollider(world: CoreWorld, eid: number) {
+    const needsConfigSync = world.components.CollisionDirtyFlags.ConfigDirtyFlag[eid] === 1
+    const rapierCollider = syncCollider(world, eid, needsConfigSync)
+    clearCollisionDirtyFlag(world, eid)
+    return rapierCollider ? eid : null
+}
+
+function syncDirtyColliders(world: CoreWorld) {
+    const { CollisionDirtyFlags } = world.components
+    const dirtyCount = CollisionDirtyFlags.DirtyCount
+    const syncedEids: number[] = []
+
+    for (let i = 0; i < dirtyCount; i += 1) {
+        const eid = CollisionDirtyFlags.DirtyList[i]!
+
+        if (shouldRemoveCollider(world, eid)) {
+            removeColliderByEid(world, eid)
+            continue
+        }
+
+        const syncedEid = syncDirtyCollider(world, eid)
+        if (syncedEid !== null) {
+            syncedEids.push(syncedEid)
+        }
+    }
+
+    CollisionDirtyFlags.DirtyCount = 0
+    return syncedEids
+}
+
+function rebuildTouchingForSyncedEids(world: CoreWorld, syncedEids: readonly number[]) {
+    const { Collider } = world.components
+    for (let i = 0; i < syncedEids.length; i += 1) {
+        const eid = syncedEids[i]!
+        if (!Collider.Active[eid]) continue
+        rebuildTouchingForEntity(world, eid)
+    }
+}
+
+function refreshCollisionQueries(world: CoreWorld, syncedEids: readonly number[]) {
+    const rapierWorld = world.collision.world
+    if (!rapierWorld || syncedEids.length === 0) return
+
+    // Keep Rapier's query structures fresh without advancing any physics simulation.
+    rapierWorld.updateSceneQueries()
+    computeBounceSuggestions(world, syncedEids)
+    rebuildTouchingForSyncedEids(world, syncedEids)
 }
 
 export function markCollisionTransformDirty(world: CoreWorld, eid: number) {
@@ -601,51 +863,12 @@ export function removeColliderByEid(world: CoreWorld, eid: number) {
 export function collisionSystem(world: CoreWorld) {
     if (!world.collision.ready || !world.collision.world) return
 
-    const { CollisionDirtyFlags, Collider, Position, Rotation } = world.components
     resetBounceSuggestions(world)
-    const dirtyCount = CollisionDirtyFlags.DirtyCount
+    const dirtyCount = world.components.CollisionDirtyFlags.DirtyCount
     if (dirtyCount === 0) return
 
-    const syncedEids: number[] = []
-    let updatedColliderCount = 0
-    for (let i = 0; i < dirtyCount; i += 1) {
-        const eid = CollisionDirtyFlags.DirtyList[i]!
-
-        if (
-            !hasComponent(world, eid, Collider) ||
-            !hasComponent(world, eid, Position) ||
-            !hasComponent(world, eid, Rotation) ||
-            !Collider.Active[eid]
-        ) {
-            removeColliderByEid(world, eid)
-            continue
-        }
-
-        const rapierCollider = syncCollider(
-            world,
-            eid,
-            CollisionDirtyFlags.ConfigDirtyFlag[eid] === 1,
-        )
-        clearCollisionDirtyFlag(world, eid)
-        if (rapierCollider) {
-            updatedColliderCount += 1
-            syncedEids.push(eid)
-        }
-    }
-
-    CollisionDirtyFlags.DirtyCount = 0
-
-    if (updatedColliderCount === 0) return
-
-    // Keep Rapier's query structures fresh without advancing any physics simulation.
-    world.collision.world.updateSceneQueries()
-    computeBounceSuggestions(world, syncedEids)
-
-    for (let i = 0; i < syncedEids.length; i += 1) {
-        const eid = syncedEids[i]!
-        if (!Collider.Active[eid]) continue
-        rebuildTouchingForEntity(world, eid)
-    }
+    const syncedEids = syncDirtyColliders(world)
+    refreshCollisionQueries(world, syncedEids)
 }
 
 export function getBounceSuggestion(world: CoreWorld, eid: number): Vec3 | null {
@@ -676,20 +899,8 @@ export function castEntityCollider(
     eid: number,
     shapePos: Position,
     shapeVel: Vec3,
-    opts: {
-        maxToi?: number,
-        stopAtPenetration?: boolean,
-        filterFlags?: QueryFilterFlags,
-        filterPredicate?: (otherEid: number) => boolean,
-    } = {},
-): {
-    colliderEid: number,
-    toi: number,
-    witness1: Vec3,
-    witness2: Vec3,
-    normal1: Vec3,
-    normal2: Vec3,
-} | null {
+    opts: CastEntityColliderOptions = {},
+): CastEntityColliderHit | null {
     const state = world.collision
     const rapierWorld = state.world
     const selfCollider = state.collidersByEid[eid]
@@ -701,14 +912,9 @@ export function castEntityCollider(
         return null
     }
 
-    const { Rotation } = world.components
     const hit: ShapeColliderTOI | null = rapierWorld.castShape(
         shapePos,
-        eulerToQuaternion(
-            Rotation.pitch[eid],
-            Rotation.yaw[eid],
-            Rotation.roll[eid],
-        ),
+        readColliderTransform(world, eid).rotation,
         shapeVel,
         selfCollider.shape,
         opts.maxToi ?? 1,

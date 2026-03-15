@@ -159,6 +159,10 @@ export {
 } from "./systems/flaginator";
 
 type CoreSystem = (world: CoreWorld) => void;
+type CoreWorldLifecycle = Pick<
+  CoreWorldBox,
+  "start" | "stop" | "dispose" | "isRunning"
+>;
 
 const WORLD_SYSTEMS = [
   timeSystem,
@@ -361,56 +365,79 @@ function isSetupCoreWorldOptions(
   return true;
 }
 
-function setupCoreWorld(
-  canvasOrOptions: HTMLCanvasElement | null | SetupCoreWorldOptions = null,
-  legacyMaxEntities = 100000,
+function createCoreWorld(maxEntities: number) {
+  const world = createWorld<CoreWorld>(createCoreWorldConfig(maxEntities));
+  registerCoreFlags(world);
+  return world;
+}
+
+function runWorldTick(world: CoreWorld) {
+  runSystems(world, WORLD_SYSTEMS);
+  if (world.components.RenderDirtyFlags.DirtyCount > 0) {
+    dirtyTransformsSystem(world);
+  }
+  uiBridgeSystem(world);
+}
+
+function runRenderTick(world: CoreWorld) {
+  runSystems(world, RENDER_SYSTEMS);
+}
+
+function initializeCoreWorld(world: CoreWorld, canvas: HTMLCanvasElement | null) {
+  setupRenderer(canvas);
+  setupCollisionSystem(world);
+  resetCameraTarget();
+}
+
+function cleanupCoreWorld(
+  world: CoreWorld,
+  controlInputs: { disconnect: () => void },
 ) {
-  const options = normalizeSetupCoreWorldOptions(
-    canvasOrOptions,
-    legacyMaxEntities,
-  );
+  controlInputs.disconnect();
+  world.commands.clear();
+  world.controls.clear();
+  disposeRenderer();
+  resetCameraTarget();
+}
+
+function createWorldLifecycle(
+  world: CoreWorld,
+  worldTickRate: number,
+  onDispose: () => void,
+): CoreWorldLifecycle {
   let runGameLoop = false;
   let disposed = false;
   const scheduler = createChronoTrigger();
   let worldTaskId: number | null = null;
   let renderTaskId: number | null = null;
 
-  const world = createWorld<CoreWorld>(
-    createCoreWorldConfig(options.maxEntities),
-  );
-  registerCoreFlags(world);
-  const controlInputs = setupControlInputs(world, options.canvas);
-
-  function worldTick(activeWorld: CoreWorld) {
-    runSystems(activeWorld, WORLD_SYSTEMS);
-    if (activeWorld.components.RenderDirtyFlags.DirtyCount > 0) {
-      dirtyTransformsSystem(activeWorld);
-    }
-    uiBridgeSystem(activeWorld);
-  }
-
-  function renderTick(activeWorld: CoreWorld) {
-    runSystems(activeWorld, RENDER_SYSTEMS);
-  }
-
   function ensureSchedulerTasks() {
     if (worldTaskId !== null && renderTaskId !== null) return;
 
     worldTaskId = scheduler.runAt({
       name: "worldTick",
-      fpsTarget: options.worldTickRate,
+      fpsTarget: worldTickRate,
       callback: () => {
         if (!runGameLoop) return;
-        worldTick(world);
+        runWorldTick(world);
       },
     });
     renderTaskId = scheduler.runAt({
       name: "renderSystem",
       callback: () => {
         if (!runGameLoop) return;
-        renderTick(world);
+        runRenderTick(world);
       },
     });
+  }
+
+  function disposeTask(taskId: number | null) {
+    if (taskId === null) {
+      return null;
+    }
+
+    scheduler.dispose(taskId);
+    return null;
   }
 
   function start() {
@@ -429,31 +456,26 @@ function setupCoreWorld(
     if (disposed) return;
     disposed = true;
     stop();
-    if (worldTaskId !== null) {
-      scheduler.dispose(worldTaskId);
-      worldTaskId = null;
-    }
-    if (renderTaskId !== null) {
-      scheduler.dispose(renderTaskId);
-      renderTaskId = null;
-    }
-    controlInputs.disconnect();
-    world.commands.clear();
-    world.controls.clear();
-    disposeRenderer();
-    resetCameraTarget();
+    worldTaskId = disposeTask(worldTaskId);
+    renderTaskId = disposeTask(renderTaskId);
+    onDispose();
   }
 
-  setupRenderer(options.canvas);
-  setupCollisionSystem(world);
-  resetCameraTarget();
-
-  const worldBox: CoreWorldBox = {
-    world,
+  return {
     start,
     stop,
     dispose,
     isRunning: () => runGameLoop,
+  };
+}
+
+function createCoreWorldBox(
+  world: CoreWorld,
+  lifecycle: CoreWorldLifecycle,
+): CoreWorldBox {
+  return {
+    world,
+    ...lifecycle,
     spawnEntity: (definition) => spawnEntity(world, definition),
     destroyEntity: (eid) => {
       destroyEntity(world, eid);
@@ -471,9 +493,26 @@ function setupCoreWorld(
     setEntityRotation: (eid, rotation) => setEntityRotation(world, eid, rotation),
     resetCameraTarget,
   };
+}
+
+function setupCoreWorld(
+  canvasOrOptions: HTMLCanvasElement | null | SetupCoreWorldOptions = null,
+  legacyMaxEntities = 100000,
+) {
+  const options = normalizeSetupCoreWorldOptions(
+    canvasOrOptions,
+    legacyMaxEntities,
+  );
+  const world = createCoreWorld(options.maxEntities);
+  const controlInputs = setupControlInputs(world, options.canvas);
+  initializeCoreWorld(world, options.canvas);
+  const lifecycle = createWorldLifecycle(world, options.worldTickRate, () => {
+    cleanupCoreWorld(world, controlInputs);
+  });
+  const worldBox = createCoreWorldBox(world, lifecycle);
 
   if (options.autoStart) {
-    start();
+    lifecycle.start();
   }
 
   return worldBox;
