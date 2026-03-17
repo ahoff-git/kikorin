@@ -1,21 +1,21 @@
 "use client";
 
 import type {
+  ChangeEvent,
   CSSProperties,
-  KeyboardEvent as ReactKeyboardEvent,
-  PointerEvent as ReactPointerEvent,
   RefObject,
 } from "react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { eventBus, type EventBusEvents } from "@/packages/core/mitt";
 import {
-  ControlSources,
+  type CameraSettings,
+  type CameraViewMode,
   type Player,
   type Position,
+  type ProjectionMode,
   type Time,
 } from "@/packages/core/types";
 import { setupWorld, type WorldBox } from "./kikorin";
-import { PlayerReactControls } from "./kikorinControls";
 import { PageLayout } from "./kikorinLayout";
 
 const CAMERA_DRAG_SENSITIVITY = 0.006;
@@ -39,38 +39,83 @@ const canvasStyle: CSSProperties = {
 
 const headerStyle: CSSProperties = {
   display: "flex",
-  gap: 12,
   alignItems: "center",
-  flexWrap: "wrap",
+  padding: "6px 10px",
+  overflowX: "auto",
+  overflowY: "hidden",
 };
 
-const navStyle: CSSProperties = {
-  padding: "16px 20px",
+const cameraControlsStyle: CSSProperties = {
+  display: "flex",
+  gap: 8,
+  flexWrap: "nowrap",
+  alignItems: "center",
+  minWidth: "max-content",
+};
+
+const cameraControlCardStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 12,
+  gap: 4,
+  minWidth: 112,
+  padding: "6px 8px",
+  border: "1px solid #d7d7d7",
+  borderRadius: 8,
+  background: "rgba(255, 255, 255, 0.92)",
 };
 
-const sectionLabelStyle: CSSProperties = {
-  fontSize: 12,
+const cameraControlLabelRowStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "baseline",
+  justifyContent: "space-between",
+  gap: 8,
+  fontSize: 11,
   fontWeight: 700,
-  letterSpacing: "0.08em",
+  lineHeight: 1.1,
   textTransform: "uppercase",
 };
 
-const helperTextStyle: CSSProperties = {
-  lineHeight: 1.6,
-  color: "#555",
+const cameraSliderStyle: CSSProperties = {
+  width: "100%",
+  margin: 0,
+  height: 18,
 };
 
-const CONTROL_INSTRUCTIONS =
-  "W / S move forward and back, Q / E strafe, A / D or Left / Right turn, I / K pitch up and down, left click to fire a small block, right drag inside the canvas to orbit the camera, and press Space to jump.";
+const cameraSelectStyle: CSSProperties = {
+  width: "100%",
+  minHeight: 28,
+  padding: "4px 6px",
+  border: "1px solid #c9c9c9",
+  borderRadius: 6,
+  background: "#fff",
+  fontSize: 12,
+};
 
-const LEFT_NAV_CONTROL_INSTRUCTIONS =
-  "Move forward and back with W and S, strafe with Q and E, turn with A and D or the left and right arrow keys, use I and K to pitch up and down, left click to fire a small block that can bounce off other blocks, right drag inside the canvas to orbit the camera, and press Space to jump.";
+const DEFAULT_CAMERA_SETTINGS = {
+  fov: 75,
+  followDistance: 10.8,
+  viewMode: "follow",
+  projectionMode: "perspective",
+  orthographicZoom: 1,
+} satisfies CameraSettings;
 
-const CONTROL_SYSTEM_NOTE =
-  "The React Boost Forward button in the header also feeds the same control system, so you can compare UI input with keyboard input.";
+const CAMERA_FOV_RANGE = {
+  min: 20,
+  max: 140,
+  step: 1,
+} as const;
+
+const CAMERA_FOLLOW_DISTANCE_RANGE = {
+  min: 0.5,
+  max: 60,
+  step: 0.5,
+} as const;
+
+const CAMERA_ORTHOGRAPHIC_ZOOM_RANGE = {
+  min: 0.25,
+  max: 12,
+  step: 0.05,
+} as const;
 
 type WorldUiState = {
   player: Player | null;
@@ -88,6 +133,9 @@ export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const worldRef = useRef<WorldBox | null>(null);
   const uiState = useWorldUiState();
+  const [cameraSettings, setCameraSettings] = useState<CameraSettings>(
+    DEFAULT_CAMERA_SETTINGS,
+  );
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -96,6 +144,7 @@ export default function Home() {
     canvas.style.cursor = "default";
     const world = setupWorld(canvas);
     worldRef.current = world;
+    setCameraSettings(world.readCameraSettings());
 
     const cameraDragController = createCameraDragController(
       canvas,
@@ -118,108 +167,53 @@ export default function Home() {
     };
   }, []);
 
-  function enqueueReactControlEvent(
-    active: boolean,
-    timestamp: number,
-    payload: Record<string, unknown>,
-    inactivePhase?: "end" | "cancel",
-  ) {
-    worldRef.current?.world.controls.setInputState({
-      timestamp,
-      source: ControlSources.React,
-      controlId: PlayerReactControls.BoostForward,
-      active,
-      inactivePhase,
-      payload,
-    });
+  function handleCameraFovChange(event: ChangeEvent<HTMLInputElement>) {
+    const fov = Number(event.currentTarget.value);
+    setCameraSettings((current) => ({ ...current, fov }));
+    worldRef.current?.setCameraFov(fov);
   }
 
-  function handleBoostForwardPointerDown(
-    event: ReactPointerEvent<HTMLButtonElement>,
+  function handleCameraFollowDistanceChange(
+    event: ChangeEvent<HTMLInputElement>,
   ) {
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // Safe to ignore if the browser rejects capture.
-    }
-
-    enqueueReactControlEvent(true, event.timeStamp, {
-      kind: "button-pointer",
-      pointerId: event.pointerId,
-      pointerType: event.pointerType,
-    });
+    const followDistance = Number(event.currentTarget.value);
+    setCameraSettings((current) => ({ ...current, followDistance }));
+    worldRef.current?.setCameraFollowDistance(followDistance);
   }
 
-  function handleBoostForwardPointerUp(
-    event: ReactPointerEvent<HTMLButtonElement>,
+  function handleCameraOrthographicZoomChange(
+    event: ChangeEvent<HTMLInputElement>,
   ) {
-    try {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    } catch {
-      // Safe to ignore if capture has already been released.
-    }
-
-    enqueueReactControlEvent(false, event.timeStamp, {
-      kind: "button-pointer",
-      pointerId: event.pointerId,
-      pointerType: event.pointerType,
-    });
+    const orthographicZoom = Number(event.currentTarget.value);
+    setCameraSettings((current) => ({ ...current, orthographicZoom }));
+    worldRef.current?.setOrthographicZoom(orthographicZoom);
   }
 
-  function handleBoostForwardPointerCancel(
-    event: ReactPointerEvent<HTMLButtonElement>,
-  ) {
-    enqueueReactControlEvent(false, event.timeStamp, {
-      kind: "button-pointer",
-      pointerId: event.pointerId,
-      pointerType: event.pointerType,
-    }, "cancel");
+  function handleCameraViewModeChange(event: ChangeEvent<HTMLSelectElement>) {
+    const viewMode = event.currentTarget.value as CameraViewMode;
+    setCameraSettings((current) => ({ ...current, viewMode }));
+    worldRef.current?.setCameraViewMode(viewMode);
   }
 
-  function handleBoostForwardKeyDown(
-    event: ReactKeyboardEvent<HTMLButtonElement>,
-  ) {
-    if (event.key !== " " && event.key !== "Enter") return;
-    event.preventDefault();
-    if (
-      worldRef.current?.world.controls.isInputActive(
-        PlayerReactControls.BoostForward,
-        ControlSources.React,
-      )
-    ) {
-      return;
-    }
-
-    enqueueReactControlEvent(true, event.timeStamp, {
-      kind: "button-key",
-      key: event.key,
-    });
-  }
-
-  function handleBoostForwardKeyUp(
-    event: ReactKeyboardEvent<HTMLButtonElement>,
-  ) {
-    if (event.key !== " " && event.key !== "Enter") return;
-    event.preventDefault();
-
-    enqueueReactControlEvent(false, event.timeStamp, {
-      kind: "button-key",
-      key: event.key,
-    });
+  function handleProjectionModeChange(event: ChangeEvent<HTMLSelectElement>) {
+    const projectionMode = event.currentTarget.value as ProjectionMode;
+    setCameraSettings((current) => ({ ...current, projectionMode }));
+    worldRef.current?.setProjectionMode(projectionMode);
   }
 
   return (
     <PageLayout
       header={
         <Header
-          onBoostForwardKeyDown={handleBoostForwardKeyDown}
-          onBoostForwardKeyUp={handleBoostForwardKeyUp}
-          onBoostForwardPointerCancel={handleBoostForwardPointerCancel}
-          onBoostForwardPointerDown={handleBoostForwardPointerDown}
-          onBoostForwardPointerUp={handleBoostForwardPointerUp}
+          cameraSettings={cameraSettings}
+          onCameraFollowDistanceChange={handleCameraFollowDistanceChange}
+          onCameraFovChange={handleCameraFovChange}
+          onCameraOrthographicZoomChange={handleCameraOrthographicZoomChange}
+          onProjectionModeChange={handleProjectionModeChange}
+          onCameraViewModeChange={handleCameraViewModeChange}
         />
       }
-      left={<LeftNav />}
+      left={null}
       right={<RightPanel {...uiState} />}
       footer={<Footer />}
     >
@@ -402,49 +396,164 @@ function CanvasViewport({
 }
 
 function Header({
-  onBoostForwardKeyDown,
-  onBoostForwardKeyUp,
-  onBoostForwardPointerCancel,
-  onBoostForwardPointerDown,
-  onBoostForwardPointerUp,
+  cameraSettings,
+  onCameraFollowDistanceChange,
+  onCameraFovChange,
+  onCameraOrthographicZoomChange,
+  onProjectionModeChange,
+  onCameraViewModeChange,
 }: {
-  onBoostForwardKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
-  onBoostForwardKeyUp: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
-  onBoostForwardPointerCancel: (
-    event: ReactPointerEvent<HTMLButtonElement>,
+  cameraSettings: CameraSettings;
+  onCameraFollowDistanceChange: (event: ChangeEvent<HTMLInputElement>) => void;
+  onCameraFovChange: (event: ChangeEvent<HTMLInputElement>) => void;
+  onCameraOrthographicZoomChange: (
+    event: ChangeEvent<HTMLInputElement>,
   ) => void;
-  onBoostForwardPointerDown: (
-    event: ReactPointerEvent<HTMLButtonElement>,
-  ) => void;
-  onBoostForwardPointerUp: (event: ReactPointerEvent<HTMLButtonElement>) => void;
+  onProjectionModeChange: (event: ChangeEvent<HTMLSelectElement>) => void;
+  onCameraViewModeChange: (event: ChangeEvent<HTMLSelectElement>) => void;
 }) {
   return (
     <div style={headerStyle}>
-      <span>{CONTROL_INSTRUCTIONS}</span>
-      <button
-        type="button"
-        onKeyDown={onBoostForwardKeyDown}
-        onKeyUp={onBoostForwardKeyUp}
-        onPointerCancel={onBoostForwardPointerCancel}
-        onPointerDown={onBoostForwardPointerDown}
-        onPointerUp={onBoostForwardPointerUp}
-      >
-        React Boost Forward
-      </button>
+      <div style={cameraControlsStyle}>
+        <CameraViewModeControl
+          onChange={onCameraViewModeChange}
+          value={cameraSettings.viewMode}
+        />
+        <CameraProjectionModeControl
+          onChange={onProjectionModeChange}
+          value={cameraSettings.projectionMode}
+        />
+        <CameraSettingControl
+          disabled={cameraSettings.projectionMode === "orthographic"}
+          label="FOV"
+          max={CAMERA_FOV_RANGE.max}
+          min={CAMERA_FOV_RANGE.min}
+          onChange={onCameraFovChange}
+          step={CAMERA_FOV_RANGE.step}
+          value={cameraSettings.fov}
+          valueFormatter={(value) => `${Math.round(value)} deg`}
+        />
+        <CameraSettingControl
+          disabled={cameraSettings.viewMode === "firstPerson"}
+          label="Dist"
+          max={CAMERA_FOLLOW_DISTANCE_RANGE.max}
+          min={CAMERA_FOLLOW_DISTANCE_RANGE.min}
+          onChange={onCameraFollowDistanceChange}
+          step={CAMERA_FOLLOW_DISTANCE_RANGE.step}
+          value={cameraSettings.followDistance}
+          valueFormatter={(value) => `${value.toFixed(1)} u`}
+        />
+        <CameraSettingControl
+          disabled={cameraSettings.projectionMode !== "orthographic"}
+          label="Ortho"
+          max={CAMERA_ORTHOGRAPHIC_ZOOM_RANGE.max}
+          min={CAMERA_ORTHOGRAPHIC_ZOOM_RANGE.min}
+          onChange={onCameraOrthographicZoomChange}
+          step={CAMERA_ORTHOGRAPHIC_ZOOM_RANGE.step}
+          value={cameraSettings.orthographicZoom}
+          valueFormatter={(value) => `${value.toFixed(2)}x`}
+        />
+      </div>
     </div>
   );
 }
 
-function LeftNav() {
+function CameraViewModeControl({
+  onChange,
+  value,
+}: {
+  onChange: (event: ChangeEvent<HTMLSelectElement>) => void;
+  value: CameraViewMode;
+}) {
   return (
-    <div style={navStyle}>
-      <div style={sectionLabelStyle}>Controls</div>
-      <div style={helperTextStyle}>
-        Everything now falls until it lands on the floor, but floor contact
-        alone will not trigger the orange touch highlight.{" "}
-        {LEFT_NAV_CONTROL_INSTRUCTIONS} {CONTROL_SYSTEM_NOTE}
-      </div>
-    </div>
+    <label style={cameraControlCardStyle}>
+      <span style={cameraControlLabelRowStyle}>
+        <span>View</span>
+        <span>{formatCameraViewMode(value)}</span>
+      </span>
+      <select
+        aria-label="Camera view"
+        onChange={onChange}
+        style={cameraSelectStyle}
+        title="Camera view"
+        value={value}
+      >
+        <option value="follow">Follow</option>
+        <option value="firstPerson">First</option>
+      </select>
+    </label>
+  );
+}
+
+function CameraProjectionModeControl({
+  onChange,
+  value,
+}: {
+  onChange: (event: ChangeEvent<HTMLSelectElement>) => void;
+  value: ProjectionMode;
+}) {
+  return (
+    <label style={cameraControlCardStyle}>
+      <span style={cameraControlLabelRowStyle}>
+        <span>Proj</span>
+        <span>{formatProjectionMode(value)}</span>
+      </span>
+      <select
+        aria-label="Projection mode"
+        onChange={onChange}
+        style={cameraSelectStyle}
+        title="Projection mode"
+        value={value}
+      >
+        <option value="perspective">Persp</option>
+        <option value="orthographic">Ortho</option>
+      </select>
+    </label>
+  );
+}
+
+function CameraSettingControl({
+  disabled = false,
+  label,
+  max,
+  min,
+  onChange,
+  step,
+  value,
+  valueFormatter,
+}: {
+  disabled?: boolean;
+  label: string;
+  max: number;
+  min: number;
+  onChange: (event: ChangeEvent<HTMLInputElement>) => void;
+  step: number;
+  value: number;
+  valueFormatter: (value: number) => string;
+}) {
+  return (
+    <label
+      style={{
+        ...cameraControlCardStyle,
+        opacity: disabled ? 0.45 : 1,
+      }}
+    >
+      <span style={cameraControlLabelRowStyle}>
+        <span>{label}</span>
+        <span>{valueFormatter(value)}</span>
+      </span>
+      <input
+        disabled={disabled}
+        max={max}
+        min={min}
+        onChange={onChange}
+        step={step}
+        title={label}
+        style={cameraSliderStyle}
+        type="range"
+        value={value}
+      />
+    </label>
   );
 }
 
@@ -490,4 +599,14 @@ function formatPosition(position: Position | null) {
 
 function formatCoordinate(value: number) {
   return Math.round(value * 100) / 100;
+}
+
+function formatCameraViewMode(viewMode: CameraViewMode) {
+  if (viewMode === "firstPerson") return "First";
+  return "Follow";
+}
+
+function formatProjectionMode(projectionMode: ProjectionMode) {
+  if (projectionMode === "orthographic") return "Ortho";
+  return "Persp";
 }

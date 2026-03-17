@@ -15,10 +15,13 @@ import {
 import {
   adjustCameraFollowOrbit,
   cameraFollowSystem,
+  readCameraFollowSettings,
   resetCameraTarget,
+  setCameraFollowDistance,
   setCameraFollowOrbitControlActive,
   setCameraFollowTarget,
   setCameraLookAtTarget,
+  setCameraViewMode,
 } from "./systems/cameraFollow";
 import {
   collisionSystem,
@@ -48,7 +51,11 @@ import { healthSystem } from "./systems/health";
 import { movementSystem } from "./systems/movement";
 import {
   disposeRenderer,
+  readProjectionSettings,
   renderSystem,
+  setCameraFov,
+  setOrthographicZoom,
+  setProjectionMode,
   setupRenderer,
 } from "./systems/render";
 import { timeSystem } from "./systems/time";
@@ -62,6 +69,9 @@ import type {
 
 export type {
   BounceSuggestionState,
+  CameraSettings,
+  CameraViewMode,
+  ProjectionMode,
   CoreColliderConfig,
   CollisionDirtyFlags,
   CollisionState,
@@ -531,7 +541,16 @@ function createCoreWorldBox(
     setEntityVelocity: (eid, velocity) => setEntityVelocity(world, eid, velocity),
     setCameraFollowTarget,
     adjustCameraFollowOrbit,
+    setCameraFollowDistance,
     setCameraFollowOrbitControlActive,
+    setCameraFov,
+    setCameraViewMode,
+    setOrthographicZoom,
+    setProjectionMode,
+    readCameraSettings: () => ({
+      ...readCameraFollowSettings(),
+      ...readProjectionSettings(),
+    }),
     setCameraLookAtTarget,
     setEntityRotation: (eid, rotation) => setEntityRotation(world, eid, rotation),
     resetCameraTarget,

@@ -1,6 +1,7 @@
-import type { CoreWorld } from "../core";
+import type { CameraSettings, CoreWorld, ProjectionMode } from "../types";
 import {
   Scene,
+  OrthographicCamera,
   PerspectiveCamera,
   WebGLRenderer,
   Object3D,
@@ -8,8 +9,10 @@ import {
   BufferGeometry,
 } from "three";
 
+type RenderCamera = PerspectiveCamera | OrthographicCamera;
+
 let scene: Scene | null = null;
-let camera: PerspectiveCamera | null = null;
+let camera: RenderCamera | null = null;
 let renderer: WebGLRenderer | null = null;
 let rendererViewportWidth = 0;
 let rendererViewportHeight = 0;
@@ -24,6 +27,19 @@ let renderFrameCount = 0;
 let setCameraPositionCallCount = 0;
 let lookCameraAtCallCount = 0;
 let lastRenderSkipReason: string | null = null;
+
+const DEFAULT_CAMERA_FOV = 75;
+const MIN_CAMERA_FOV = 20;
+const MAX_CAMERA_FOV = 140;
+const DEFAULT_PROJECTION_MODE: ProjectionMode = "perspective";
+const DEFAULT_ORTHOGRAPHIC_ZOOM = 1;
+const MIN_ORTHOGRAPHIC_ZOOM = 0.25;
+const MAX_ORTHOGRAPHIC_ZOOM = 12;
+const ORTHOGRAPHIC_FRUSTUM_HEIGHT = 18;
+
+let perspectiveFov = DEFAULT_CAMERA_FOV;
+let projectionMode: ProjectionMode = DEFAULT_PROJECTION_MODE;
+let orthographicZoom = DEFAULT_ORTHOGRAPHIC_ZOOM;
 
 function logRenderDebug(message: string, data?: Record<string, unknown>) {
   if (!RENDER_DEBUG) return;
@@ -43,6 +59,77 @@ function logRenderSkipOnce(reason: string, data?: Record<string, unknown>) {
 
 function clearRenderSkipReason() {
   lastRenderSkipReason = null;
+}
+
+function clampCameraFov(fov: number) {
+  return Math.max(MIN_CAMERA_FOV, Math.min(MAX_CAMERA_FOV, fov));
+}
+
+function clampOrthographicZoom(zoom: number) {
+  return Math.max(MIN_ORTHOGRAPHIC_ZOOM, Math.min(MAX_ORTHOGRAPHIC_ZOOM, zoom));
+}
+
+function getViewportSize() {
+  if (renderer) {
+    const canvas = renderer.domElement;
+    return {
+      width: canvas.clientWidth || rendererViewportWidth || canvas.width || 1,
+      height: canvas.clientHeight || rendererViewportHeight || canvas.height || 1,
+    };
+  }
+
+  return {
+    width: rendererViewportWidth || 1,
+    height: rendererViewportHeight || 1,
+  };
+}
+
+function configureCameraProjection(
+  activeCamera: RenderCamera,
+  width: number,
+  height: number,
+) {
+  const safeWidth = Math.max(1, width);
+  const safeHeight = Math.max(1, height);
+  const aspect = safeWidth / safeHeight;
+
+  if (activeCamera instanceof PerspectiveCamera) {
+    activeCamera.fov = perspectiveFov;
+    activeCamera.aspect = aspect;
+  } else {
+    const halfHeight = ORTHOGRAPHIC_FRUSTUM_HEIGHT / 2;
+    const halfWidth = halfHeight * aspect;
+    activeCamera.left = -halfWidth;
+    activeCamera.right = halfWidth;
+    activeCamera.top = halfHeight;
+    activeCamera.bottom = -halfHeight;
+    activeCamera.zoom = orthographicZoom;
+  }
+
+  activeCamera.updateProjectionMatrix();
+}
+
+function createCameraForProjection(
+  width: number,
+  height: number,
+  previousCamera: RenderCamera | null,
+) {
+  const nextCamera: RenderCamera =
+    projectionMode === "orthographic"
+      ? new OrthographicCamera(-1, 1, 1, -1, 0.1, 1000)
+      : new PerspectiveCamera(perspectiveFov, Math.max(1, width) / Math.max(1, height), 0.1, 1000);
+
+  if (previousCamera) {
+    nextCamera.position.copy(previousCamera.position);
+    nextCamera.quaternion.copy(previousCamera.quaternion);
+    nextCamera.up.copy(previousCamera.up);
+    nextCamera.rotation.order = previousCamera.rotation.order;
+  } else {
+    nextCamera.position.z = 5;
+  }
+
+  configureCameraProjection(nextCamera, width, height);
+  return nextCamera;
 }
 
 export function renderSystem(world: CoreWorld) {
@@ -150,6 +237,87 @@ export function readCameraPosition(out: {
   return true;
 }
 
+export function setCameraFov(fov: number): boolean {
+  if (!Number.isFinite(fov)) {
+    logRenderDebug("setCameraFov failed", {
+      fov,
+    });
+    return false;
+  }
+
+  perspectiveFov = clampCameraFov(fov);
+
+  if (camera instanceof PerspectiveCamera) {
+    camera.fov = perspectiveFov;
+    camera.updateProjectionMatrix();
+  }
+
+  logRenderDebug("setCameraFov", {
+    fov: perspectiveFov,
+    projectionMode,
+  });
+  return true;
+}
+
+export function readCameraFov() {
+  return perspectiveFov;
+}
+
+export function setOrthographicZoom(zoom: number): boolean {
+  if (!Number.isFinite(zoom)) {
+    logRenderDebug("setOrthographicZoom failed", { zoom });
+    return false;
+  }
+
+  orthographicZoom = clampOrthographicZoom(zoom);
+
+  if (camera instanceof OrthographicCamera) {
+    camera.zoom = orthographicZoom;
+    camera.updateProjectionMatrix();
+  }
+
+  logRenderDebug("setOrthographicZoom", {
+    orthographicZoom,
+    projectionMode,
+  });
+  return true;
+}
+
+export function setProjectionMode(nextProjectionMode: ProjectionMode): boolean {
+  if (
+    nextProjectionMode !== "perspective" &&
+    nextProjectionMode !== "orthographic"
+  ) {
+    logRenderDebug("setProjectionMode failed", {
+      projectionMode: nextProjectionMode,
+    });
+    return false;
+  }
+
+  if (projectionMode === nextProjectionMode) return false;
+  projectionMode = nextProjectionMode;
+
+  const { width, height } = getViewportSize();
+  camera = createCameraForProjection(width, height, camera);
+  logRenderDebug("setProjectionMode", {
+    projectionMode,
+    width,
+    height,
+  });
+  return true;
+}
+
+export function readProjectionSettings(): Pick<
+  CameraSettings,
+  "fov" | "projectionMode" | "orthographicZoom"
+> {
+  return {
+    fov: perspectiveFov,
+    projectionMode,
+    orthographicZoom,
+  };
+}
+
 function disposeObject3D(root: Object3D) {
   root.traverse((o) => {
     const candidate = o as Object3D & {
@@ -190,15 +358,17 @@ function clearRenderState() {
   camera = null;
   rendererViewportWidth = 0;
   rendererViewportHeight = 0;
+  perspectiveFov = DEFAULT_CAMERA_FOV;
+  projectionMode = DEFAULT_PROJECTION_MODE;
+  orthographicZoom = DEFAULT_ORTHOGRAPHIC_ZOOM;
 
   renderer?.dispose();
   renderer = null;
 }
 
-function updateCameraAspect(width: number, height: number) {
+function updateCameraProjection(width: number, height: number) {
   if (!camera) return;
-  camera.aspect = width / Math.max(height, 1);
-  camera.updateProjectionMatrix();
+  configureCameraProjection(camera, width, height);
 }
 
 function setRendererViewportSize(width: number, height: number) {
@@ -216,7 +386,7 @@ function setRendererViewportSize(width: number, height: number) {
   rendererViewportWidth = nextWidth;
   rendererViewportHeight = nextHeight;
   renderer.setSize(nextWidth, nextHeight, false);
-  updateCameraAspect(nextWidth, nextHeight);
+  updateCameraProjection(nextWidth, nextHeight);
   return true;
 }
 
@@ -242,8 +412,7 @@ export function setupRenderer(canvas: HTMLCanvasElement | null) {
   const height = canvas.clientHeight || canvas.height || 1;
 
   scene = new Scene();
-  camera = new PerspectiveCamera(75, width / height, 0.1, 1000);
-  camera.position.z = 5;
+  camera = createCameraForProjection(width, height, null);
 
   renderer = new WebGLRenderer({
     canvas,

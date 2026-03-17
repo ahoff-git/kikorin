@@ -49,18 +49,30 @@ export function PageLayout({
   footer,
   children,
 }: LayoutProps) {
+  const hasLeft = left !== undefined && left !== null;
+  const hasRight = right !== undefined && right !== null;
+  const mainClassName = [
+    styles.main,
+    hasLeft ? styles.withLeft : styles.noLeft,
+    hasRight ? styles.withRight : styles.noRight,
+  ].join(" ");
+
   return (
     <div style={rootStyle}>
       <header>{header}</header>
 
-      <main className={styles.main} style={mainStyle}>
-        <div className={styles.sidePanel} style={sidePanelStyle}>
-          {left}
-        </div>
+      <main className={mainClassName} style={mainStyle}>
+        {hasLeft ? (
+          <div className={styles.sidePanel} style={sidePanelStyle}>
+            {left}
+          </div>
+        ) : null}
         <div style={centerPanelStyle}>{children}</div>
-        <div className={styles.sidePanel} style={sidePanelStyle}>
-          {right}
-        </div>
+        {hasRight ? (
+          <div className={styles.sidePanel} style={sidePanelStyle}>
+            {right}
+          </div>
+        ) : null}
       </main>
 
       <footer>{footer}</footer>

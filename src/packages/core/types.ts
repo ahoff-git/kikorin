@@ -73,6 +73,18 @@ export type SetupCoreWorldOptions = {
     worldTickRate?: number
 }
 
+export type CameraViewMode = "follow" | "firstPerson"
+
+export type ProjectionMode = "perspective" | "orthographic"
+
+export type CameraSettings = {
+    fov: number,
+    followDistance: number,
+    viewMode: CameraViewMode,
+    projectionMode: ProjectionMode,
+    orthographicZoom: number
+}
+
 export type Time = {
     delta: number,
     elapsed: number,
@@ -368,7 +380,13 @@ export type CoreWorldBox = {
     setEntityVelocity: (eid: number, velocity: Partial<Velocity>) => boolean
     setCameraFollowTarget: (eid: number, opts?: { offset?: Partial<Position> }) => void
     adjustCameraFollowOrbit: (deltaYaw: number, deltaPitch: number) => void
+    setCameraFollowDistance: (distance: number) => void
     setCameraFollowOrbitControlActive: (active: boolean) => void
+    setCameraFov: (fov: number) => void
+    setCameraViewMode: (viewMode: CameraViewMode) => void
+    setOrthographicZoom: (zoom: number) => void
+    setProjectionMode: (projectionMode: ProjectionMode) => void
+    readCameraSettings: () => CameraSettings
     setCameraLookAtTarget: (eid: number, opts?: { position?: Partial<Position> }) => void
     setEntityRotation: (eid: number, rotation: Partial<Rotation>) => boolean
     resetCameraTarget: () => void

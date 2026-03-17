@@ -1,7 +1,12 @@
-import { hasComponent, query } from "bitecs";
-import type { CoreWorld } from "../core";
+import { hasComponent } from "bitecs";
+import type { CameraSettings, CameraViewMode, CoreWorld } from "../types";
 import { findHighestFloorTopAtPosition, getFloorCollisionEids } from "./gravity";
-import { lookCameraAt, readCameraPosition, setCameraPosition } from "./render";
+import {
+  applyToObjectByEid,
+  lookCameraAt,
+  readCameraPosition,
+  setCameraPosition,
+} from "./render";
 
 type Vec3 = { x: number; y: number; z: number };
 type PartialVec3 = Partial<Vec3>;
@@ -14,11 +19,14 @@ const MAX_FOLLOW_PITCH = Math.PI * 0.48;
 const CAMERA_GROUND_CLEARANCE = 0.1;
 const CAMERA_PITCH_DRAG_MIN_RESPONSE = 0.2;
 const CAMERA_PITCH_DRAG_EDGE_EXPONENT = 2;
+const FIRST_PERSON_EYE_HEIGHT = 0.35;
+const FIRST_PERSON_LOOK_DISTANCE = 10;
 const CAMERA_DEBUG = false;
 const CAMERA_DEBUG_FRAME_INTERVAL = 30;
 
 let cameraFollowFrameCount = 0;
 let lastSkipReason: string | null = null;
+let hiddenFollowTargetEid = -1;
 
 const cameraState: {
   mode: CameraMode;
@@ -27,6 +35,7 @@ const cameraState: {
   followDistance: number;
   followYaw: number;
   followPitch: number;
+  viewMode: CameraViewMode;
   lastTargetYaw: number;
   orbitControlActive: boolean;
   stationaryPosition: Vec3;
@@ -37,6 +46,7 @@ const cameraState: {
   followDistance: 1,
   followYaw: 0,
   followPitch: 0,
+  viewMode: "follow",
   lastTargetYaw: Number.NaN,
   orbitControlActive: false,
   stationaryPosition: { ...DEFAULT_STATIONARY_POSITION },
@@ -53,6 +63,10 @@ function clampFollowPitch(pitch: number): number {
   return Math.max(-MAX_FOLLOW_PITCH, Math.min(MAX_FOLLOW_PITCH, pitch));
 }
 
+function clampFollowDistance(distance: number): number {
+  return Math.max(MIN_FOLLOW_DISTANCE, distance);
+}
+
 function normalizeAngleDelta(delta: number): number {
   if (!Number.isFinite(delta)) return 0;
   if (delta <= -Math.PI || delta > Math.PI) {
@@ -64,7 +78,7 @@ function normalizeAngleDelta(delta: number): number {
 function syncFollowOrbitFromOffset() {
   const { x, y, z } = cameraState.followOffset;
   const horizontalDistance = Math.hypot(x, z);
-  const distance = Math.max(MIN_FOLLOW_DISTANCE, Math.hypot(horizontalDistance, y));
+  const distance = clampFollowDistance(Math.hypot(horizontalDistance, y));
 
   cameraState.followDistance = distance;
   cameraState.followYaw = Math.atan2(x, z);
@@ -72,10 +86,12 @@ function syncFollowOrbitFromOffset() {
 }
 
 function syncFollowOffsetFromOrbit() {
-  const horizontalDistance = Math.cos(cameraState.followPitch) * cameraState.followDistance;
+  const horizontalDistance =
+    Math.cos(cameraState.followPitch) * cameraState.followDistance;
 
   cameraState.followOffset.x = Math.sin(cameraState.followYaw) * horizontalDistance;
-  cameraState.followOffset.y = Math.sin(cameraState.followPitch) * cameraState.followDistance;
+  cameraState.followOffset.y =
+    Math.sin(cameraState.followPitch) * cameraState.followDistance;
   cameraState.followOffset.z = Math.cos(cameraState.followYaw) * horizontalDistance;
 }
 
@@ -97,6 +113,42 @@ function logSkipOnce(reason: string, data?: Record<string, unknown>) {
 
 function clearSkipReason() {
   lastSkipReason = null;
+}
+
+function setTargetVisibility(eid: number, visible: boolean) {
+  if (eid < 0) return;
+  applyToObjectByEid(eid, (obj) => {
+    obj.visible = visible;
+  });
+}
+
+function syncFollowTargetVisibility() {
+  const desiredHiddenEid =
+    cameraState.mode === "follow" && cameraState.viewMode === "firstPerson"
+      ? cameraState.targetEid
+      : -1;
+
+  if (
+    hiddenFollowTargetEid >= 0 &&
+    hiddenFollowTargetEid !== desiredHiddenEid
+  ) {
+    setTargetVisibility(hiddenFollowTargetEid, true);
+  }
+
+  hiddenFollowTargetEid = desiredHiddenEid;
+
+  if (hiddenFollowTargetEid >= 0) {
+    setTargetVisibility(hiddenFollowTargetEid, false);
+  }
+}
+
+function getForwardVectorFromRotation(pitch: number, yaw: number) {
+  const horizontalScale = Math.cos(pitch);
+  return {
+    x: -Math.sin(yaw) * horizontalScale,
+    y: Math.sin(pitch),
+    z: -Math.cos(yaw) * horizontalScale,
+  };
 }
 
 function reduceFollowPitchDelta(deltaPitch: number): number {
@@ -123,7 +175,8 @@ function clampCameraHeightToFloor(
   if (floorEids.length === 0) return false;
 
   // Ignore floors above the current camera height so the camera does not jump to ceilings.
-  const maxFloorTop = Math.max(currentCameraPosition.y, desiredPosition.y) + CAMERA_GROUND_CLEARANCE;
+  const maxFloorTop =
+    Math.max(currentCameraPosition.y, desiredPosition.y) + CAMERA_GROUND_CLEARANCE;
   const floorTop = findHighestFloorTopAtPosition(
     world,
     floorEids,
@@ -147,6 +200,7 @@ export function resetCameraTarget() {
   cameraState.targetEid = -1;
   cameraState.lastTargetYaw = Number.NaN;
   cameraState.orbitControlActive = false;
+  syncFollowTargetVisibility();
   logCameraDebug("reset target", {
     mode: cameraState.mode,
     targetEid: cameraState.targetEid,
@@ -155,13 +209,14 @@ export function resetCameraTarget() {
 
 export function setCameraFollowTarget(
   eid: number,
-  opts: { offset?: PartialVec3 } = {}
+  opts: { offset?: PartialVec3 } = {},
 ) {
   cameraState.mode = "follow";
   cameraState.targetEid = eid;
   cameraState.lastTargetYaw = Number.NaN;
   assignVec3(cameraState.followOffset, opts.offset);
   syncFollowOrbitFromOffset();
+  syncFollowTargetVisibility();
   logCameraDebug("set follow target", {
     targetEid: cameraState.targetEid,
     followOffset: {
@@ -173,17 +228,21 @@ export function setCameraFollowTarget(
       distance: cameraState.followDistance,
       yaw: cameraState.followYaw,
       pitch: cameraState.followPitch,
+      viewMode: cameraState.viewMode,
     },
   });
 }
 
 export function adjustCameraFollowOrbit(deltaYaw: number, deltaPitch: number) {
   if (cameraState.mode !== "follow") return;
+  if (cameraState.viewMode === "firstPerson") return;
   if (deltaYaw === 0 && deltaPitch === 0) return;
 
   const reducedDeltaPitch = reduceFollowPitchDelta(deltaPitch);
   cameraState.followYaw += deltaYaw;
-  cameraState.followPitch = clampFollowPitch(cameraState.followPitch + reducedDeltaPitch);
+  cameraState.followPitch = clampFollowPitch(
+    cameraState.followPitch + reducedDeltaPitch,
+  );
   syncFollowOffsetFromOrbit();
 
   logCameraDebug("adjust follow orbit", {
@@ -199,21 +258,59 @@ export function adjustCameraFollowOrbit(deltaYaw: number, deltaPitch: number) {
       distance: cameraState.followDistance,
       yaw: cameraState.followYaw,
       pitch: cameraState.followPitch,
+      viewMode: cameraState.viewMode,
     },
   });
 }
 
+export function setCameraFollowDistance(distance: number) {
+  if (!Number.isFinite(distance)) return;
+  cameraState.followDistance = clampFollowDistance(distance);
+  syncFollowOffsetFromOrbit();
+
+  logCameraDebug("set follow distance", {
+    followDistance: cameraState.followDistance,
+    followOffset: {
+      x: cameraState.followOffset.x,
+      y: cameraState.followOffset.y,
+      z: cameraState.followOffset.z,
+    },
+  });
+}
+
+export function readCameraFollowDistance() {
+  return cameraState.followDistance;
+}
+
+export function setCameraViewMode(viewMode: CameraViewMode) {
+  cameraState.viewMode = viewMode;
+  cameraState.orbitControlActive = false;
+  syncFollowTargetVisibility();
+}
+
+export function readCameraFollowSettings(): Pick<
+  CameraSettings,
+  "followDistance" | "viewMode"
+> {
+  return {
+    followDistance: cameraState.followDistance,
+    viewMode: cameraState.viewMode,
+  };
+}
+
 export function setCameraFollowOrbitControlActive(active: boolean) {
   if (cameraState.mode !== "follow") return;
+  if (cameraState.viewMode === "firstPerson") return;
   cameraState.orbitControlActive = active;
 }
 
 export function setCameraLookAtTarget(
   eid: number,
-  opts: { position?: PartialVec3 } = {}
+  opts: { position?: PartialVec3 } = {},
 ) {
   cameraState.mode = "lookAt";
   cameraState.targetEid = eid;
+  syncFollowTargetVisibility();
   if (opts.position) {
     assignVec3(cameraState.stationaryPosition, opts.position);
   } else {
@@ -267,32 +364,56 @@ export function cameraFollowSystem(world: CoreWorld) {
   let desiredCameraX: number;
   let desiredCameraY: number;
   let desiredCameraZ: number;
+  let lookTargetX = tx;
+  let lookTargetY = ty;
+  let lookTargetZ = tz;
+  let firstPersonForward: Vec3 | null = null;
 
   if (cameraState.mode === "follow") {
-    if (hasComponent(world, eid, Rotation)) {
-      const targetYaw = Rotation.yaw[eid];
-      if (Number.isFinite(targetYaw)) {
-        if (
-          Number.isFinite(cameraState.lastTargetYaw) &&
-          !cameraState.orbitControlActive
-        ) {
-          cameraState.followYaw += normalizeAngleDelta(
-            targetYaw - cameraState.lastTargetYaw,
-          );
-          syncFollowOffsetFromOrbit();
-        }
-        cameraState.lastTargetYaw = targetYaw;
-      } else {
-        cameraState.lastTargetYaw = Number.NaN;
+    const targetYaw = hasComponent(world, eid, Rotation) ? Rotation.yaw[eid] : Number.NaN;
+    const targetPitch = hasComponent(world, eid, Rotation)
+      ? Rotation.pitch[eid]
+      : 0;
+
+    if (Number.isFinite(targetYaw)) {
+      if (cameraState.viewMode === "firstPerson") {
+        cameraState.followYaw = targetYaw;
+        syncFollowOffsetFromOrbit();
+      } else if (
+        Number.isFinite(cameraState.lastTargetYaw) &&
+        !cameraState.orbitControlActive
+      ) {
+        cameraState.followYaw += normalizeAngleDelta(
+          targetYaw - cameraState.lastTargetYaw,
+        );
+        syncFollowOffsetFromOrbit();
       }
+      cameraState.lastTargetYaw = targetYaw;
     } else {
       cameraState.lastTargetYaw = Number.NaN;
     }
 
-    const offset = cameraState.followOffset;
-    desiredCameraX = tx + offset.x;
-    desiredCameraY = ty + offset.y;
-    desiredCameraZ = tz + offset.z;
+    if (cameraState.viewMode === "firstPerson") {
+      const forward = getForwardVectorFromRotation(
+        Number.isFinite(targetPitch) ? targetPitch : 0,
+        Number.isFinite(targetYaw) ? targetYaw : 0,
+      );
+      firstPersonForward = forward;
+
+      desiredCameraX = tx;
+      desiredCameraY = ty + FIRST_PERSON_EYE_HEIGHT;
+      desiredCameraZ = tz;
+      lookTargetX = desiredCameraX + forward.x * FIRST_PERSON_LOOK_DISTANCE;
+      lookTargetY = desiredCameraY + forward.y * FIRST_PERSON_LOOK_DISTANCE;
+      lookTargetZ = desiredCameraZ + forward.z * FIRST_PERSON_LOOK_DISTANCE;
+    } else {
+      const offset = cameraState.followOffset;
+      desiredCameraX = tx + offset.x;
+      desiredCameraY = ty + offset.y;
+      desiredCameraZ = tz + offset.z;
+    }
+
+    syncFollowTargetVisibility();
   } else {
     const p = cameraState.stationaryPosition;
     desiredCameraX = p.x;
@@ -300,7 +421,11 @@ export function cameraFollowSystem(world: CoreWorld) {
     desiredCameraZ = p.z;
   }
 
-  const desiredCameraPosition = { x: desiredCameraX, y: desiredCameraY, z: desiredCameraZ };
+  const desiredCameraPosition = {
+    x: desiredCameraX,
+    y: desiredCameraY,
+    z: desiredCameraZ,
+  };
   const currentCameraPosition = { ...desiredCameraPosition };
   readCameraPosition(currentCameraPosition);
   const cameraClampedToFloor = clampCameraHeightToFloor(
@@ -312,12 +437,18 @@ export function cameraFollowSystem(world: CoreWorld) {
   desiredCameraY = desiredCameraPosition.y;
   desiredCameraZ = desiredCameraPosition.z;
 
+  if (firstPersonForward) {
+    lookTargetX = desiredCameraX + firstPersonForward.x * FIRST_PERSON_LOOK_DISTANCE;
+    lookTargetY = desiredCameraY + firstPersonForward.y * FIRST_PERSON_LOOK_DISTANCE;
+    lookTargetZ = desiredCameraZ + firstPersonForward.z * FIRST_PERSON_LOOK_DISTANCE;
+  }
+
   const setPositionOk = setCameraPosition(
     desiredCameraX,
     desiredCameraY,
     desiredCameraZ,
   );
-  const lookAtOk = lookCameraAt(tx, ty, tz);
+  const lookAtOk = lookCameraAt(lookTargetX, lookTargetY, lookTargetZ);
   const shouldLogFrame =
     cameraFollowFrameCount % CAMERA_DEBUG_FRAME_INTERVAL === 0 ||
     !setPositionOk ||
@@ -331,6 +462,11 @@ export function cameraFollowSystem(world: CoreWorld) {
       mode: cameraState.mode,
       targetEid: eid,
       targetPosition: { x: tx, y: ty, z: tz },
+      lookTarget: {
+        x: lookTargetX,
+        y: lookTargetY,
+        z: lookTargetZ,
+      },
       desiredCameraPosition: {
         x: desiredCameraX,
         y: desiredCameraY,
@@ -353,13 +489,14 @@ export function cameraFollowSystem(world: CoreWorld) {
           : null,
       followOrbit:
         cameraState.mode === "follow"
-          ? {
-              distance: cameraState.followDistance,
-              yaw: cameraState.followYaw,
-              pitch: cameraState.followPitch,
-              orbitControlActive: cameraState.orbitControlActive,
-            }
-          : null,
+            ? {
+                distance: cameraState.followDistance,
+                yaw: cameraState.followYaw,
+                pitch: cameraState.followPitch,
+                viewMode: cameraState.viewMode,
+                orbitControlActive: cameraState.orbitControlActive,
+              }
+            : null,
       worldTimeDelta: world.time.delta,
       worldTimeElapsed: world.time.elapsed,
       setPositionOk,

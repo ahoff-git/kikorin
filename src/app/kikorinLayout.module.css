@@ -2,13 +2,33 @@
   grid-template-columns: 1fr;
 }
 
+.withLeft {}
+
+.noLeft {}
+
+.withRight {}
+
+.noRight {}
+
 .sidePanel {
   display: none;
 }
 
 @media (min-width: 900px) {
-  .main {
+  .main.withLeft.withRight {
     grid-template-columns: clamp(200px, 20%, 300px) minmax(0, 1fr) clamp(200px, 20%, 300px);
+  }
+
+  .main.noLeft.withRight {
+    grid-template-columns: minmax(0, 1fr) clamp(200px, 20%, 300px);
+  }
+
+  .main.withLeft.noRight {
+    grid-template-columns: clamp(200px, 20%, 300px) minmax(0, 1fr);
+  }
+
+  .main.noLeft.noRight {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .sidePanel {
