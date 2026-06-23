@@ -8,10 +8,11 @@ import {
   flagComponentDependency,
   resetFlaginatorEntity,
   advanceFlaginatorTick,
+  type FlaginatorState,
 } from '../flaginator'
 
 type TestWorld = {
-  flaginator: ReturnType<typeof createFlaginator>
+  flaginator: FlaginatorState<TestWorld, string>
   components: { Health: Int32Array }
 }
 

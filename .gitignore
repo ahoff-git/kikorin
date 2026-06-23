@@ -7,7 +7,7 @@
 pnpm-debug.log*
 
 # turbo
-.turbo/cache
+**/.turbo/
 
 # next.js
 **/.next/
