@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@kikorin/ecs": "workspace:*",
+    "@kikorin/util": "workspace:*",
     "three": "^0.182.0"
   },
   "devDependencies": {

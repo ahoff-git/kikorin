@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { createControls } from '../controls'
+import { createControls } from '../controlsState'
 
 describe('createControls', () => {
   it('creates a controls instance', () => {

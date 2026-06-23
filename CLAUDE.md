@@ -15,3 +15,4 @@
 - Keep exported APIs stable unless a change is explicitly requested.
 - Reuse existing utilities and patterns when possible.
 - Stop and ask before adding dependencies, or changing unrelated files.
+- Whenever possible, the code should be broken into distinct testable chunks that should then be treated as 'functioning black boxes'. Their tests should not be re-run unless their code changes. The agents should not bother chaning the 'black boxes' unless instructed to do so. 

@@ -263,6 +263,9 @@ importers:
       '@kikorin/ecs':
         specifier: workspace:*
         version: link:../ecs
+      '@kikorin/util':
+        specifier: workspace:*
+        version: link:../util
     devDependencies:
       '@types/node':
         specifier: ^20
@@ -435,6 +438,9 @@ importers:
       '@kikorin/ecs':
         specifier: workspace:*
         version: link:../ecs
+      '@kikorin/util':
+        specifier: workspace:*
+        version: link:../util
       three:
         specifier: ^0.182.0
         version: 0.182.0

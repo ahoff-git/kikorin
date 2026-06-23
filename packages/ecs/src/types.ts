@@ -339,6 +339,7 @@ export type CoreWorldBox = {
     setCameraFollowTarget: (eid: number, opts?: { offset?: Partial<Position> }) => void
     adjustCameraFollowOrbit: (deltaYaw: number, deltaPitch: number) => void
     setCameraFollowOrbitControlActive: (active: boolean) => void
+    resetCameraFollowOrbitBehindTarget: () => void
     setCameraLookAtTarget: (eid: number, opts?: { position?: Partial<Position> }) => void
     setEntityRotation: (eid: number, rotation: Partial<Rotation>) => boolean
     resetCameraTarget: () => void

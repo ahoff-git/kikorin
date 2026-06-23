@@ -1,4 +1,5 @@
 import type { CoreWorld } from "@kikorin/ecs";
+import { log, logLevels } from "@kikorin/util";
 import {
   Scene,
   PerspectiveCamera,
@@ -7,9 +8,9 @@ import {
   Material,
   BufferGeometry,
 } from "three";
+import { setActiveCamera, getActiveCamera } from "./renderCamera";
 
 let scene: Scene | null = null;
-let camera: PerspectiveCamera | null = null;
 let renderer: WebGLRenderer | null = null;
 let rendererViewportWidth = 0;
 let rendererViewportHeight = 0;
@@ -17,25 +18,20 @@ let rendererViewportHeight = 0;
 const objectsByEid = new Map<number, Object3D>();
 const poolsByKey = new Map<string, Object3D[]>();
 const DEFAULT_POOL_MAX = 256;
-const RENDER_DEBUG = false;
 const RENDER_DEBUG_FRAME_INTERVAL = 30;
 
 let renderFrameCount = 0;
-let setCameraPositionCallCount = 0;
-let lookCameraAtCallCount = 0;
 let lastRenderSkipReason: string | null = null;
 
 function logRenderDebug(message: string, data?: Record<string, unknown>) {
-  if (!RENDER_DEBUG) return;
   if (data) {
-    console.log(`[render] ${message}`, data);
-    return;
+    log(logLevels.debug, `[render] ${message}`, ["render"], data);
+  } else {
+    log(logLevels.debug, `[render] ${message}`, ["render"]);
   }
-  console.log(`[render] ${message}`);
 }
 
 function logRenderSkipOnce(reason: string, data?: Record<string, unknown>) {
-  if (!RENDER_DEBUG) return;
   if (lastRenderSkipReason === reason) return;
   lastRenderSkipReason = reason;
   logRenderDebug(`skipping frame: ${reason}`, data);
@@ -46,11 +42,12 @@ function clearRenderSkipReason() {
 }
 
 export function renderSystem(world: CoreWorld) {
-  if (!renderer || !scene || !camera) {
+  const cam = getActiveCamera();
+  if (!renderer || !scene || !cam) {
     logRenderSkipOnce("renderer/scene/camera missing", {
       hasRenderer: Boolean(renderer),
       hasScene: Boolean(scene),
-      hasCamera: Boolean(camera),
+      hasCamera: Boolean(cam),
     });
     return;
   }
@@ -63,91 +60,21 @@ export function renderSystem(world: CoreWorld) {
       frame: renderFrameCount,
       sceneChildren: scene.children.length,
       cameraPosition: {
-        x: camera.position.x,
-        y: camera.position.y,
-        z: camera.position.z,
+        x: cam.position.x,
+        y: cam.position.y,
+        z: cam.position.z,
       },
       cameraRotation: {
-        x: camera.rotation.x,
-        y: camera.rotation.y,
-        z: camera.rotation.z,
+        x: cam.rotation.x,
+        y: cam.rotation.y,
+        z: cam.rotation.z,
       },
       worldTimeDelta: world.time.delta,
       worldTimeElapsed: world.time.elapsed,
     });
   }
 
-  renderer.render(scene, camera);
-}
-
-export function setCameraPosition(x: number, y: number, z: number): boolean {
-  if (!camera) {
-    logRenderDebug("setCameraPosition failed: camera missing", { x, y, z });
-    return false;
-  }
-
-  setCameraPositionCallCount += 1;
-  const previous = {
-    x: camera.position.x,
-    y: camera.position.y,
-    z: camera.position.z,
-  };
-  camera.position.set(x, y, z);
-
-  if (
-    setCameraPositionCallCount <= 10 ||
-    setCameraPositionCallCount % RENDER_DEBUG_FRAME_INTERVAL === 0
-  ) {
-    logRenderDebug("setCameraPosition", {
-      call: setCameraPositionCallCount,
-      previous,
-      next: { x, y, z },
-    });
-  }
-
-  return true;
-}
-
-export function lookCameraAt(x: number, y: number, z: number): boolean {
-  if (!camera) {
-    logRenderDebug("lookCameraAt failed: camera missing", { x, y, z });
-    return false;
-  }
-
-  lookCameraAtCallCount += 1;
-  camera.lookAt(x, y, z);
-
-  if (
-    lookCameraAtCallCount <= 10 ||
-    lookCameraAtCallCount % RENDER_DEBUG_FRAME_INTERVAL === 0
-  ) {
-    logRenderDebug("lookCameraAt", {
-      call: lookCameraAtCallCount,
-      target: { x, y, z },
-      resultingRotation: {
-        x: camera.rotation.x,
-        y: camera.rotation.y,
-        z: camera.rotation.z,
-      },
-    });
-  }
-
-  return true;
-}
-
-export function readCameraPosition(out: {
-  x: number;
-  y: number;
-  z: number;
-}): boolean {
-  if (!camera) {
-    logRenderDebug("readCameraPosition failed: camera missing");
-    return false;
-  }
-  out.x = camera.position.x;
-  out.y = camera.position.y;
-  out.z = camera.position.z;
-  return true;
+  renderer.render(scene, cam);
 }
 
 function disposeObject3D(root: Object3D) {
@@ -187,7 +114,7 @@ function clearRenderState() {
 
   scene?.clear();
   scene = null;
-  camera = null;
+  setActiveCamera(null);
   rendererViewportWidth = 0;
   rendererViewportHeight = 0;
 
@@ -196,9 +123,10 @@ function clearRenderState() {
 }
 
 function updateCameraAspect(width: number, height: number) {
-  if (!camera) return;
-  camera.aspect = width / Math.max(height, 1);
-  camera.updateProjectionMatrix();
+  const cam = getActiveCamera();
+  if (!cam) return;
+  cam.aspect = width / Math.max(height, 1);
+  cam.updateProjectionMatrix();
 }
 
 function setRendererViewportSize(width: number, height: number) {
@@ -242,8 +170,9 @@ export function setupRenderer(canvas: HTMLCanvasElement | null) {
   const height = canvas.clientHeight || canvas.height || 1;
 
   scene = new Scene();
-  camera = new PerspectiveCamera(75, width / height, 0.1, 1000);
-  camera.position.z = 5;
+  const cam = new PerspectiveCamera(75, width / height, 0.1, 1000);
+  cam.position.z = 5;
+  setActiveCamera(cam);
 
   renderer = new WebGLRenderer({
     canvas,
@@ -258,9 +187,9 @@ export function setupRenderer(canvas: HTMLCanvasElement | null) {
     width,
     height,
     cameraInitialPosition: {
-      x: camera.position.x,
-      y: camera.position.y,
-      z: camera.position.z,
+      x: cam.position.x,
+      y: cam.position.y,
+      z: cam.position.z,
     },
     pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
   });

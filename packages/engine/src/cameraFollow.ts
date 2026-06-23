@@ -1,5 +1,6 @@
 import { hasComponent, query } from "bitecs";
 import type { CoreWorld } from "@kikorin/ecs";
+import { log, logLevels } from "@kikorin/util";
 import { castEntityCollider, findHighestFloorTopAtPosition } from "@kikorin/system-physics";
 import { lookCameraAt, readCameraPosition, setCameraPosition } from "@kikorin/system-rendering";
 
@@ -7,7 +8,10 @@ type Vec3 = { x: number; y: number; z: number };
 type PartialVec3 = Partial<Vec3>;
 type CameraMode = "off" | "follow" | "lookAt";
 
-const DEFAULT_FOLLOW_OFFSET: Vec3 = { x: 0, y: 4, z: 10 };
+const DEFAULT_FOLLOW_OFFSET: Vec3 = { x: 0, y: 6, z: 10 };
+const DEFAULT_FOLLOW_HORIZONTAL = Math.hypot(DEFAULT_FOLLOW_OFFSET.x, DEFAULT_FOLLOW_OFFSET.z);
+const DEFAULT_FOLLOW_DISTANCE = Math.hypot(DEFAULT_FOLLOW_HORIZONTAL, DEFAULT_FOLLOW_OFFSET.y);
+const DEFAULT_FOLLOW_PITCH = Math.atan2(DEFAULT_FOLLOW_OFFSET.y, DEFAULT_FOLLOW_HORIZONTAL);
 const DEFAULT_STATIONARY_POSITION: Vec3 = { x: 0, y: 4, z: 10 };
 const MIN_FOLLOW_DISTANCE = 0.1;
 const MAX_FOLLOW_PITCH = Math.PI * 0.48;
@@ -16,7 +20,6 @@ const CAMERA_GROUND_CLEARANCE = 0.1;
 const CAMERA_WALL_SEPARATION = 0.3;
 const CAMERA_PITCH_DRAG_MIN_RESPONSE = 0.2;
 const CAMERA_PITCH_DRAG_EDGE_EXPONENT = 2;
-const CAMERA_DEBUG = false;
 const CAMERA_DEBUG_FRAME_INTERVAL = 30;
 
 let cameraFollowFrameCount = 0;
@@ -85,16 +88,14 @@ function syncFollowOffsetFromOrbit() {
 }
 
 function logCameraDebug(message: string, data?: Record<string, unknown>) {
-  if (!CAMERA_DEBUG) return;
   if (data) {
-    console.log(`[cameraFollow] ${message}`, data);
-    return;
+    log(logLevels.debug, `[cameraFollow] ${message}`, ["camera"], data);
+  } else {
+    log(logLevels.debug, `[cameraFollow] ${message}`, ["camera"]);
   }
-  console.log(`[cameraFollow] ${message}`);
 }
 
 function logSkipOnce(reason: string, data?: Record<string, unknown>) {
-  if (!CAMERA_DEBUG) return;
   if (lastSkipReason === reason) return;
   lastSkipReason = reason;
   logCameraDebug(`skipping update: ${reason}`, data);
@@ -157,8 +158,9 @@ function clampCameraToWalls(
   const dy = desiredPosition.y - playerPos.y;
   const dz = desiredPosition.z - playerPos.z;
 
+  const { Projectile } = world.components;
   const hit = castEntityCollider(world, playerEid, playerPos, { x: dx, y: dy, z: dz }, {
-    filterPredicate: (targetEid) => !Floor[targetEid] && !hasComponent(world, targetEid, Player),
+    filterPredicate: (targetEid) => !Floor[targetEid] && !Projectile[targetEid] && !hasComponent(world, targetEid, Player),
   });
 
   if (!hit || hit.toi >= 1) return;
@@ -238,6 +240,15 @@ export function adjustCameraFollowOrbit(deltaYaw: number, deltaPitch: number) {
 export function setCameraFollowOrbitControlActive(active: boolean) {
   if (cameraState.mode !== "follow") return;
   cameraState.orbitControlActive = active;
+}
+
+export function resetCameraFollowOrbitBehindTarget() {
+  if (cameraState.mode !== "follow") return;
+  if (!Number.isFinite(cameraState.lastTargetYaw)) return;
+  cameraState.followYaw = cameraState.lastTargetYaw;
+  cameraState.followPitch = DEFAULT_FOLLOW_PITCH;
+  cameraState.followDistance = DEFAULT_FOLLOW_DISTANCE;
+  syncFollowOffsetFromOrbit();
 }
 
 export function setCameraLookAtTarget(

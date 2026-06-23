@@ -2,7 +2,8 @@
 
 import { PeerNet, type ComponentSchema, type PeerJSPeer } from "@kikorin/netcode";
 import type { CoreWorldBox } from "@kikorin/engine";
-import { useEffect, useRef, useState } from "react";
+import { log, logLevels } from "@kikorin/util";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BoxGeometry,
   EdgesGeometry,
@@ -10,13 +11,19 @@ import {
   LineSegments,
   Mesh,
   MeshBasicMaterial,
+  SphereGeometry,
 } from "three";
 
 const GROUP_ID = "world";
 const POSITION_COMPONENT_ID = 0;
 const ROTATION_COMPONENT_ID = 1;
+// Projectile flag lets remote peers distinguish bullets from people at spawn time.
+const PROJECTILE_COMPONENT_ID = 2;
 
-function createRemotePlayerMesh() {
+// Person-sized collider for remote NPCs/players so they participate in local collision.
+const REMOTE_PERSON_COLLIDER = { halfWidth: 0.5, halfHeight: 0.5, halfDepth: 0.5 };
+
+function createRemotePersonMesh() {
   const geo = new BoxGeometry(1, 1, 1);
   const body = new MeshBasicMaterial({ color: 0xff44aa });
   const mesh = new Mesh(geo, body);
@@ -29,24 +36,50 @@ function createRemotePlayerMesh() {
   return mesh;
 }
 
+function createRemoteProjectileMesh() {
+  const geo = new SphereGeometry(0.12, 14, 10);
+  const mesh = new Mesh(geo, new MeshBasicMaterial({ color: 0xf97316 }));
+  mesh.scale.set(0.82, 0.82, 1.35);
+  return mesh;
+}
+
 export interface UseNetworkingReturn {
   localPeerId: string | null;
   connectedPeers: string[];
   connect: (remotePeerId: string) => void;
+  addOwnedEntity: (eid: number) => void;
+  removeOwnedEntity: (eid: number) => void;
 }
 
 export function useNetworking(
   engine: CoreWorldBox | null,
   playerEid: number | null,
+  ownedEids: readonly number[],
 ): UseNetworkingReturn {
   const [localPeerId, setLocalPeerId] = useState<string | null>(null);
   const [connectedPeers, setConnectedPeers] = useState<string[]>([]);
   const netRef = useRef<PeerNet | null>(null);
   // peerId → Map<remoteEid, localEid>
   const remoteEntitiesRef = useRef(new Map<string, Map<number, number>>());
+  // Mutable set of entity IDs this peer owns. Initialized from ownedEids inside
+  // the setup effect (where playerEid and ownedEids land in the same React batch),
+  // then managed dynamically by addOwnedEntity / removeOwnedEntity for projectiles.
+  const ownedEntitySetRef = useRef(new Set<number>());
+
+  const addOwnedEntity = useCallback((eid: number) => {
+    ownedEntitySetRef.current.add(eid);
+  }, []);
+
+  const removeOwnedEntity = useCallback((eid: number) => {
+    ownedEntitySetRef.current.delete(eid);
+  }, []);
 
   useEffect(() => {
     if (!engine || playerEid === null) return;
+
+    // playerEid and ownedEids are set together in the same React state batch
+    // (via setupGame in HomePage), so this runs with the correct initial set.
+    ownedEntitySetRef.current = new Set(ownedEids);
 
     // Capture as non-null locals for use inside closures
     const eng = engine;
@@ -74,6 +107,17 @@ export function useNetworking(
       ],
     };
 
+    // Tracks the Projectile flag so remote peers can distinguish bullets from
+    // people when spawning mirror entities. Included in full syncs and the
+    // first delta batch for any projectile (its value only changes 0→1 once).
+    const projectileSchema: ComponentSchema = {
+      id: PROJECTILE_COMPONENT_ID,
+      name: "Projectile",
+      fields: [
+        { id: 0, name: "flag", array: world.components.Projectile },
+      ],
+    };
+
     import("peerjs").then(({ Peer }) => {
       if (cancelled) return;
 
@@ -90,10 +134,28 @@ export function useNetworking(
         net.attachPeer(peer as unknown as PeerJSPeer);
         net.registerComponent(posSchema);
         net.registerComponent(rotSchema);
+        net.registerComponent(projectileSchema);
         net.createGroup({ id: GROUP_ID, tickRateMs: 50 });
 
         net.onGroupDelta(GROUP_ID, (deltas, _gid, fromPeer) => {
+          const isNewPeer = !remoteEntitiesRef.current.has(fromPeer);
           const peerEntities = getOrCreatePeerMap(fromPeer);
+
+          // When we first hear from a peer, send them our full state so they
+          // can spawn mirrors for all our boxes immediately.
+          if (isNewPeer && net) {
+            net.sendFullSync(GROUP_ID, fromPeer, [...ownedEntitySetRef.current]);
+          }
+
+          // First pass: find which remote entity IDs in this batch are projectiles.
+          // We must know the type before spawning so the correct mesh is used.
+          const projectileRemoteEids = new Set<number>();
+          for (const d of deltas) {
+            if (d.componentId === PROJECTILE_COMPONENT_ID && d.value === 1) {
+              projectileRemoteEids.add(d.entityId);
+            }
+          }
+
           const posUpd = new Map<
             number,
             Partial<{ x: number; y: number; z: number }>
@@ -108,6 +170,7 @@ export function useNetworking(
               fromPeer,
               d.entityId,
               peerEntities,
+              projectileRemoteEids.has(d.entityId),
             );
             if (d.componentId === POSITION_COMPONENT_ID) {
               const p = posUpd.get(localEid) ?? {};
@@ -127,11 +190,16 @@ export function useNetworking(
           for (const [eid, r] of rotUpd) eng.setEntityRotation(eid, r);
         });
 
-        // Flush local player deltas every game tick
+        // Flush all locally-owned entity deltas every game tick.
+        // Owned entities run movement locally; remote peers skip movement for
+        // entities they receive (they have no Velocity component) and only use
+        // the incoming positions. Collision runs on all peers independently.
         unsubTick = world.controls.onTick(() => {
           if (!net) return;
-          net.markEntityDirty(playerEid);
-          net.flushGroupDeltas(GROUP_ID, [playerEid]);
+          const ids = [...ownedEntitySetRef.current];
+          if (ids.length === 0) return;
+          net.markEntitiesDirty(ids);
+          net.flushGroupDeltas(GROUP_ID, ids);
         });
 
         netRef.current = net;
@@ -139,7 +207,7 @@ export function useNetworking(
       });
 
       peer.on("error", (err: Error) =>
-        console.error("[peerjs]", err.message),
+        log(logLevels.error, "[peerjs]", ["network"], err.message),
       );
     });
 
@@ -152,19 +220,33 @@ export function useNetworking(
       return map;
     }
 
+    // Spawns a local mirror entity for an entity owned by a remote peer.
+    // Projectiles get the correct bullet mesh; all others get person mesh with
+    // a collider so they participate in local collision detection.
+    // Neither type gets Velocity or Gravity, so the movement system skips them —
+    // positions come entirely from network updates.
     function getOrSpawnRemote(
       peerId: string,
       remoteEid: number,
       peerEntities: Map<number, number>,
+      isProjectile: boolean,
     ): number {
       const existing = peerEntities.get(remoteEid);
       if (existing !== undefined) return existing;
 
-      const localEid = eng.spawnEntity({
-        position: { x: 0, y: 0, z: 0 },
-        rotation: { pitch: 0, yaw: 0, roll: 0 },
-        renderMesh: createRemotePlayerMesh,
-      });
+      const localEid = isProjectile
+        ? eng.spawnEntity({
+            position: { x: 0, y: 0, z: 0 },
+            rotation: { pitch: 0, yaw: 0, roll: 0 },
+            renderMesh: createRemoteProjectileMesh,
+          })
+        : eng.spawnEntity({
+            position: { x: 0, y: 0, z: 0 },
+            rotation: { pitch: 0, yaw: 0, roll: 0 },
+            collider: REMOTE_PERSON_COLLIDER,
+            renderMesh: createRemotePersonMesh,
+          });
+
       peerEntities.set(remoteEid, localEid);
       setConnectedPeers((prev) =>
         prev.includes(peerId) ? prev : [...prev, peerId],
@@ -191,11 +273,14 @@ export function useNetworking(
     if (!net) return;
     void net.connectPeer(remotePeerId).then(() => {
       net.joinGroup(GROUP_ID, [remotePeerId]);
+      // Send a full snapshot of all owned entities so the remote peer can
+      // immediately spawn mirrors for all boxes, not just the player.
+      net.sendFullSync(GROUP_ID, remotePeerId, [...ownedEntitySetRef.current]);
       setConnectedPeers((prev) =>
         prev.includes(remotePeerId) ? prev : [...prev, remotePeerId],
       );
     });
   }
 
-  return { localPeerId, connectedPeers, connect };
+  return { localPeerId, connectedPeers, connect, addOwnedEntity, removeOwnedEntity };
 }

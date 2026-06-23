@@ -4,8 +4,8 @@ import {
   ControlSources,
   destroyEntity,
   evaluateFlaginatorFlag,
-  getBounceSuggestion,
   getCollisionBounceDelta,
+  getContactBounceDelta,
   getTouchingEntities,
   getEntityForward,
   getYawFromXZDirection,
@@ -134,7 +134,11 @@ const PROJECTILE_BOUNCE_REPEAT_COOLDOWN_TICKS = 6;
 const PROJECTILE_SWEEP_REWIND_TOI = 0.002;
 const PROJECTILE_BOUNCE_SEPARATION_DISTANCE = 0.04;
 const PROJECTILE_FALLBACK_BOUNCE_RESTITUTION = 0.8;
-const AMBIENT_PERSON_COUNT = 8000;
+const AMBIENT_PERSON_COUNT = 30;
+const BOX_MIN_SPEED = 2;
+const BOX_MAX_SPEED = 5;
+const BOX_MAX_STEER_RADIANS_PER_SECOND = 1.5;
+const PRIME_SPAWN_POSITION = { x: 0, y: 12, z: 0 };
 
 function createPersonFaceMaterials(bodyColor: number, frontColor: number) {
   return [
@@ -155,6 +159,11 @@ const PERSON_TOUCH_MATERIALS = createPersonFaceMaterials(
   PERSON_TOUCH_FRONT_COLOR,
 );
 type World = CoreWorld;
+
+type OwnershipCallbacks = {
+  addOwnedEntity: (eid: number) => void;
+  removeOwnedEntity: (eid: number) => void;
+};
 
 type FloorEids = ArrayLike<number>;
 type ProjectileState = {
@@ -237,17 +246,64 @@ function createProjectileRenderMesh() {
   return mesh;
 }
 
-function setupGame(engine: CoreWorldBox): { playerEid: number } {
+function registerBoxSteering(
+  world: CoreWorld,
+  boxEids: number[],
+  primeEid: number,
+) {
+  world.controls.onTick((activeWorld, tick) => {
+    if (tick.deltaSeconds === 0) return;
+    if (!hasEntityComponents(activeWorld, primeEid, ["Position"])) return;
+
+    const { Position, Velocity } = activeWorld.components;
+    const targetX = Position.x[primeEid];
+    const targetZ = Position.z[primeEid];
+    const maxSteer = BOX_MAX_STEER_RADIANS_PER_SECOND * tick.deltaSeconds;
+
+    for (const eid of boxEids) {
+      if (!hasEntityComponents(activeWorld, eid, ["Position", "Velocity"])) continue;
+
+      const currentSpeed = Math.hypot(Velocity.x[eid], Velocity.z[eid]);
+      if (currentSpeed === 0) continue;
+
+      const dx = targetX - Position.x[eid];
+      const dz = targetZ - Position.z[eid];
+      if (Math.hypot(dx, dz) === 0) continue;
+
+      const currentAngle = Math.atan2(Velocity.x[eid], Velocity.z[eid]);
+      const targetAngle = Math.atan2(dx, dz);
+      let angleDiff = targetAngle - currentAngle;
+      if (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+      else if (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+
+      const steer = clamp(angleDiff, -maxSteer, maxSteer);
+      if (steer === 0) continue;
+
+      const newAngle = currentAngle + steer;
+      setEntityVelocity(activeWorld, eid, {
+        x: Math.sin(newAngle) * currentSpeed,
+        y: Velocity.y[eid],
+        z: Math.cos(newAngle) * currentSpeed,
+      });
+    }
+  });
+}
+
+function setupGame(
+  engine: CoreWorldBox,
+  ownership: OwnershipCallbacks,
+): { playerEid: number; ownedEids: number[] } {
   createFloor(engine.world, FLOOR_POSITION);
   spawnSampleWalls(engine.world);
 
   const floorEids = queryFloorEids(engine.world);
   const prime = createPrimePlayer(engine.world, floorEids);
-  registerPrimeControls(engine.world, prime);
+  registerPrimeControls(engine.world, prime, ownership);
   engine.setCameraFollowTarget(prime);
-  spawnAmbientPeople(engine.world, floorEids);
+  const ambientEids = spawnAmbientPeople(engine.world, floorEids);
+  registerBoxSteering(engine.world, ambientEids, prime);
 
-  return { playerEid: prime };
+  return { playerEid: prime, ownedEids: [prime, ...ambientEids] };
 }
 
 function queryFloorEids(world: World): FloorEids {
@@ -257,7 +313,7 @@ function queryFloorEids(world: World): FloorEids {
 function createPrimePlayer(world: CoreWorld, floorEids: FloorEids) {
   return createPerson(
     world,
-    { x: 0, y: 12, z: 0 },
+    PRIME_SPAWN_POSITION,
     { x: 0, y: 0, z: 0 },
     { pitch: 0, yaw: 0, roll: 0 },
     false,
@@ -271,35 +327,36 @@ function spawnAmbientPeople(
   world: CoreWorld,
   floorEids: FloorEids,
   count = AMBIENT_PERSON_COUNT,
-) {
+): number[] {
   const spawnRangeX = FLOOR_COLLIDER.halfWidth - 4;
   const spawnRangeZ = FLOOR_COLLIDER.halfDepth - 4;
+  const eids: number[] = [];
 
   for (let i = 0; i < count; i += 1) {
-    const moving = rng(0, 10) > 9; // 10% chance to be moving
-    const velocity = {
-      x: moving ? rng(-10, 10, 2) : 0,
-      y: 0,
-      z: moving ? rng(-10, 10, 2) : 0,
-    };
     const position = {
       x: rng(-spawnRangeX, spawnRangeX),
       y: rng(FLOOR_TOP_Y + 4, FLOOR_TOP_Y + 60),
       z: rng(-spawnRangeZ, spawnRangeZ),
     };
 
-    createPerson(
+    const dx = PRIME_SPAWN_POSITION.x - position.x;
+    const dz = PRIME_SPAWN_POSITION.z - position.z;
+    const len = Math.hypot(dx, dz);
+    const speed = rng(BOX_MIN_SPEED, BOX_MAX_SPEED, 1);
+    const velocity = len > 0
+      ? { x: (dx / len) * speed, y: 0, z: (dz / len) * speed }
+      : { x: 0, y: 0, z: -speed };
+
+    eids.push(createPerson(
       world,
       position,
       velocity,
       {
         pitch: 0,
-        yaw: moving
-          ? getYawFromXZDirection(velocity.x, velocity.z)
-          : rng(0, Math.PI * 2, 3),
+        yaw: getYawFromXZDirection(velocity.x, velocity.z),
         roll: 0,
       },
-      moving,
+      true,
       100,
       {
         level: 0,
@@ -307,11 +364,13 @@ function spawnAmbientPeople(
         name: `Doom${i}`,
       },
       floorEids,
-    );
+    ));
   }
+
+  return eids;
 }
 
-function registerPrimeControls(world: CoreWorld, eid: number) {
+function registerPrimeControls(world: CoreWorld, eid: number, ownership: OwnershipCallbacks) {
   const projectiles: ProjectileRegistry = new Map();
 
   const isControllingPrime = (activeWorld: CoreWorld) => {
@@ -389,6 +448,7 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
       remainingTicks: PROJECTILE_TTL_TICKS,
       bounceCooldownsByTarget: new Map(),
     });
+    ownership.addOwnedEntity(projectileEid);
   };
 
   const updateProjectiles = (
@@ -406,6 +466,7 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
           "Collider",
         ])
       ) {
+        ownership.removeOwnedEntity(projectileEid);
         projectiles.delete(projectileEid);
         continue;
       }
@@ -414,6 +475,7 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
       projectile.remainingTicks -= 1;
       if (projectile.remainingTicks <= 0) {
         destroyEntity(activeWorld, projectileEid);
+        ownership.removeOwnedEntity(projectileEid);
         projectiles.delete(projectileEid);
         continue;
       }
@@ -428,37 +490,55 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
         y: Velocity.y[projectileEid],
         z: Velocity.z[projectileEid],
       };
+      const { Projectile } = activeWorld.components;
       const isFreshBounceTarget = (targetEid: number) => {
         return (
           !Floor[targetEid] &&
+          !Projectile[targetEid] &&
           (projectile.bounceCooldownsByTarget.get(targetEid) ?? 0) === 0
         );
       };
 
-      const bounce = getBounceSuggestion(activeWorld, projectileEid);
-      const freshOverlapTargets = getTouchingEntities(
-        activeWorld,
-        projectileEid,
-      ).filter(isFreshBounceTarget);
+      // Overlap bounce: projectile is already inside something (tunneled last tick).
+      // Compute the bounce fresh per-target using the actual contact normal so
+      // stale accumulated suggestions from already-bounced surfaces don't corrupt
+      // corner hits.
+      const freshOverlapTargets = getTouchingEntities(activeWorld, projectileEid)
+        .filter(isFreshBounceTarget);
 
-      if (bounce && freshOverlapTargets.length > 0) {
-        const bouncedVelocity = addVectors(currentVelocity, bounce);
-        const separatedPosition = getProjectileSeparatedPosition(
-          currentPosition,
-          bouncedVelocity,
-        );
-        setEntityPosition(activeWorld, projectileEid, separatedPosition);
-        setEntityVelocity(activeWorld, projectileEid, bouncedVelocity);
-        faceEntityAlongVelocity(activeWorld, projectileEid, bouncedVelocity);
+      if (freshOverlapTargets.length > 0) {
+        let bouncedVelocity = currentVelocity;
+        let didBounce = false;
 
         for (let i = 0; i < freshOverlapTargets.length; i += 1) {
-          projectile.bounceCooldownsByTarget.set(
+          const bounceDelta = getContactBounceDelta(
+            activeWorld,
+            projectileEid,
             freshOverlapTargets[i]!,
-            PROJECTILE_BOUNCE_REPEAT_COOLDOWN_TICKS,
           );
+          if (!bounceDelta) continue;
+          bouncedVelocity = addVectors(bouncedVelocity, bounceDelta);
+          didBounce = true;
         }
 
-        continue;
+        if (didBounce) {
+          const separatedPosition = getProjectileSeparatedPosition(
+            currentPosition,
+            bouncedVelocity,
+          );
+          setEntityPosition(activeWorld, projectileEid, separatedPosition);
+          setEntityVelocity(activeWorld, projectileEid, bouncedVelocity);
+          faceEntityAlongVelocity(activeWorld, projectileEid, bouncedVelocity);
+
+          for (let i = 0; i < freshOverlapTargets.length; i += 1) {
+            projectile.bounceCooldownsByTarget.set(
+              freshOverlapTargets[i]!,
+              PROJECTILE_BOUNCE_REPEAT_COOLDOWN_TICKS,
+            );
+          }
+
+          continue;
+        }
       }
 
       if (deltaSeconds <= 0) {

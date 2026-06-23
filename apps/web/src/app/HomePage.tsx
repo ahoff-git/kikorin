@@ -21,8 +21,11 @@ import { PlayerReactControls } from "./kikorinControls";
 import { PageLayout } from "./kikorinLayout";
 
 const CAMERA_DRAG_SENSITIVITY = 0.006;
+const CHARACTER_SPIN_SENSITIVITY = 0.006;
 const PRIMARY_POINTER_BUTTON_MASK = 1;
 const SECONDARY_POINTER_BUTTON_MASK = 2;
+const MIDDLE_POINTER_BUTTON_MASK = 4;
+const CLICK_MAX_MOVEMENT_PX = 4;
 
 const canvasViewportStyle: CSSProperties = {
   flex: 1,
@@ -69,11 +72,41 @@ const controlsSectionStyle: CSSProperties = {
   marginTop: 12,
 };
 
+const networkPanelStyle: CSSProperties = { marginTop: 16 };
+
+const networkRowStyle: CSSProperties = {
+  display: "flex",
+  gap: 4,
+  alignItems: "center",
+  marginTop: 4,
+};
+
+const networkIdStyle: CSSProperties = {
+  fontFamily: "monospace",
+  fontSize: 11,
+  wordBreak: "break-all",
+  flex: 1,
+};
+
+const networkInputStyle: CSSProperties = {
+  fontFamily: "monospace",
+  fontSize: 11,
+  flex: 1,
+  minWidth: 0,
+};
+
+const networkPeerItemStyle: CSSProperties = {
+  fontFamily: "monospace",
+  fontSize: 11,
+  marginTop: 2,
+  color: "#ff44aa",
+};
+
 const CONTROL_INSTRUCTIONS =
-  "W / S move forward and back, Q / E strafe, A / D or Left / Right turn, I / K pitch up and down, left click to fire a small block, right drag inside the canvas to orbit the camera, and press Space to jump.";
+  "W / S move forward and back, Q / E strafe, A / D or Left / Right turn, I / K pitch up and down, left click to fire, middle drag to orbit the camera, middle click to reset the camera, right drag to spin the player, and press Space to jump.";
 
 const LEFT_NAV_CONTROL_INSTRUCTIONS =
-  "Move forward and back with W and S, strafe with Q and E, turn with A and D or the left and right arrow keys, use I and K to pitch up and down, left click to fire a small block that can bounce off other blocks, right drag inside the canvas to orbit the camera, and press Space to jump.";
+  "Move forward and back with W and S, strafe with Q and E, turn with A and D or the left and right arrow keys, use I and K to pitch up and down, left click to fire a small block that can bounce off other blocks, middle-click drag to orbit the camera, middle click to reset the camera behind the player, right drag to spin the player, and press Space to jump.";
 
 const CONTROL_SYSTEM_NOTE =
   "The React Boost Forward button in the header also feeds the same control system, so you can compare UI input with keyboard input.";
@@ -93,17 +126,20 @@ export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engine = useKikorin(canvasRef);
   const [playerEid, setPlayerEid] = useState<number | null>(null);
+  const [ownedEids, setOwnedEids] = useState<readonly number[]>([]);
   const uiState = useWorldUiState();
-  const { localPeerId, connectedPeers, connect } = useNetworking(
+  const { localPeerId, connectedPeers, connect, addOwnedEntity, removeOwnedEntity } = useNetworking(
     engine,
     playerEid,
+    ownedEids,
   );
 
   useEffect(() => {
     if (!engine) return;
 
-    const { playerEid: eid } = setupGame(engine);
+    const { playerEid: eid, ownedEids: owned } = setupGame(engine, { addOwnedEntity, removeOwnedEntity });
     setPlayerEid(eid);
+    setOwnedEids(owned);
 
     const canvas = canvasRef.current!;
     canvas.style.cursor = "default";
@@ -119,12 +155,21 @@ export default function Home() {
       (active) => {
         engine.setCameraFollowOrbitControlActive(active);
       },
+      (deltaX) => {
+        const { Rotation } = engine.world.components;
+        const newYaw = Rotation.yaw[eid] - deltaX * CHARACTER_SPIN_SENSITIVITY;
+        engine.setEntityRotation(eid, { yaw: newYaw });
+      },
+      () => {
+        engine.resetCameraFollowOrbitBehindTarget();
+      },
     );
 
     return () => {
       cameraDragController.disconnect();
       canvas.style.cursor = "default";
       setPlayerEid(null);
+      setOwnedEids([]);
     };
   }, [engine]);
 
@@ -159,71 +204,102 @@ export default function Home() {
   );
 }
 
+const INITIAL_UI_STATE: WorldUiState = {
+  player: null,
+  playerPosition: null,
+  timeMetrics: null,
+  controlStates: [],
+};
+
 function useWorldUiState(): WorldUiState {
-  const [player, setPlayer] = useState<Player | null>(null);
-  const [playerPosition, setPlayerPosition] = useState<Position | null>(null);
-  const [timeMetrics, setTimeMetrics] = useState<Time | null>(null);
-  const [controlStates, setControlStates] = useState<ControlState[]>([]);
+  const [state, setState] = useState<WorldUiState>(INITIAL_UI_STATE);
 
   useKikorinEvent("ui:timeMetricsUpdate", ({ timeMetrics }) =>
-    setTimeMetrics(timeMetrics),
+    setState(s => ({ ...s, timeMetrics })),
   );
-  useKikorinEvent("ui:playerUpdate", ({ player }) => setPlayer(player));
+  useKikorinEvent("ui:playerUpdate", ({ player }) =>
+    setState(s => ({ ...s, player })),
+  );
   useKikorinEvent("ui:playerPositionUpdate", ({ playerPosition }) =>
-    setPlayerPosition(playerPosition),
+    setState(s => ({ ...s, playerPosition })),
   );
   useKikorinEvent("ui:controlsUpdate", ({ controlStates }) =>
-    setControlStates(controlStates),
+    setState(s => ({ ...s, controlStates })),
   );
 
-  return {
-    player,
-    playerPosition,
-    timeMetrics,
-    controlStates,
-  };
+  return state;
 }
 
 function createCameraDragController(
   canvas: HTMLCanvasElement,
-  onDrag: (deltaX: number, deltaY: number) => void,
-  onDragActiveChange?: (active: boolean) => void,
+  onCameraDrag: (deltaX: number, deltaY: number) => void,
+  onCameraDragActiveChange: ((active: boolean) => void) | undefined,
+  onCharacterDrag: (deltaX: number, deltaY: number) => void,
+  onMiddleClick: (() => void) | undefined,
 ): CameraDragController {
-  let activePointerId: number | null = null;
-  let activeButtonsMask = 0;
-  let lastClientX = 0;
-  let lastClientY = 0;
+  type SessionType = "camera" | "character";
 
-  function getCameraDragButton(event: PointerEvent): number {
-    return event.pointerType === "mouse" ? 2 : 0;
-  }
+  type Session = {
+    pointerId: number;
+    buttonsMask: number;
+    type: SessionType;
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    hasDragged: boolean;
+  };
 
-  function getCameraDragButtonsMask(event: PointerEvent): number {
-    return event.pointerType === "mouse"
-      ? SECONDARY_POINTER_BUTTON_MASK
-      : PRIMARY_POINTER_BUTTON_MASK;
-  }
+  let session: Session | null = null;
 
-  function stopDragging(pointerId?: number) {
-    if (pointerId !== undefined && activePointerId !== pointerId) return;
-    const wasDragging = activePointerId !== null;
-    activePointerId = null;
-    activeButtonsMask = 0;
+  function stopSession(pointerId?: number) {
+    if (session === null) return;
+    if (pointerId !== undefined && session.pointerId !== pointerId) return;
+
+    const ended = session;
+    session = null;
     canvas.style.cursor = "default";
-    if (wasDragging) {
-      onDragActiveChange?.(false);
+
+    if (ended.type === "camera") {
+      if (ended.hasDragged) {
+        onCameraDragActiveChange?.(false);
+      } else {
+        onMiddleClick?.();
+      }
     }
   }
 
   function onPointerDown(event: PointerEvent) {
-    if (event.button !== getCameraDragButton(event)) return;
+    if (session !== null) return;
 
-    activePointerId = event.pointerId;
-    activeButtonsMask = getCameraDragButtonsMask(event);
-    lastClientX = event.clientX;
-    lastClientY = event.clientY;
-    canvas.style.cursor = "grabbing";
-    onDragActiveChange?.(true);
+    let sessionType: SessionType | null = null;
+    let buttonsMask = 0;
+
+    if (event.pointerType === "mouse") {
+      if (event.button === 1) {
+        sessionType = "camera";
+        buttonsMask = MIDDLE_POINTER_BUTTON_MASK;
+      } else if (event.button === 2) {
+        sessionType = "character";
+        buttonsMask = SECONDARY_POINTER_BUTTON_MASK;
+      }
+    } else if (event.button === 0) {
+      sessionType = "camera";
+      buttonsMask = PRIMARY_POINTER_BUTTON_MASK;
+    }
+
+    if (sessionType === null) return;
+
+    session = {
+      pointerId: event.pointerId,
+      buttonsMask,
+      type: sessionType,
+      startX: event.clientX,
+      startY: event.clientY,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      hasDragged: false,
+    };
 
     try {
       canvas.setPointerCapture(event.pointerId);
@@ -235,20 +311,37 @@ function createCameraDragController(
   }
 
   function onPointerMove(event: PointerEvent) {
-    if (activePointerId !== event.pointerId) return;
-    if ((event.buttons & activeButtonsMask) === 0) {
-      stopDragging(event.pointerId);
+    if (session === null || session.pointerId !== event.pointerId) return;
+    if ((event.buttons & session.buttonsMask) === 0) {
+      stopSession(event.pointerId);
       return;
     }
 
-    const deltaX = event.clientX - lastClientX;
-    const deltaY = event.clientY - lastClientY;
-    lastClientX = event.clientX;
-    lastClientY = event.clientY;
+    const deltaX = event.clientX - session.lastX;
+    const deltaY = event.clientY - session.lastY;
+    session.lastX = event.clientX;
+    session.lastY = event.clientY;
 
-    if (deltaX === 0 && deltaY === 0) return;
+    if (!session.hasDragged) {
+      const totalDX = event.clientX - session.startX;
+      const totalDY = event.clientY - session.startY;
+      if (Math.hypot(totalDX, totalDY) > CLICK_MAX_MOVEMENT_PX) {
+        session.hasDragged = true;
+        if (session.type === "camera") {
+          canvas.style.cursor = "grabbing";
+          onCameraDragActiveChange?.(true);
+        }
+      }
+    }
 
-    onDrag(deltaX, deltaY);
+    if (!session.hasDragged || (deltaX === 0 && deltaY === 0)) return;
+
+    if (session.type === "camera") {
+      onCameraDrag(deltaX, deltaY);
+    } else {
+      onCharacterDrag(deltaX, deltaY);
+    }
+
     event.preventDefault();
   }
 
@@ -258,16 +351,15 @@ function createCameraDragController(
     } catch {
       // Safe to ignore if capture was already released elsewhere.
     }
-
-    stopDragging(event.pointerId);
+    stopSession(event.pointerId);
   }
 
   function onPointerCancel(event: PointerEvent) {
-    stopDragging(event.pointerId);
+    stopSession(event.pointerId);
   }
 
   function onLostPointerCapture() {
-    stopDragging();
+    stopSession();
   }
 
   function onContextMenu(event: MouseEvent) {
@@ -287,12 +379,9 @@ function createCameraDragController(
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", onPointerUp);
       canvas.removeEventListener("pointercancel", onPointerCancel);
-      canvas.removeEventListener(
-        "lostpointercapture",
-        onLostPointerCapture,
-      );
+      canvas.removeEventListener("lostpointercapture", onLostPointerCapture);
       canvas.removeEventListener("contextmenu", onContextMenu);
-      stopDragging();
+      stopSession();
     },
   };
 }
@@ -422,40 +511,14 @@ function NetworkPanel({
     if (e.key === "Enter") handleConnect();
   }
 
-  const panelStyle: CSSProperties = { marginTop: 16 };
-  const rowStyle: CSSProperties = {
-    display: "flex",
-    gap: 4,
-    alignItems: "center",
-    marginTop: 4,
-  };
-  const idStyle: CSSProperties = {
-    fontFamily: "monospace",
-    fontSize: 11,
-    wordBreak: "break-all",
-    flex: 1,
-  };
-  const inputStyle: CSSProperties = {
-    fontFamily: "monospace",
-    fontSize: 11,
-    flex: 1,
-    minWidth: 0,
-  };
-  const peerItemStyle: CSSProperties = {
-    fontFamily: "monospace",
-    fontSize: 11,
-    marginTop: 2,
-    color: "#ff44aa",
-  };
-
   return (
-    <div style={panelStyle}>
+    <div style={networkPanelStyle}>
       <div style={sectionLabelStyle}>Multiplayer</div>
 
       <div style={{ marginTop: 6 }}>
         <div style={{ fontSize: 11, color: "#555" }}>Your ID</div>
-        <div style={rowStyle}>
-          <span style={idStyle}>
+        <div style={networkRowStyle}>
+          <span style={networkIdStyle}>
             {localPeerId ?? "connecting…"}
           </span>
           <button
@@ -471,9 +534,9 @@ function NetworkPanel({
 
       <div style={{ marginTop: 8 }}>
         <div style={{ fontSize: 11, color: "#555" }}>Connect to peer</div>
-        <div style={rowStyle}>
+        <div style={networkRowStyle}>
           <input
-            style={inputStyle}
+            style={networkInputStyle}
             placeholder="Paste peer ID…"
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
@@ -496,7 +559,7 @@ function NetworkPanel({
             Connected ({connectedPeers.length})
           </div>
           {connectedPeers.map((id) => (
-            <div key={id} style={peerItemStyle}>
+            <div key={id} style={networkPeerItemStyle}>
               {id}
             </div>
           ))}

@@ -15,6 +15,7 @@ import {
 import {
   adjustCameraFollowOrbit,
   cameraFollowSystem,
+  resetCameraFollowOrbitBehindTarget,
   resetCameraTarget,
   setCameraFollowOrbitControlActive,
   setCameraFollowTarget,
@@ -121,6 +122,7 @@ export {
   castEntityCollider,
   configureCuboidCollider,
   getCollisionBounceDelta,
+  getContactBounceDelta,
   getBounceSuggestion,
   getTouchPairs,
   getTouchingEntities,
@@ -468,6 +470,7 @@ function setupCoreWorld(
     setCameraFollowTarget,
     adjustCameraFollowOrbit,
     setCameraFollowOrbitControlActive,
+    resetCameraFollowOrbitBehindTarget,
     setCameraLookAtTarget,
     setEntityRotation: (eid, rotation) => setEntityRotation(world, eid, rotation),
     resetCameraTarget,

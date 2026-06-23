@@ -93,8 +93,6 @@ export function getColorPair() {
     const color = "#" + red.toString(16) + green.toString(16) + blue.toString(16);
     const antiColor = "#" + antiRed.toString(16) + antiGreen.toString(16) + antiblue.toString(16);
 
-    //console.log(red+" "+green+" "+blue);
-    //console.log(antiRed+" "+antiGreen+" "+antiblue);
     return { c1: color, c2: antiColor };
   }
 

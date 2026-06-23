@@ -1,3 +1,5 @@
+import { log, logLevels } from "./logging";
+
 export type ChillUpdateFn<TValue> = (value: TValue) => void;
 
 export type ChillUpdaterSetParams<TValue> = {
@@ -49,7 +51,7 @@ function createChillUpdater(): ChillUpdater {
         record.updateFunction(record.value);
       }
       catch (e) {
-        console.error("chillUpdater update failed", updateKey, e);
+        log(logLevels.error, "chillUpdater update failed", ["chillUpdate"], updateKey, e);
       }
 
       didSend = true;
