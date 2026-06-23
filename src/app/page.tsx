@@ -584,8 +584,35 @@ function RightPanel({
   );
 }
 
+function useFps() {
+  const [fps, setFps] = useState(0);
+  const frameCountRef = useRef(0);
+  const lastTimeRef = useRef(0);
+  const rafRef = useRef<number>(0);
+
+  useEffect(() => {
+    lastTimeRef.current = performance.now();
+    const tick = () => {
+      frameCountRef.current++;
+      const now = performance.now();
+      const elapsed = now - lastTimeRef.current;
+      if (elapsed >= 1000) {
+        setFps(Math.round((frameCountRef.current * 1000) / elapsed));
+        frameCountRef.current = 0;
+        lastTimeRef.current = now;
+      }
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, []);
+
+  return fps;
+}
+
 function Footer() {
-  return <>Hi - I&apos;m the Footer</>;
+  const fps = useFps();
+  return <>{fps} FPS</>;
 }
 
 function formatPosition(position: Position | null) {

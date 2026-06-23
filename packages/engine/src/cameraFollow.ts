@@ -1,6 +1,6 @@
 import { hasComponent, query } from "bitecs";
 import type { CoreWorld } from "@kikorin/ecs";
-import { findHighestFloorTopAtPosition } from "@kikorin/system-physics";
+import { castEntityCollider, findHighestFloorTopAtPosition } from "@kikorin/system-physics";
 import { lookCameraAt, readCameraPosition, setCameraPosition } from "@kikorin/system-rendering";
 
 type Vec3 = { x: number; y: number; z: number };
@@ -12,6 +12,8 @@ const DEFAULT_STATIONARY_POSITION: Vec3 = { x: 0, y: 4, z: 10 };
 const MIN_FOLLOW_DISTANCE = 0.1;
 const MAX_FOLLOW_PITCH = Math.PI * 0.48;
 const CAMERA_GROUND_CLEARANCE = 0.1;
+// Distance to keep camera away from a wall face when pulling in to avoid occlusion
+const CAMERA_WALL_SEPARATION = 0.3;
 const CAMERA_PITCH_DRAG_MIN_RESPONSE = 0.2;
 const CAMERA_PITCH_DRAG_EDGE_EXPONENT = 2;
 const CAMERA_DEBUG = false;
@@ -139,6 +141,32 @@ function clampCameraHeightToFloor(
 
   desiredPosition.y = minCameraY;
   return true;
+}
+
+function clampCameraToWalls(
+  world: CoreWorld,
+  playerEid: number,
+  playerPos: Vec3,
+  desiredPosition: Vec3,
+): void {
+  const { Floor, Player } = world.components;
+  const dx = desiredPosition.x - playerPos.x;
+  const dy = desiredPosition.y - playerPos.y;
+  const dz = desiredPosition.z - playerPos.z;
+
+  const hit = castEntityCollider(world, playerEid, playerPos, { x: dx, y: dy, z: dz }, {
+    filterPredicate: (targetEid) => !Floor[targetEid] && !hasComponent(world, targetEid, Player),
+  });
+
+  if (!hit || hit.toi >= 1) return;
+
+  const distance = Math.hypot(dx, dy, dz);
+  const toi = distance > 0
+    ? Math.max(0, hit.toi - CAMERA_WALL_SEPARATION / distance)
+    : 0;
+  desiredPosition.x = playerPos.x + dx * toi;
+  desiredPosition.y = playerPos.y + dy * toi;
+  desiredPosition.z = playerPos.z + dz * toi;
 }
 
 syncFollowOrbitFromOffset();
@@ -309,6 +337,9 @@ export function cameraFollowSystem(world: CoreWorld) {
     desiredCameraPosition,
     currentCameraPosition,
   );
+  if (cameraState.mode === "follow") {
+    clampCameraToWalls(world, eid, { x: tx, y: ty, z: tz }, desiredCameraPosition);
+  }
   desiredCameraX = desiredCameraPosition.x;
   desiredCameraY = desiredCameraPosition.y;
   desiredCameraZ = desiredCameraPosition.z;

@@ -1,7 +1,7 @@
 import { hasComponent, query } from "bitecs"
 import type { CoreWorld } from "@kikorin/ecs"
 import { markFlaginatorComponentChanged } from "@kikorin/system-flaginator"
-import { resolveFloorPosition } from "@kikorin/system-physics"
+import { castEntityCollider, resolveFloorPosition } from "@kikorin/system-physics"
 import {
     getYawFromXZDirection,
     markTransformDirty,
@@ -9,9 +9,11 @@ import {
 } from "./transforms"
 
 const FACE_VELOCITY_MIN_SPEED_SQUARED = 0.0001
+// Pull back from wall face to avoid starting the next frame inside the wall
+const WALL_SEPARATION_TOI = 0.001
 
 export function movementSystem(world: CoreWorld) {
-    const { Collider, FaceVelocity, Floor, Gravity, Position, Projectile, Rotation, Velocity } = world.components
+    const { Collider, FaceVelocity, Floor, Gravity, Player, Position, Projectile, Rotation, Velocity } = world.components
     const delta = world.time.delta
     if (delta === 0) return
 
@@ -32,10 +34,40 @@ export function movementSystem(world: CoreWorld) {
         const vx = velX[eid]
         const vy = velY[eid]
         const vz = velZ[eid]
-        const nextX = posX[eid] + vx * dt
+        const dx = vx * dt
+        const dz = vz * dt
+        let nextX = posX[eid] + dx
         let nextY = posY[eid] + vy * dt
-        const nextZ = posZ[eid] + vz * dt
+        let nextZ = posZ[eid] + dz
         let velocityChanged = false
+
+        // Wall collision for player entities: swept shape cast + wall slide
+        if (
+            hasComponent(world, eid, Player) &&
+            hasComponent(world, eid, Collider) &&
+            (dx !== 0 || dz !== 0)
+        ) {
+            const currentPos = { x: posX[eid], y: posY[eid], z: posZ[eid] }
+            const hit = castEntityCollider(world, eid, currentPos, { x: dx, y: 0, z: dz }, {
+                filterPredicate: (targetEid) => !Floor[targetEid] && !Collider.Sensor[targetEid] && !hasComponent(world, targetEid, Player),
+            })
+
+            if (hit) {
+                const safeToi = Math.max(0, hit.toi - WALL_SEPARATION_TOI)
+                nextX = posX[eid] + dx * safeToi
+                nextZ = posZ[eid] + dz * safeToi
+
+                // Slide: project remaining movement onto wall plane (strip the component into the wall)
+                const remainingT = 1 - hit.toi
+                if (remainingT > 0.001) {
+                    const nx = hit.normal1.x
+                    const nz = hit.normal1.z
+                    const dot = dx * nx + dz * nz
+                    nextX += (dx - dot * nx) * remainingT
+                    nextZ += (dz - dot * nz) * remainingT
+                }
+            }
+        }
 
         if (
             hasComponent(world, eid, Gravity) &&

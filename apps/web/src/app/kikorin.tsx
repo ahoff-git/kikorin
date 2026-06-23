@@ -94,6 +94,8 @@ const FLOOR_POSITION = {
   y: FLOOR_TOP_Y - FLOOR_COLLIDER.halfHeight,
   z: 0,
 };
+const WALL_BASE_MATERIAL = new MeshBasicMaterial({ color: 0xb0a090 });
+const WALL_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x5a4a3a });
 const PLAYER_ACCELERATION = 30;
 const PLAYER_MAX_SPEED = 18;
 const PLAYER_DRAG_PER_SECOND = 4;
@@ -180,6 +182,48 @@ function createFloorRenderMesh() {
   return mesh;
 }
 
+function createWallRenderMesh(halfWidth: number, halfHeight: number, halfDepth: number) {
+  const geometry = new BoxGeometry(halfWidth * 2, halfHeight * 2, halfDepth * 2);
+  const edgeGeometry = new EdgesGeometry(geometry);
+  const mesh = new Mesh(geometry, WALL_BASE_MATERIAL);
+  const outline = new LineSegments(edgeGeometry, WALL_EDGE_MATERIAL);
+  outline.renderOrder = 1;
+  outline.scale.setScalar(1.0005);
+  mesh.add(outline);
+  return mesh;
+}
+
+function createWall(
+  world: World,
+  position: Position,
+  halfWidth: number,
+  halfHeight: number,
+  halfDepth: number,
+) {
+  return spawnEntity(world, {
+    position,
+    collider: { halfWidth, halfHeight, halfDepth },
+    renderMesh: () => createWallRenderMesh(halfWidth, halfHeight, halfDepth),
+  });
+}
+
+function spawnSampleWalls(world: World) {
+  const HALF_H = 4;
+  const THICK = 0.5;
+  const Y = FLOOR_TOP_Y + HALF_H;
+
+  // North wall — closes the U ahead of spawn
+  createWall(world, { x: 0, y: Y, z: -12 }, 8, HALF_H, THICK);
+  // East arm of the U
+  createWall(world, { x: 8, y: Y, z: -3 }, THICK, HALF_H, 9);
+  // West arm of the U
+  createWall(world, { x: -8, y: Y, z: -3 }, THICK, HALF_H, 9);
+  // Freestanding pillar to the east
+  createWall(world, { x: 20, y: Y, z: 5 }, 1, HALF_H, 1);
+  // Long wall to the south
+  createWall(world, { x: 0, y: Y, z: 18 }, 14, HALF_H, THICK);
+}
+
 function createProjectileRenderMesh() {
   const mesh = new Mesh(PROJECTILE_GEOMETRY, PROJECTILE_BASE_MATERIAL);
   mesh.scale.set(
@@ -194,6 +238,7 @@ function createProjectileRenderMesh() {
 
 function setupGame(engine: CoreWorldBox): { playerEid: number } {
   createFloor(engine.world, FLOOR_POSITION);
+  spawnSampleWalls(engine.world);
 
   const floorEids = queryFloorEids(engine.world);
   const prime = createPrimePlayer(engine.world, floorEids);

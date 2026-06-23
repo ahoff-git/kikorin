@@ -184,8 +184,23 @@ function boostPrimeForward(world: CoreWorld, eid: number) {
   if (!isPrimePlayerControlled(world, eid)) return;
 
   const { Velocity } = world.components;
+  const worldBoost = rotateLocalVectorByEntityRotation(world, eid, {
+    x: 0,
+    y: 0,
+    z: -PLAYER_FORWARD_BOOST,
+  });
+  Velocity.x[eid] = clamp(
+    Velocity.x[eid] + worldBoost.x,
+    -PLAYER_MAX_SPEED,
+    PLAYER_MAX_SPEED,
+  );
+  Velocity.y[eid] = clamp(
+    Velocity.y[eid] + worldBoost.y,
+    -PLAYER_MAX_SPEED,
+    PLAYER_MAX_SPEED,
+  );
   Velocity.z[eid] = clamp(
-    Velocity.z[eid] - PLAYER_FORWARD_BOOST,
+    Velocity.z[eid] + worldBoost.z,
     -PLAYER_MAX_SPEED,
     PLAYER_MAX_SPEED,
   );

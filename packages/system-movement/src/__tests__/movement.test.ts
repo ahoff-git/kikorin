@@ -1,8 +1,18 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { addEntity, addComponent, createWorld } from 'bitecs'
 import { createFlaginator } from '@kikorin/system-flaginator'
-import { movementSystem } from '../movement'
 import type { CoreWorld } from '@kikorin/ecs'
+
+vi.mock('@kikorin/system-physics', async (importOriginal) => {
+  const actual = await importOriginal() as Record<string, unknown>
+  return {
+    ...actual,
+    castEntityCollider: vi.fn(() => null),
+  }
+})
+
+const { castEntityCollider } = await import('@kikorin/system-physics')
+const { movementSystem } = await import('../movement')
 
 const MAX_ENTITIES = 100
 
@@ -44,11 +54,16 @@ function makeTestWorld(): CoreWorld {
   return createWorld(config) as unknown as CoreWorld
 }
 
+const ZERO_VEC = { x: 0, y: 0, z: 0 }
+const ZERO_HIT = { colliderEid: 99, toi: 0, witness1: ZERO_VEC, witness2: ZERO_VEC, normal1: ZERO_VEC, normal2: ZERO_VEC }
+
 describe('movementSystem', () => {
   let world: CoreWorld
 
   beforeEach(() => {
     world = makeTestWorld()
+    vi.clearAllMocks()
+    vi.mocked(castEntityCollider).mockReturnValue(null)
   })
 
   it('moves entity by velocity * dt', () => {
@@ -97,21 +112,18 @@ describe('movementSystem', () => {
 
     movementSystem(world)
 
-    // Projectile entities are skipped
     expect(world.components.Position.x[eid]).toBe(0)
   })
 
   it('does not move entities that have no velocity', () => {
     const eid = addEntity(world)
     addComponent(world, eid, world.components.Position)
-    // No Velocity component
 
     world.components.Position.x[eid] = 3
     world.time.delta = 1000
 
     movementSystem(world)
 
-    // Not in the [Position, Velocity] query, position unchanged
     expect(world.components.Position.x[eid]).toBe(3)
   })
 
@@ -124,12 +136,199 @@ describe('movementSystem', () => {
 
     world.components.FaceVelocity[eid] = 1
     world.components.Velocity.x[eid] = 0
-    world.components.Velocity.z[eid] = -1 // moving in -Z → yaw should be 0
+    world.components.Velocity.z[eid] = -1
     world.time.delta = 100
 
     movementSystem(world)
 
-    // getYawFromXZDirection(0, -1) = atan2(0, 1) = 0
     expect(world.components.Rotation.yaw[eid]).toBeCloseTo(0)
+  })
+
+  describe('wall collision (player entities)', () => {
+    function spawnPlayer(world: CoreWorld): number {
+      const eid = addEntity(world)
+      addComponent(world, eid, world.components.Position)
+      addComponent(world, eid, world.components.Velocity)
+      addComponent(world, eid, world.components.Collider)
+      addComponent(world, eid, world.components.Player)
+      world.components.Player[eid] = { level: 0, experience: 0, name: 'test' }
+      return eid
+    }
+
+    it('moves freely when no wall is hit', () => {
+      const eid = spawnPlayer(world)
+      world.components.Velocity.x[eid] = 10
+      world.time.delta = 1000
+
+      movementSystem(world)
+
+      expect(world.components.Position.x[eid]).toBeCloseTo(10)
+    })
+
+    it('stops player before a head-on wall (normal pointing back toward player)', () => {
+      // Player moving in +X; wall normal1 = (1,0,0) = outward normal of player shape at contact
+      vi.mocked(castEntityCollider).mockReturnValueOnce({
+        ...ZERO_HIT,
+        toi: 0.5,
+        normal1: { x: 1, y: 0, z: 0 },
+      })
+
+      const eid = spawnPlayer(world)
+      world.components.Position.x[eid] = 0
+      world.components.Position.z[eid] = 0
+      world.components.Velocity.x[eid] = 10
+      world.time.delta = 1000 // dt=1s, dx=10
+
+      movementSystem(world)
+
+      // safeToi = 0.5 - 0.001 = 0.499; nextX = 10*0.499 = 4.99
+      // slide: remainingT=0.5; dot = 10*1 = 10; slideX = (10-10)*0.5 = 0
+      expect(world.components.Position.x[eid]).toBeCloseTo(4.99)
+      expect(world.components.Position.z[eid]).toBeCloseTo(0)
+    })
+
+    it('slides player along wall when moving diagonally into an X-facing wall', () => {
+      // Diagonal movement into a wall at x=something; wall normal1=(1,0,0)
+      vi.mocked(castEntityCollider).mockReturnValueOnce({
+        ...ZERO_HIT,
+        toi: 0.5,
+        normal1: { x: 1, y: 0, z: 0 },
+      })
+
+      const eid = spawnPlayer(world)
+      world.components.Position.x[eid] = 0
+      world.components.Position.z[eid] = 0
+      world.components.Velocity.x[eid] = 10
+      world.components.Velocity.z[eid] = 10
+      world.time.delta = 1000 // dt=1s, dx=10, dz=10
+
+      movementSystem(world)
+
+      // safeToi = 0.499; nextX = 10*0.499 = 4.99; nextZ = 10*0.499 = 4.99
+      // remainingT = 0.5; dot = 10*1+10*0 = 10
+      // slideX = (10-10*1)*0.5 = 0; slideZ = (10-10*0)*0.5 = 5
+      // Final: x = 4.99, z = 4.99+5 = 9.99
+      expect(world.components.Position.x[eid]).toBeCloseTo(4.99)
+      expect(world.components.Position.z[eid]).toBeCloseTo(9.99)
+    })
+
+    it('slides player along wall when moving diagonally into a Z-facing wall', () => {
+      // Wall normal1=(0,0,1) means player is pressing into a Z-facing wall
+      vi.mocked(castEntityCollider).mockReturnValueOnce({
+        ...ZERO_HIT,
+        toi: 0.5,
+        normal1: { x: 0, y: 0, z: 1 },
+      })
+
+      const eid = spawnPlayer(world)
+      world.components.Velocity.x[eid] = 10
+      world.components.Velocity.z[eid] = 10
+      world.time.delta = 1000
+
+      movementSystem(world)
+
+      // dx=10, dz=10; safeToi=0.499
+      // nextX=4.99, nextZ=4.99
+      // remainingT=0.5; dot=10*0+10*1=10
+      // slideX=(10-0)*0.5=5; slideZ=(10-10)*0.5=0
+      // Final: x=4.99+5=9.99, z=4.99+0=4.99
+      expect(world.components.Position.x[eid]).toBeCloseTo(9.99)
+      expect(world.components.Position.z[eid]).toBeCloseTo(4.99)
+    })
+
+    it('does not call castEntityCollider for non-player entities', () => {
+      const eid = addEntity(world)
+      addComponent(world, eid, world.components.Position)
+      addComponent(world, eid, world.components.Velocity)
+      addComponent(world, eid, world.components.Collider)
+      // No Player component
+
+      world.components.Velocity.x[eid] = 10
+      world.time.delta = 1000
+
+      movementSystem(world)
+
+      expect(castEntityCollider).not.toHaveBeenCalled()
+      expect(world.components.Position.x[eid]).toBeCloseTo(10)
+    })
+
+    it('does not call castEntityCollider for player without Collider', () => {
+      const eid = addEntity(world)
+      addComponent(world, eid, world.components.Position)
+      addComponent(world, eid, world.components.Velocity)
+      addComponent(world, eid, world.components.Player)
+      world.components.Player[eid] = { level: 0, experience: 0, name: 'test' }
+      // No Collider component
+
+      world.components.Velocity.x[eid] = 10
+      world.time.delta = 1000
+
+      movementSystem(world)
+
+      expect(castEntityCollider).not.toHaveBeenCalled()
+    })
+
+    it('passes XZ-only movement delta to castEntityCollider (Y is zero)', () => {
+      vi.mocked(castEntityCollider).mockReturnValueOnce(null)
+
+      const eid = spawnPlayer(world)
+      world.components.Velocity.x[eid] = 5
+      world.components.Velocity.y[eid] = 10 // vertical — should not be passed to cast
+      world.components.Velocity.z[eid] = 3
+      world.time.delta = 1000
+
+      movementSystem(world)
+
+      expect(castEntityCollider).toHaveBeenCalledWith(
+        world,
+        eid,
+        expect.objectContaining({ x: 0, z: 0 }),
+        expect.objectContaining({ x: 5, y: 0, z: 3 }),
+        expect.any(Object),
+      )
+    })
+
+    describe('filterPredicate', () => {
+      function getFilterPredicate(): (targetEid: number) => boolean {
+        const eid = spawnPlayer(world)
+        world.components.Velocity.x[eid] = 10
+        world.time.delta = 1000
+        movementSystem(world)
+        const call = vi.mocked(castEntityCollider).mock.calls[0]!
+        const opts = call[4] as { filterPredicate: (eid: number) => boolean }
+        return opts.filterPredicate
+      }
+
+      it('allows wall entities (no Floor, no Player, no Sensor) to block the player', () => {
+        const filter = getFilterPredicate()
+        const wallEid = addEntity(world)
+        // wall entity: no special components added
+        expect(filter(wallEid)).toBe(true)
+      })
+
+      it('excludes Floor entities from blocking', () => {
+        const filter = getFilterPredicate()
+        const floorEid = addEntity(world)
+        addComponent(world, floorEid, world.components.Floor)
+        world.components.Floor[floorEid] = 1
+        expect(filter(floorEid)).toBe(false)
+      })
+
+      it('excludes Person entities (those with Player component) from blocking', () => {
+        const filter = getFilterPredicate()
+        const personEid = addEntity(world)
+        addComponent(world, personEid, world.components.Player)
+        world.components.Player[personEid] = { level: 0, experience: 0, name: 'NPC' }
+        expect(filter(personEid)).toBe(false)
+      })
+
+      it('excludes Sensor colliders from blocking', () => {
+        const filter = getFilterPredicate()
+        const sensorEid = addEntity(world)
+        addComponent(world, sensorEid, world.components.Collider)
+        world.components.Collider.Sensor[sensorEid] = 1
+        expect(filter(sensorEid)).toBe(false)
+      })
+    })
   })
 })
