@@ -32,6 +32,9 @@ importers:
       '@kikorin/events':
         specifier: workspace:*
         version: link:../../packages/events
+      '@kikorin/react':
+        specifier: workspace:*
+        version: link:../../packages/react
       '@kikorin/system-physics':
         specifier: workspace:*
         version: link:../../packages/system-physics
@@ -204,6 +207,34 @@ importers:
       vitest:
         specifier: ^3.2.0
         version: 3.2.6(@types/node@20.19.33)
+
+  packages/react:
+    dependencies:
+      '@kikorin/engine':
+        specifier: workspace:*
+        version: link:../engine
+      '@kikorin/events':
+        specifier: workspace:*
+        version: link:../events
+      react:
+        specifier: '>=18'
+        version: 19.2.3
+      react-dom:
+        specifier: '>=18'
+        version: 19.2.3(react@19.2.3)
+    devDependencies:
+      '@types/node':
+        specifier: ^20
+        version: 20.19.33
+      '@types/react':
+        specifier: ^19
+        version: 19.2.14
+      '@types/react-dom':
+        specifier: ^19
+        version: 19.2.3(@types/react@19.2.14)
+      typescript:
+        specifier: ^5
+        version: 5.9.3
 
   packages/system-commands:
     dependencies:

@@ -2,6 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   transpilePackages: [
+    "@kikorin/react",
     "@kikorin/ecs",
     "@kikorin/engine",
     "@kikorin/events",
