@@ -1,0 +1,27 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "noEmit": true,
+    "plugins": [{ "name": "next" }],
+    "paths": {
+      "@kikorin/ecs": ["../../packages/ecs/src/index.ts"],
+      "@kikorin/engine": ["../../packages/engine/src/index.ts"],
+      "@kikorin/events": ["../../packages/events/src/index.ts"],
+      "@kikorin/util": ["../../packages/util/src/index.ts"],
+      "@kikorin/system-commands": ["../../packages/system-commands/src/index.ts"],
+      "@kikorin/system-controls": ["../../packages/system-controls/src/index.ts"],
+      "@kikorin/system-entity-cleanup": ["../../packages/system-entity-cleanup/src/index.ts"],
+      "@kikorin/system-experience": ["../../packages/system-experience/src/index.ts"],
+      "@kikorin/system-flaginator": ["../../packages/system-flaginator/src/index.ts"],
+      "@kikorin/system-health": ["../../packages/system-health/src/index.ts"],
+      "@kikorin/system-movement": ["../../packages/system-movement/src/index.ts"],
+      "@kikorin/system-physics": ["../../packages/system-physics/src/index.ts"],
+      "@kikorin/system-rendering": ["../../packages/system-rendering/src/index.ts"],
+      "@kikorin/system-time": ["../../packages/system-time/src/index.ts"],
+      "@kikorin/system-ui-bridge": ["../../packages/system-ui-bridge/src/index.ts"]
+    }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}

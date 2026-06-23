@@ -1,0 +1,15 @@
+
+> @kikorin/system-movement@0.0.1 test G:\Code\kikorin\packages\system-movement
+> vitest run
+
+
+[1m[46m RUN [49m[22m [36mv3.2.6 [39m[90mG:/Code/kikorin/packages/system-movement[39m
+
+ [32m✓[39m src/__tests__/transforms.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 2[2mms[22m[39m
+ [32m✓[39m src/__tests__/movement.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 1[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m2 passed[39m[22m[90m (2)[39m
+[2m      Tests [22m [1m[32m6 passed[39m[22m[90m (6)[39m
+[2m   Start at [22m 19:33:06
+[2m   Duration [22m 787ms[2m (transform 381ms, setup 0ms, collect 695ms, tests 3ms, environment 0ms, prepare 341ms)[22m
+

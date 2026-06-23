@@ -1,0 +1,24 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "noEmit": true,
+    "paths": {
+      "@kikorin/ecs": ["../ecs/src/index.ts"],
+      "@kikorin/util": ["../util/src/index.ts"],
+      "@kikorin/events": ["../events/src/index.ts"],
+      "@kikorin/system-flaginator": ["../system-flaginator/src/index.ts"],
+      "@kikorin/system-time": ["../system-time/src/index.ts"],
+      "@kikorin/system-controls": ["../system-controls/src/index.ts"],
+      "@kikorin/system-commands": ["../system-commands/src/index.ts"],
+      "@kikorin/system-rendering": ["../system-rendering/src/index.ts"],
+      "@kikorin/system-physics": ["../system-physics/src/index.ts"],
+      "@kikorin/system-movement": ["../system-movement/src/index.ts"],
+      "@kikorin/system-entity-cleanup": ["../system-entity-cleanup/src/index.ts"],
+      "@kikorin/system-health": ["../system-health/src/index.ts"],
+      "@kikorin/system-experience": ["../system-experience/src/index.ts"],
+      "@kikorin/system-ui-bridge": ["../system-ui-bridge/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*"]
+}
