@@ -3,9 +3,6 @@ import type {
   CoreComponentName,
   CoreEntityBlueprint,
   CoreWorld,
-  Position,
-  Rotation,
-  Velocity,
 } from "@kikorin/ecs";
 import { configureCuboidCollider } from "@kikorin/system-physics";
 import { destroyEntity } from "@kikorin/system-entity-cleanup";
@@ -21,9 +18,6 @@ import {
   setEntityVelocity,
 } from "@kikorin/system-movement";
 
-const ZERO_POSITION: Position = { x: 0, y: 0, z: 0 };
-const ZERO_ROTATION: Rotation = { pitch: 0, yaw: 0, roll: 0 };
-const ZERO_VELOCITY: Velocity = { x: 0, y: 0, z: 0 };
 
 function getComponent(world: CoreWorld, name: CoreComponentName) {
   return world.components[name] as never;
@@ -40,35 +34,16 @@ function ensureComponent(
   }
 }
 
-function readEntityPosition(world: CoreWorld, eid: number): Position {
-  const { Position } = world.components;
-  return {
-    x: Position.x[eid],
-    y: Position.y[eid],
-    z: Position.z[eid],
-  };
-}
-
-function readEntityRotation(world: CoreWorld, eid: number): Rotation {
-  const { Rotation } = world.components;
-  return {
-    pitch: Rotation.pitch[eid],
-    yaw: Rotation.yaw[eid],
-    roll: Rotation.roll[eid],
-  };
-}
-
 function syncRenderMesh(world: CoreWorld, eid: number) {
-  const position = readEntityPosition(world, eid);
-  const rotation = readEntityRotation(world, eid);
+  const { Position, Rotation } = world.components;
   setObjectTransformByEid(
     eid,
-    position.x,
-    position.y,
-    position.z,
-    rotation.pitch,
-    rotation.yaw,
-    rotation.roll,
+    Position.x[eid],
+    Position.y[eid],
+    Position.z[eid],
+    Rotation.pitch[eid],
+    Rotation.yaw[eid],
+    Rotation.roll[eid],
   );
 }
 
@@ -138,30 +113,18 @@ export function spawnEntity(
   }
 
   if (needsPosition) {
-    const position = definition.position ?? ZERO_POSITION;
-    setEntityPosition(world, eid, {
-      x: position.x ?? ZERO_POSITION.x,
-      y: position.y ?? ZERO_POSITION.y,
-      z: position.z ?? ZERO_POSITION.z,
-    });
+    const { x = 0, y = 0, z = 0 } = definition.position ?? {};
+    setEntityPosition(world, eid, { x, y, z });
   }
 
   if (needsVelocity) {
-    const velocity = definition.velocity ?? ZERO_VELOCITY;
-    setEntityVelocity(world, eid, {
-      x: velocity.x ?? ZERO_VELOCITY.x,
-      y: velocity.y ?? ZERO_VELOCITY.y,
-      z: velocity.z ?? ZERO_VELOCITY.z,
-    });
+    const { x = 0, y = 0, z = 0 } = definition.velocity ?? {};
+    setEntityVelocity(world, eid, { x, y, z });
   }
 
   if (needsRotation) {
-    const rotation = definition.rotation ?? ZERO_ROTATION;
-    setEntityRotation(world, eid, {
-      pitch: rotation.pitch ?? ZERO_ROTATION.pitch,
-      yaw: rotation.yaw ?? ZERO_ROTATION.yaw,
-      roll: rotation.roll ?? ZERO_ROTATION.roll,
-    });
+    const { pitch = 0, yaw = 0, roll = 0 } = definition.rotation ?? {};
+    setEntityRotation(world, eid, { pitch, yaw, roll });
   }
 
   if (definition.collider) {

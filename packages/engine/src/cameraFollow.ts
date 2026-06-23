@@ -22,6 +22,9 @@ const CAMERA_DEBUG_FRAME_INTERVAL = 30;
 let cameraFollowFrameCount = 0;
 let lastSkipReason: string | null = null;
 
+const scratchDesiredPos: Vec3 = { x: 0, y: 0, z: 0 };
+const scratchCurrentPos: Vec3 = { x: 0, y: 0, z: 0 };
+
 const cameraState: {
   mode: CameraMode;
   targetEid: number;
@@ -329,9 +332,15 @@ export function cameraFollowSystem(world: CoreWorld) {
     desiredCameraZ = p.z;
   }
 
-  const desiredCameraPosition = { x: desiredCameraX, y: desiredCameraY, z: desiredCameraZ };
-  const currentCameraPosition = { ...desiredCameraPosition };
-  readCameraPosition(currentCameraPosition);
+  scratchDesiredPos.x = desiredCameraX;
+  scratchDesiredPos.y = desiredCameraY;
+  scratchDesiredPos.z = desiredCameraZ;
+  scratchCurrentPos.x = desiredCameraX;
+  scratchCurrentPos.y = desiredCameraY;
+  scratchCurrentPos.z = desiredCameraZ;
+  readCameraPosition(scratchCurrentPos);
+  const desiredCameraPosition = scratchDesiredPos;
+  const currentCameraPosition = scratchCurrentPos;
   const cameraClampedToFloor = clampCameraHeightToFloor(
     world,
     desiredCameraPosition,

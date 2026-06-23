@@ -9,7 +9,7 @@ export function dirtyTransformsSystem(world: CoreWorld) {
     const { DirtyTransformFlag, DirtyFlagSet, DirtyList } = RenderDirtyFlags
 
     for (let i = 0; i < dirtyCount; i += 1) {
-        const eid = DirtyList[i]
+        const eid = DirtyList[i]!
         setObjectTransformByEid(
             eid,
             Position.x[eid],

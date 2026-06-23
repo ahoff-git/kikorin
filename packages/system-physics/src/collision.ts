@@ -8,7 +8,7 @@ import RAPIER, {
     type Vector as RapierVector,
 } from '@dimforge/rapier3d-compat'
 import { hasComponent } from 'bitecs'
-import { Euler, Matrix4, Quaternion } from 'three'
+import { Euler, Quaternion } from 'three'
 import { CoreFlagCustomSources, CoreFlags } from '@kikorin/ecs'
 import type { CollisionState, CoreWorld, Position, Vec3 } from '@kikorin/ecs'
 import {
@@ -17,6 +17,7 @@ import {
     markFlaginatorCustomSourceChanged,
 } from '@kikorin/system-flaginator'
 import { setObjectTouchingByEid } from '@kikorin/system-rendering'
+import { fillWorldHalfExtents } from './colliderUtils'
 
 const INITIAL_TOUCH_PAIR_CAPACITY = 1024
 const IDENTITY_ROTATION: RapierRotation = { x: 0, y: 0, z: 0, w: 1 }
@@ -25,7 +26,6 @@ const COLLISION_BOUNCE_RESTITUTION = 0.8
 const COLLISION_MIN_BOUNCE_SPEED = 0.75
 const scratchEuler = new Euler(0, 0, 0, 'YXZ')
 const scratchQuaternion = new Quaternion()
-const scratchRotationMatrix = new Matrix4()
 
 let rapierInitPromise: Promise<void> | null = null
 
@@ -205,35 +205,6 @@ function eulerToQuaternion(pitch: number, yaw: number, roll: number): RapierRota
         z: scratchQuaternion.z,
         w: scratchQuaternion.w,
     }
-}
-
-function fillWorldHalfExtents(world: CoreWorld, eid: number, out: RapierVector) {
-    const { Collider, Rotation } = world.components
-    const hx = Collider.HalfWidth[eid]
-    const hy = Collider.HalfHeight[eid]
-    const hz = Collider.HalfDepth[eid]
-
-    scratchEuler.set(
-        Rotation.pitch[eid],
-        Rotation.yaw[eid],
-        Rotation.roll[eid],
-    )
-    scratchRotationMatrix.makeRotationFromEuler(scratchEuler)
-
-    const { elements } = scratchRotationMatrix
-    const m11 = elements[0]!
-    const m12 = elements[4]!
-    const m13 = elements[8]!
-    const m21 = elements[1]!
-    const m22 = elements[5]!
-    const m23 = elements[9]!
-    const m31 = elements[2]!
-    const m32 = elements[6]!
-    const m33 = elements[10]!
-
-    out.x = Math.abs(m11) * hx + Math.abs(m12) * hy + Math.abs(m13) * hz
-    out.y = Math.abs(m21) * hx + Math.abs(m22) * hy + Math.abs(m23) * hz
-    out.z = Math.abs(m31) * hx + Math.abs(m32) * hy + Math.abs(m33) * hz
 }
 
 function dot(a: RapierVector, b: RapierVector) {
