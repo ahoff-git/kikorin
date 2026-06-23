@@ -192,7 +192,7 @@ function createProjectileRenderMesh() {
   return mesh;
 }
 
-function setupGame(engine: CoreWorldBox) {
+function setupGame(engine: CoreWorldBox): { playerEid: number } {
   createFloor(engine.world, FLOOR_POSITION);
 
   const floorEids = queryFloorEids(engine.world);
@@ -200,6 +200,8 @@ function setupGame(engine: CoreWorldBox) {
   registerPrimeControls(engine.world, prime);
   engine.setCameraFollowTarget(prime);
   spawnAmbientPeople(engine.world, floorEids);
+
+  return { playerEid: prime };
 }
 
 function queryFloorEids(world: World): FloorEids {

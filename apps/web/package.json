@@ -13,6 +13,7 @@
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
     "@kikorin/react": "workspace:*",
+    "@kikorin/netcode": "workspace:*",
     "@kikorin/ecs": "workspace:*",
     "@kikorin/engine": "workspace:*",
     "@kikorin/events": "workspace:*",
@@ -22,6 +23,7 @@
     "next": "16.1.6",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "peerjs": "^1.5.4",
     "three": "^0.182.0"
   },
   "devDependencies": {

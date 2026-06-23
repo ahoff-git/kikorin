@@ -6,6 +6,7 @@
     "plugins": [{ "name": "next" }],
     "paths": {
       "@kikorin/react": ["../../packages/react/src/index.ts"],
+      "@kikorin/netcode": ["../../packages/netcode/src/index.ts"],
       "@kikorin/ecs": ["../../packages/ecs/src/index.ts"],
       "@kikorin/engine": ["../../packages/engine/src/index.ts"],
       "@kikorin/events": ["../../packages/events/src/index.ts"],

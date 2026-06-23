@@ -16,6 +16,7 @@ import {
   useKikorinEvent,
 } from "@kikorin/react";
 import { setupGame } from "./kikorin";
+import { useNetworking } from "./useNetworking";
 import { PlayerReactControls } from "./kikorinControls";
 import { PageLayout } from "./kikorinLayout";
 
@@ -91,12 +92,18 @@ type CameraDragController = {
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engine = useKikorin(canvasRef);
+  const [playerEid, setPlayerEid] = useState<number | null>(null);
   const uiState = useWorldUiState();
+  const { localPeerId, connectedPeers, connect } = useNetworking(
+    engine,
+    playerEid,
+  );
 
   useEffect(() => {
     if (!engine) return;
 
-    setupGame(engine);
+    const { playerEid: eid } = setupGame(engine);
+    setPlayerEid(eid);
 
     const canvas = canvasRef.current!;
     canvas.style.cursor = "default";
@@ -117,6 +124,7 @@ export default function Home() {
     return () => {
       cameraDragController.disconnect();
       canvas.style.cursor = "default";
+      setPlayerEid(null);
     };
   }, [engine]);
 
@@ -136,7 +144,14 @@ export default function Home() {
     <PageLayout
       header={<Header onBoostForward={handleBoostForward} />}
       left={<LeftNav />}
-      right={<RightPanel {...uiState} />}
+      right={
+        <RightPanel
+          {...uiState}
+          localPeerId={localPeerId}
+          connectedPeers={connectedPeers}
+          onConnect={connect}
+        />
+      }
       footer={<Footer />}
     >
       <CanvasViewport canvasRef={canvasRef} />
@@ -272,7 +287,10 @@ function createCameraDragController(
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", onPointerUp);
       canvas.removeEventListener("pointercancel", onPointerCancel);
-      canvas.removeEventListener("lostpointercapture", onLostPointerCapture);
+      canvas.removeEventListener(
+        "lostpointercapture",
+        onLostPointerCapture,
+      );
       canvas.removeEventListener("contextmenu", onContextMenu);
       stopDragging();
     },
@@ -324,7 +342,14 @@ function RightPanel({
   playerPosition,
   timeMetrics,
   controlStates,
-}: WorldUiState) {
+  localPeerId,
+  connectedPeers,
+  onConnect,
+}: WorldUiState & {
+  localPeerId: string | null;
+  connectedPeers: string[];
+  onConnect: (peerId: string) => void;
+}) {
   const averageDelta = Math.round(timeMetrics?.avgDelta ?? 0);
   const ticksPerSecond = Math.round(timeMetrics?.ticksPerSecond ?? 0);
   const playerName = player?.name ?? "No player";
@@ -357,6 +382,126 @@ function RightPanel({
           ))
         )}
       </div>
+      <NetworkPanel
+        localPeerId={localPeerId}
+        connectedPeers={connectedPeers}
+        onConnect={onConnect}
+      />
+    </div>
+  );
+}
+
+function NetworkPanel({
+  localPeerId,
+  connectedPeers,
+  onConnect,
+}: {
+  localPeerId: string | null;
+  connectedPeers: string[];
+  onConnect: (peerId: string) => void;
+}) {
+  const [inputValue, setInputValue] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  function handleCopy() {
+    if (!localPeerId) return;
+    void navigator.clipboard.writeText(localPeerId).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }
+
+  function handleConnect() {
+    const trimmed = inputValue.trim();
+    if (!trimmed || !localPeerId) return;
+    onConnect(trimmed);
+    setInputValue("");
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter") handleConnect();
+  }
+
+  const panelStyle: CSSProperties = { marginTop: 16 };
+  const rowStyle: CSSProperties = {
+    display: "flex",
+    gap: 4,
+    alignItems: "center",
+    marginTop: 4,
+  };
+  const idStyle: CSSProperties = {
+    fontFamily: "monospace",
+    fontSize: 11,
+    wordBreak: "break-all",
+    flex: 1,
+  };
+  const inputStyle: CSSProperties = {
+    fontFamily: "monospace",
+    fontSize: 11,
+    flex: 1,
+    minWidth: 0,
+  };
+  const peerItemStyle: CSSProperties = {
+    fontFamily: "monospace",
+    fontSize: 11,
+    marginTop: 2,
+    color: "#ff44aa",
+  };
+
+  return (
+    <div style={panelStyle}>
+      <div style={sectionLabelStyle}>Multiplayer</div>
+
+      <div style={{ marginTop: 6 }}>
+        <div style={{ fontSize: 11, color: "#555" }}>Your ID</div>
+        <div style={rowStyle}>
+          <span style={idStyle}>
+            {localPeerId ?? "connecting…"}
+          </span>
+          <button
+            type="button"
+            onClick={handleCopy}
+            disabled={!localPeerId}
+            style={{ whiteSpace: "nowrap" }}
+          >
+            {copied ? "Copied!" : "Copy"}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 8 }}>
+        <div style={{ fontSize: 11, color: "#555" }}>Connect to peer</div>
+        <div style={rowStyle}>
+          <input
+            style={inputStyle}
+            placeholder="Paste peer ID…"
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            onKeyDown={handleKeyDown}
+            disabled={!localPeerId}
+          />
+          <button
+            type="button"
+            onClick={handleConnect}
+            disabled={!localPeerId || !inputValue.trim()}
+          >
+            Join
+          </button>
+        </div>
+      </div>
+
+      {connectedPeers.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 11, color: "#555" }}>
+            Connected ({connectedPeers.length})
+          </div>
+          {connectedPeers.map((id) => (
+            <div key={id} style={peerItemStyle}>
+              {id}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
