@@ -15,7 +15,9 @@ import {
   type ProjectionMode,
   type Time,
 } from "@/packages/core/types";
+import { ControlSources } from "@/packages/core/core";
 import { setupWorld, type WorldBox } from "./kikorin";
+import { PlayerReactControls } from "./kikorinControls";
 import { PageLayout } from "./kikorinLayout";
 
 const CAMERA_DRAG_SENSITIVITY = 0.006;
@@ -201,6 +203,14 @@ export default function Home() {
     worldRef.current?.setProjectionMode(projectionMode);
   }
 
+  function handleBoostForward() {
+    worldRef.current?.world.controls.enqueue({
+      source: ControlSources.React,
+      controlId: PlayerReactControls.BoostForward,
+      phase: "start",
+    });
+  }
+
   return (
     <PageLayout
       header={
@@ -214,7 +224,7 @@ export default function Home() {
         />
       }
       left={null}
-      right={<RightPanel {...uiState} />}
+      right={<RightPanel {...uiState} onBoostForward={handleBoostForward} />}
       footer={<Footer />}
     >
       <CanvasViewport canvasRef={canvasRef} />
@@ -561,7 +571,8 @@ function RightPanel({
   player,
   playerPosition,
   timeMetrics,
-}: WorldUiState) {
+  onBoostForward,
+}: WorldUiState & { onBoostForward: () => void }) {
   const averageDelta = Math.round(timeMetrics?.avgDelta ?? 0);
   const ticksPerSecond = Math.round(timeMetrics?.ticksPerSecond ?? 0);
   const playerName = player?.name ?? "No player";
@@ -580,6 +591,7 @@ function RightPanel({
         <div>Level: {playerLevel}</div>
         <div>Position: {positionLabel}</div>
       </div>
+      <button onClick={onBoostForward}>Boost Forward</button>
     </div>
   );
 }

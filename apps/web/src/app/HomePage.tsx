@@ -317,7 +317,7 @@ function Header({
   return (
     <div style={headerStyle}>
       <span>{CONTROL_INSTRUCTIONS}</span>
-      <button type="button" onClick={onBoostForward}>
+      <button type="button" onMouseDown={(e) => e.preventDefault()} onClick={onBoostForward}>
         React Boost Forward
       </button>
     </div>

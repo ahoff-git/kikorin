@@ -7,6 +7,7 @@ import {
   getBounceSuggestion,
   getCollisionBounceDelta,
   getTouchingEntities,
+  getEntityForward,
   getYawFromXZDirection,
   hasEntityComponents,
   KeyboardControls,
@@ -352,13 +353,7 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
     }
 
     const { Position, Rotation } = activeWorld.components;
-    const forward = normalizeVector(
-      rotateLocalVectorByEntityRotation(activeWorld, eid, {
-        x: 0,
-        y: 0,
-        z: -1,
-      }),
-    );
+    const forward = getEntityForward(activeWorld, eid);
     const spawnPosition = clampSpawnPositionToFloor(
       activeWorld,
       {
@@ -652,8 +647,19 @@ function registerPrimeControls(world: CoreWorld, eid: number) {
       if (!isControllingPrime(activeWorld)) return;
 
       const { Velocity } = activeWorld.components;
+      const forward = getEntityForward(activeWorld, eid);
+      Velocity.x[eid] = clamp(
+        Velocity.x[eid] + forward.x * PLAYER_FORWARD_BOOST,
+        -PLAYER_MAX_SPEED,
+        PLAYER_MAX_SPEED,
+      );
+      Velocity.y[eid] = clamp(
+        Velocity.y[eid] + forward.y * PLAYER_FORWARD_BOOST,
+        -PLAYER_MAX_SPEED,
+        PLAYER_MAX_SPEED,
+      );
       Velocity.z[eid] = clamp(
-        Velocity.z[eid] - PLAYER_FORWARD_BOOST,
+        Velocity.z[eid] + forward.z * PLAYER_FORWARD_BOOST,
         -PLAYER_MAX_SPEED,
         PLAYER_MAX_SPEED,
       );
