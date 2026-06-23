@@ -22,6 +22,7 @@ export type {
   Player,
   Position,
   Rotation,
+  Time,
   Velocity,
   ControlState,
 } from '@kikorin/engine'

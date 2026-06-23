@@ -5,16 +5,17 @@ import type {
   MouseEvent as ReactMouseEvent,
   RefObject,
 } from "react";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
-import { eventBus, type EventBusEvents } from "@kikorin/events";
+import { useEffect, useRef, useState } from "react";
 import {
   ControlSources,
   type ControlState,
   type Player,
   type Position,
   type Time,
-} from "@kikorin/ecs";
-import { setupWorld, type WorldBox } from "./kikorin";
+  useKikorin,
+  useKikorinEvent,
+} from "@kikorin/react";
+import { setupGame } from "./kikorin";
 import { PlayerReactControls } from "./kikorinControls";
 import { PageLayout } from "./kikorinLayout";
 
@@ -87,44 +88,40 @@ type CameraDragController = {
   disconnect: () => void;
 };
 
-type EventBusEventName = keyof EventBusEvents;
-
 export default function Home() {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const worldRef = useRef<WorldBox | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const engine = useKikorin(canvasRef);
   const uiState = useWorldUiState();
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!engine) return;
 
+    setupGame(engine);
+
+    const canvas = canvasRef.current!;
     canvas.style.cursor = "default";
-    const world = setupWorld(canvas);
-    worldRef.current = world;
 
     const cameraDragController = createCameraDragController(
       canvas,
       (deltaX, deltaY) => {
-        world.adjustCameraFollowOrbit(
+        engine.adjustCameraFollowOrbit(
           -deltaX * CAMERA_DRAG_SENSITIVITY,
           -deltaY * CAMERA_DRAG_SENSITIVITY,
         );
       },
       (active) => {
-        world.setCameraFollowOrbitControlActive(active);
+        engine.setCameraFollowOrbitControlActive(active);
       },
     );
 
     return () => {
       cameraDragController.disconnect();
       canvas.style.cursor = "default";
-      worldRef.current = null;
-      world.dispose();
     };
-  }, []);
+  }, [engine]);
 
   function handleBoostForward(event: ReactMouseEvent<HTMLButtonElement>) {
-    worldRef.current?.world.controls.enqueue({
+    engine?.world.controls.enqueue({
       timestamp: event.timeStamp,
       source: ControlSources.React,
       controlId: PlayerReactControls.BoostForward,
@@ -153,29 +150,15 @@ function useWorldUiState(): WorldUiState {
   const [timeMetrics, setTimeMetrics] = useState<Time | null>(null);
   const [controlStates, setControlStates] = useState<ControlState[]>([]);
 
-  useEventBusState(
-    "ui:timeMetricsUpdate",
-    setTimeMetrics,
-    ({ timeMetrics }) => {
-      return timeMetrics;
-    },
+  useKikorinEvent("ui:timeMetricsUpdate", ({ timeMetrics }) =>
+    setTimeMetrics(timeMetrics),
   );
-  useEventBusState("ui:playerUpdate", setPlayer, ({ player }) => {
-    return player;
-  });
-  useEventBusState(
-    "ui:playerPositionUpdate",
-    setPlayerPosition,
-    ({ playerPosition: nextPlayerPosition }) => {
-      return nextPlayerPosition;
-    },
+  useKikorinEvent("ui:playerUpdate", ({ player }) => setPlayer(player));
+  useKikorinEvent("ui:playerPositionUpdate", ({ playerPosition }) =>
+    setPlayerPosition(playerPosition),
   );
-  useEventBusState(
-    "ui:controlsUpdate",
-    setControlStates,
-    ({ controlStates }) => {
-      return controlStates;
-    },
+  useKikorinEvent("ui:controlsUpdate", ({ controlStates }) =>
+    setControlStates(controlStates),
   );
 
   return {
@@ -184,27 +167,6 @@ function useWorldUiState(): WorldUiState {
     timeMetrics,
     controlStates,
   };
-}
-
-function useEventBusState<TValue, TEventName extends EventBusEventName>(
-  eventName: TEventName,
-  setValue: (value: TValue) => void,
-  selectValue: (event: EventBusEvents[TEventName]) => TValue,
-) {
-  const onEvent = useEffectEvent((event: EventBusEvents[TEventName]) => {
-    setValue(selectValue(event));
-  });
-
-  useEffect(() => {
-    const listener = (event: EventBusEvents[TEventName]) => {
-      onEvent(event);
-    };
-
-    eventBus.on(eventName, listener);
-    return () => {
-      eventBus.off(eventName, listener);
-    };
-  }, [eventName]);
 }
 
 function createCameraDragController(

@@ -17,7 +17,6 @@ import {
   setEntityPosition,
   setEntityRotation,
   setEntityVelocity,
-  setupCoreWorld,
   spawnEntity,
   type CoreWorld,
   type CoreWorldBox,
@@ -152,8 +151,7 @@ const PERSON_TOUCH_MATERIALS = createPersonFaceMaterials(
   PERSON_TOUCH_COLOR,
   PERSON_TOUCH_FRONT_COLOR,
 );
-export type World = CoreWorld;
-export type WorldBox = CoreWorldBox;
+type World = CoreWorld;
 
 type FloorEids = ArrayLike<number>;
 type ProjectileState = {
@@ -194,20 +192,14 @@ function createProjectileRenderMesh() {
   return mesh;
 }
 
-function setupWorld(canvas: HTMLCanvasElement | null) {
-  const worldBox: WorldBox = setupCoreWorld({
-    canvas,
-    autoStart: true,
-  });
-  createFloor(worldBox.world, FLOOR_POSITION);
+function setupGame(engine: CoreWorldBox) {
+  createFloor(engine.world, FLOOR_POSITION);
 
-  const floorEids = queryFloorEids(worldBox.world);
-  const prime = createPrimePlayer(worldBox.world, floorEids);
-  registerPrimeControls(worldBox.world, prime);
-  worldBox.setCameraFollowTarget(prime);
-  spawnAmbientPeople(worldBox.world, floorEids);
-
-  return worldBox;
+  const floorEids = queryFloorEids(engine.world);
+  const prime = createPrimePlayer(engine.world, floorEids);
+  registerPrimeControls(engine.world, prime);
+  engine.setCameraFollowTarget(prime);
+  spawnAmbientPeople(engine.world, floorEids);
 }
 
 function queryFloorEids(world: World): FloorEids {
@@ -893,4 +885,4 @@ function createFloor(world: World, position: Position) {
   });
 }
 
-export { setupWorld };
+export { setupGame };
