@@ -142,3 +142,7 @@ export function rotateLocalVectorByEntityRotation(
     z: scratchVector.z,
   };
 }
+
+export function getEntityForward(world: CoreWorld, eid: number): Vec3 {
+  return rotateLocalVectorByEntityRotation(world, eid, { x: 0, y: 0, z: -1 });
+}

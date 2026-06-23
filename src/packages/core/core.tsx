@@ -145,6 +145,7 @@ export {
   spawnEntity,
 } from "./entities";
 export {
+  getEntityForward,
   getYawFromXZDirection,
   markTransformDirty,
   setEntityPosition,

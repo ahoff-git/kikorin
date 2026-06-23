@@ -3,6 +3,7 @@ import {
   type ControlEvent,
   ControlSources,
   evaluateFlaginatorFlag,
+  getEntityForward,
   hasEntityComponents,
   KeyboardControls,
   markFlaginatorComponentChanged,
@@ -86,26 +87,21 @@ function applyPrimeVelocityControls(
   Velocity.x[eid] *= drag;
   Velocity.z[eid] *= drag;
 
-  const localAcceleration = {
-    x:
-      controls.getAxis(
-        PLAYER_STRAFE_LEFT_KEYS,
-        PLAYER_STRAFE_RIGHT_KEYS,
-        ControlSources.Keyboard,
-      ) * PLAYER_ACCELERATION,
-    y: 0,
-    z:
-      controls.getAxis(
-        PLAYER_FORWARD_KEYS,
-        PLAYER_BACKWARD_KEYS,
-        ControlSources.Keyboard,
-      ) * PLAYER_ACCELERATION,
-  };
-  const worldAcceleration = rotateLocalVectorByEntityRotation(
-    world,
-    eid,
-    localAcceleration,
+  const forwardInput = controls.getAxis(
+    PLAYER_FORWARD_KEYS,
+    PLAYER_BACKWARD_KEYS,
+    ControlSources.Keyboard,
   );
+  const strafeInput = controls.getAxis(
+    PLAYER_STRAFE_LEFT_KEYS,
+    PLAYER_STRAFE_RIGHT_KEYS,
+    ControlSources.Keyboard,
+  );
+  const worldAcceleration = rotateLocalVectorByEntityRotation(world, eid, {
+    x: strafeInput * PLAYER_ACCELERATION,
+    y: 0,
+    z: forwardInput * PLAYER_ACCELERATION,
+  });
 
   Velocity.x[eid] = clamp(
     Velocity.x[eid] + worldAcceleration.x * deltaSeconds,
@@ -184,23 +180,19 @@ function boostPrimeForward(world: CoreWorld, eid: number) {
   if (!isPrimePlayerControlled(world, eid)) return;
 
   const { Velocity } = world.components;
-  const worldBoost = rotateLocalVectorByEntityRotation(world, eid, {
-    x: 0,
-    y: 0,
-    z: -PLAYER_FORWARD_BOOST,
-  });
+  const forward = getEntityForward(world, eid);
   Velocity.x[eid] = clamp(
-    Velocity.x[eid] + worldBoost.x,
+    Velocity.x[eid] + forward.x * PLAYER_FORWARD_BOOST,
     -PLAYER_MAX_SPEED,
     PLAYER_MAX_SPEED,
   );
   Velocity.y[eid] = clamp(
-    Velocity.y[eid] + worldBoost.y,
+    Velocity.y[eid] + forward.y * PLAYER_FORWARD_BOOST,
     -PLAYER_MAX_SPEED,
     PLAYER_MAX_SPEED,
   );
   Velocity.z[eid] = clamp(
-    Velocity.z[eid] + worldBoost.z,
+    Velocity.z[eid] + forward.z * PLAYER_FORWARD_BOOST,
     -PLAYER_MAX_SPEED,
     PLAYER_MAX_SPEED,
   );

@@ -2,9 +2,9 @@ import {
   type ControlEvent,
   ControlSources,
   destroyEntity,
+  getEntityForward,
   hasEntityComponents,
   PointerControls,
-  rotateLocalVectorByEntityRotation,
   spawnEntity,
   type CoreWorld,
   type Position,
@@ -18,7 +18,7 @@ import {
   updateProjectileBounceCooldowns,
   type ProjectileBounceState,
 } from "./kikorinProjectileBounce";
-import { normalizeVector, scaleVector } from "./kikorinProjectileMath";
+import { scaleVector } from "./kikorinProjectileMath";
 import { isPrimePlayerControlled } from "./kikorinPrimeMovement";
 import {
   clampSpawnPositionToFloor,
@@ -89,13 +89,7 @@ function spawnProjectileFromEntity(
   }
 
   const { Rotation } = world.components;
-  const forward = normalizeVector(
-    rotateLocalVectorByEntityRotation(world, eid, {
-      x: 0,
-      y: 0,
-      z: -1,
-    }),
-  );
+  const forward = getEntityForward(world, eid);
   const position = createProjectileSpawnPosition(world, eid, forward);
   const velocity = scaleVector(forward, PROJECTILE_SPEED);
   const projectileEid = spawnEntity(world, {
