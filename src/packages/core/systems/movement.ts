@@ -1,7 +1,7 @@
 import { hasComponent, query } from "bitecs"
 import type { CoreWorld } from "../types"
 import { markFlaginatorComponentChanged } from "./flaginator"
-import { resolveFloorPosition } from "./gravity"
+import { getFloorCollisionEids, resolveFloorPosition } from "./gravity"
 import {
     getYawFromXZDirection,
     markTransformDirty,
@@ -11,12 +11,12 @@ import {
 const FACE_VELOCITY_MIN_SPEED_SQUARED = 0.0001
 
 export function movementSystem(world: CoreWorld) {
-    const { Collider, FaceVelocity, Floor, Gravity, Position, Projectile, Rotation, Velocity } = world.components
+    const { Collider, FaceVelocity, Gravity, Position, Projectile, Rotation, Velocity } = world.components
     const delta = world.time.delta
     if (delta === 0) return
 
     const dt = delta * 0.001
-    const floorEids = query(world, [Floor, Position, Rotation, Collider])
+    const floorEids = getFloorCollisionEids(world)
     const posX = Position.x
     const posY = Position.y
     const posZ = Position.z

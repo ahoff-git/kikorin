@@ -73,6 +73,18 @@ export type SetupCoreWorldOptions = {
     worldTickRate?: number
 }
 
+export type CameraViewMode = "follow" | "firstPerson"
+
+export type ProjectionMode = "perspective" | "orthographic"
+
+export type CameraSettings = {
+    fov: number,
+    followDistance: number,
+    viewMode: CameraViewMode,
+    projectionMode: ProjectionMode,
+    orthographicZoom: number
+}
+
 export type Time = {
     delta: number,
     elapsed: number,
@@ -169,9 +181,18 @@ export type CoreCommandInput = {
 
 export type CoreCommandHandler<TWorld> = (world: TWorld, command: CoreCommand) => void
 
+export type CoreCommandStats = {
+    lastQueueLength: number,
+    lastProcessedCount: number,
+    lastProcessedCommand: CoreCommand | null,
+    totalEnqueuedCount: number,
+    totalProcessedCount: number
+}
+
 export type CoreCommands<TWorld> = {
     queue: CoreCommand[],
     handlers: Map<string, CoreCommandHandler<TWorld>[]>,
+    stats: CoreCommandStats,
     enqueue: (command: CoreCommandInput) => number,
     on: (type: string, handler: CoreCommandHandler<TWorld>) => () => void,
     process: (world: TWorld) => void,
@@ -233,6 +254,15 @@ export type ControlEventInput = {
     payload?: unknown
 }
 
+export type ControlInputStateChange = {
+    timestamp?: number,
+    source: string,
+    controlId: string,
+    active: boolean,
+    payload?: unknown,
+    inactivePhase?: "end" | "cancel"
+}
+
 export type ControlState = {
     key: string,
     source: string,
@@ -281,13 +311,25 @@ export type ControlTick = {
     elapsedMs: number
 }
 
+export type CoreControlStats = {
+    lastQueueLength: number,
+    lastProcessedCount: number,
+    lastProcessedEvent: ControlEvent | null,
+    totalEnqueuedCount: number,
+    totalProcessedCount: number
+}
+
 export type CoreControls<TWorld> = {
     queue: ControlEvent[],
     states: Map<string, ControlState>,
+    stats: CoreControlStats,
     enqueue: (event: ControlEventInput) => number,
+    setInputState: (event: ControlInputStateChange) => number | null,
+    isInputActive: (controlId: string, source?: string) => boolean,
     on: (filter: ControlEventFilter, handler: ControlEventHandler<TWorld>) => () => void,
     onTick: (handler: ControlTickHandler<TWorld>) => () => void,
     process: (world: TWorld, tick?: ControlTick) => void,
+    getFrameEvents: () => ControlEvent[],
     getState: (controlId: string, source?: string) => ControlState | undefined,
     getStates: () => ControlState[],
     getActiveStates: () => ControlState[],
@@ -338,7 +380,13 @@ export type CoreWorldBox = {
     setEntityVelocity: (eid: number, velocity: Partial<Velocity>) => boolean
     setCameraFollowTarget: (eid: number, opts?: { offset?: Partial<Position> }) => void
     adjustCameraFollowOrbit: (deltaYaw: number, deltaPitch: number) => void
+    setCameraFollowDistance: (distance: number) => void
     setCameraFollowOrbitControlActive: (active: boolean) => void
+    setCameraFov: (fov: number) => void
+    setCameraViewMode: (viewMode: CameraViewMode) => void
+    setOrthographicZoom: (zoom: number) => void
+    setProjectionMode: (projectionMode: ProjectionMode) => void
+    readCameraSettings: () => CameraSettings
     setCameraLookAtTarget: (eid: number, opts?: { position?: Partial<Position> }) => void
     setEntityRotation: (eid: number, rotation: Partial<Rotation>) => boolean
     resetCameraTarget: () => void

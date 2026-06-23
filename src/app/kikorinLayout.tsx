@@ -1,11 +1,47 @@
-import { Box } from "@mui/material";
+import type { CSSProperties, ReactNode } from "react";
+import styles from "./kikorinLayout.module.css";
+
 type LayoutProps = {
-  header?: React.ReactNode
-  left?: React.ReactNode
-  right?: React.ReactNode
-  footer?: React.ReactNode
-  children: React.ReactNode
-}
+  header?: ReactNode;
+  left?: ReactNode;
+  right?: ReactNode;
+  footer?: ReactNode;
+  children: ReactNode;
+};
+
+const rootStyle: CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  boxSizing: "border-box",
+  minWidth: 0,
+  overflow: "hidden",
+  display: "grid",
+  height: "100dvh",
+  gridTemplateRows: "auto 1fr auto",
+};
+
+const mainStyle: CSSProperties = {
+  display: "grid",
+  height: "100%",
+  minWidth: 0,
+  minHeight: 0,
+  overflow: "hidden",
+  columnGap: 16,
+};
+
+const sidePanelStyle: CSSProperties = {
+  minWidth: 0,
+  minHeight: 0,
+  overflow: "auto",
+};
+
+const centerPanelStyle: CSSProperties = {
+  minWidth: 0,
+  minHeight: 0,
+  display: "flex",
+  flexDirection: "column",
+};
+
 export function PageLayout({
   header,
   left,
@@ -13,44 +49,33 @@ export function PageLayout({
   footer,
   children,
 }: LayoutProps) {
+  const hasLeft = left !== undefined && left !== null;
+  const hasRight = right !== undefined && right !== null;
+  const mainClassName = [
+    styles.main,
+    hasLeft ? styles.withLeft : styles.noLeft,
+    hasRight ? styles.withRight : styles.noRight,
+  ].join(" ");
+
   return (
-    <Box
-      sx={{
-        position: "fixed",
-        inset: 0,
-        boxSizing: "border-box",
-        minWidth: 0,
-        overflow: "hidden",
-        display: "grid",
-        height: "100dvh",
-        gridTemplateRows: "auto 1fr auto",
-      }}
-    >
-      <Box component="header">{header}</Box>
+    <div style={rootStyle}>
+      <header>{header}</header>
 
-      <Box
-        component="main"
-        sx={{
-          display: "grid",
-          height: "100%",
-          minWidth: 0,
-          minHeight: 0,
-          overflow: "hidden",
-          gridTemplateColumns: {
-            xs: "1fr",
-            md: "clamp(200px, 20%, 300px) minmax(0, 1fr) clamp(200px, 20%, 300px)",
-          },
-          columnGap: 2,
-        }}
-      >
-        <Box sx={{ display: { xs: "none", md: "block" }, minWidth: 0, minHeight: 0, overflow: "auto" }}>{left}</Box>
-        <Box sx={{ minWidth: 0, minHeight:0, display: "flex", flexDirection: "column" }}>
-          {children}
-        </Box>
-        <Box sx={{ display: { xs: "none", md: "block" }, minWidth: 0, minHeight: 0, overflow: "auto" }}>{right}</Box>
-      </Box>
+      <main className={mainClassName} style={mainStyle}>
+        {hasLeft ? (
+          <div className={styles.sidePanel} style={sidePanelStyle}>
+            {left}
+          </div>
+        ) : null}
+        <div style={centerPanelStyle}>{children}</div>
+        {hasRight ? (
+          <div className={styles.sidePanel} style={sidePanelStyle}>
+            {right}
+          </div>
+        ) : null}
+      </main>
 
-      <Box component="footer">{footer}</Box>
-    </Box>
-  )
+      <footer>{footer}</footer>
+    </div>
+  );
 }

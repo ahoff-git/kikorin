@@ -9,23 +9,45 @@ interface ScheduledTask {
     intervalMs: number;
     accumulatorMs: number;
     lastCatchupWarningMs: number;
+    maxTicksPerFrame: number;
 }
 
 export interface ChronoTrigger {
     Start: () => void;
     Stop: () => void;
-    runAt: (options: { name?: string; callback: (deltaMs: number) => void; fpsTarget?: number }) => number;
+    runAt: (options: {
+        name?: string;
+        callback: (deltaMs: number) => void;
+        fpsTarget?: number;
+        maxTicksPerFrame?: number;
+    }) => number;
     dispose: (id: number) => boolean;
     CurrentFPS: () => number;
     AverageFPS: () => number;
+}
+
+function runScheduledTask(
+    task: ScheduledTask,
+    deltaMs: number,
+): void {
+    try {
+        task.callback(deltaMs);
+    }
+    catch (error) {
+        log(
+            logLevels.error,
+            `${task.callbackName} failed during chronoTrigger execution.`,
+            ["chronoTrigger"],
+            error,
+        );
+    }
 }
 
 export function createChronoTrigger(): ChronoTrigger {
     const scheduledTasks: ScheduledTask[] = [];
     const taskIndexById = new Map<number, number>();
     let nextTaskId = 1;
-    const maxTicks = 5;
-    const catchupWarningThrottleMs = 5000;
+    const defaultMaxTicksPerFrame = 5;
     let running = false;
     let rafId = 0;
     let fps = 0; // Tracks the current running FPS
@@ -53,21 +75,13 @@ export function createChronoTrigger(): ChronoTrigger {
             for (let i = 0; i < scheduledTasks.length; i++) {
                 const task = scheduledTasks[i];
                 if (task.intervalMs <= 0) {
-                    task.callback(delta);
+                    runScheduledTask(task, delta);
                     continue;
                 }
 
                 task.accumulatorMs += delta;
-                if (task.accumulatorMs > task.intervalMs * maxTicks) {
-                    task.accumulatorMs = task.intervalMs * maxTicks;
-                    if (time - task.lastCatchupWarningMs >= catchupWarningThrottleMs) {
-                        task.lastCatchupWarningMs = time;
-                        log(
-                            logLevels.warning,
-                            `${task.callbackName} fell behind and attempted catch-up ticks, but catch-up was capped at ${maxTicks}.`,
-                            ["chronoTrigger"],
-                        );
-                    }
+                if (task.accumulatorMs > task.intervalMs * task.maxTicksPerFrame) {
+                    task.accumulatorMs = task.intervalMs * task.maxTicksPerFrame;
                 }
 
                 const ticks = (task.accumulatorMs / task.intervalMs) | 0;
@@ -75,7 +89,7 @@ export function createChronoTrigger(): ChronoTrigger {
 
                 task.accumulatorMs -= ticks * task.intervalMs;
                 for (let t = 0; t < ticks; t++) {
-                    task.callback(task.intervalMs);
+                    runScheduledTask(task, task.intervalMs);
                 }
             }
 
@@ -113,10 +127,12 @@ export function createChronoTrigger(): ChronoTrigger {
         name,
         fpsTarget,
         callback,
+        maxTicksPerFrame,
     }: {
         name?: string;
         callback: (deltaMs: number) => void;
         fpsTarget?: number;
+        maxTicksPerFrame?: number;
     }): number => {
         if (typeof callback !== "function") {
             throw new Error("runAt requires a callback function.");
@@ -131,6 +147,10 @@ export function createChronoTrigger(): ChronoTrigger {
             intervalMs = 1000 / fpsTarget;
         }
 
+        const safeMaxTicksPerFrame = maxTicksPerFrame === undefined
+            ? defaultMaxTicksPerFrame
+            : Math.max(1, Math.floor(maxTicksPerFrame));
+
         const id = nextTaskId++;
         const callbackName = name || callback.name || "anonymous";
         const accumulatorMs = intervalMs > 0 ? intervalMs : 0;
@@ -141,6 +161,7 @@ export function createChronoTrigger(): ChronoTrigger {
             intervalMs,
             accumulatorMs,
             lastCatchupWarningMs: -Infinity,
+            maxTicksPerFrame: safeMaxTicksPerFrame,
         });
         taskIndexById.set(id, scheduledTasks.length - 1);
         return id;
