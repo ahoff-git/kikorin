@@ -49,6 +49,7 @@ export interface UseNetworkingReturn {
   connect: (remotePeerId: string) => void;
   addOwnedEntity: (eid: number) => void;
   removeOwnedEntity: (eid: number) => void;
+  signalEntityDestroyed: (eid: number) => void;
 }
 
 export function useNetworking(
@@ -65,12 +66,29 @@ export function useNetworking(
   // the setup effect (where playerEid and ownedEids land in the same React batch),
   // then managed dynamically by addOwnedEntity / removeOwnedEntity for projectiles.
   const ownedEntitySetRef = useRef(new Set<number>());
+  // Direct reference to the Projectile component array, set in the setup effect.
+  // Needed by signalEntityDestroyed, which runs outside the effect closure.
+  const projectileComponentRef = useRef<{ [index: number]: number } | null>(null);
 
   const addOwnedEntity = useCallback((eid: number) => {
     ownedEntitySetRef.current.add(eid);
   }, []);
 
   const removeOwnedEntity = useCallback((eid: number) => {
+    ownedEntitySetRef.current.delete(eid);
+  }, []);
+
+  // Called by game code before destroying an owned bullet. Sets Projectile = 0,
+  // flushes that final delta so peers know to despawn the mirror entity, then
+  // removes the entity from the owned set. Must be called BEFORE destroyEntity.
+  const signalEntityDestroyed = useCallback((eid: number) => {
+    const arr = projectileComponentRef.current;
+    if (arr) arr[eid] = 0;
+    const net = netRef.current;
+    if (net) {
+      net.markEntitiesDirty([eid]);
+      net.flushGroupDeltas(GROUP_ID, [eid]);
+    }
     ownedEntitySetRef.current.delete(eid);
   }, []);
 
@@ -84,6 +102,7 @@ export function useNetworking(
     // Capture as non-null locals for use inside closures
     const eng = engine;
     const world = eng.world;
+    projectileComponentRef.current = world.components.Projectile as { [index: number]: number };
     let net: PeerNet | null = null;
     let cancelled = false;
     let unsubTick: (() => void) | undefined;
@@ -147,12 +166,26 @@ export function useNetworking(
             net.sendFullSync(GROUP_ID, fromPeer, [...ownedEntitySetRef.current]);
           }
 
-          // First pass: find which remote entity IDs in this batch are projectiles.
-          // We must know the type before spawning so the correct mesh is used.
+          // First pass: identify new projectiles (for spawning) and destroyed
+          // entities (Projectile = 0 on a known entity = despawn signal).
           const projectileRemoteEids = new Set<number>();
+          const destroyedRemoteEids = new Set<number>();
           for (const d of deltas) {
-            if (d.componentId === PROJECTILE_COMPONENT_ID && d.value === 1) {
-              projectileRemoteEids.add(d.entityId);
+            if (d.componentId === PROJECTILE_COMPONENT_ID) {
+              if (d.value === 1) {
+                projectileRemoteEids.add(d.entityId);
+              } else if (d.value === 0 && peerEntities.has(d.entityId)) {
+                destroyedRemoteEids.add(d.entityId);
+              }
+            }
+          }
+
+          // Destroy mirror entities before processing any other updates in this batch.
+          for (const remoteEid of destroyedRemoteEids) {
+            const localEid = peerEntities.get(remoteEid);
+            if (localEid !== undefined) {
+              eng.destroyEntity(localEid);
+              peerEntities.delete(remoteEid);
             }
           }
 
@@ -166,6 +199,9 @@ export function useNetworking(
           >();
 
           for (const d of deltas) {
+            // Skip all deltas belonging to despawned or unknown-destroy entities.
+            if (destroyedRemoteEids.has(d.entityId)) continue;
+            if (d.componentId === PROJECTILE_COMPONENT_ID && d.value === 0) continue;
             const localEid = getOrSpawnRemote(
               fromPeer,
               d.entityId,
@@ -262,6 +298,7 @@ export function useNetworking(
         for (const eid of peerMap.values()) eng.destroyEntity(eid);
       }
       remoteEntitiesRef.current.clear();
+      projectileComponentRef.current = null;
       netRef.current = null;
       setLocalPeerId(null);
       setConnectedPeers([]);
@@ -282,5 +319,5 @@ export function useNetworking(
     });
   }
 
-  return { localPeerId, connectedPeers, connect, addOwnedEntity, removeOwnedEntity };
+  return { localPeerId, connectedPeers, connect, addOwnedEntity, removeOwnedEntity, signalEntityDestroyed };
 }

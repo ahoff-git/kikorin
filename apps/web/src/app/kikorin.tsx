@@ -163,6 +163,7 @@ type World = CoreWorld;
 type OwnershipCallbacks = {
   addOwnedEntity: (eid: number) => void;
   removeOwnedEntity: (eid: number) => void;
+  signalEntityDestroyed: (eid: number) => void;
 };
 
 type FloorEids = ArrayLike<number>;
@@ -466,7 +467,7 @@ function registerPrimeControls(world: CoreWorld, eid: number, ownership: Ownersh
           "Collider",
         ])
       ) {
-        ownership.removeOwnedEntity(projectileEid);
+        ownership.signalEntityDestroyed(projectileEid);
         projectiles.delete(projectileEid);
         continue;
       }
@@ -474,8 +475,8 @@ function registerPrimeControls(world: CoreWorld, eid: number, ownership: Ownersh
       updateProjectileBounceCooldowns(projectile);
       projectile.remainingTicks -= 1;
       if (projectile.remainingTicks <= 0) {
+        ownership.signalEntityDestroyed(projectileEid);
         destroyEntity(activeWorld, projectileEid);
-        ownership.removeOwnedEntity(projectileEid);
         projectiles.delete(projectileEid);
         continue;
       }
