@@ -176,6 +176,21 @@ const MONSTER_JUMP_SPEED = 9.0;
 const MONSTER_JUMP_TRIGGER_DIST = 2.5;
 // Seconds before a monster can jump again (avoids repeated impulses in mid-air).
 const MONSTER_JUMP_COOLDOWN = 0.9;
+// Per-monster goal offset radius (world units) for sub-optimal path variety.
+const MONSTER_GOAL_JITTER_RADIUS = 8;
+// How long a monster keeps the same path bias before picking a new one (seconds).
+const MONSTER_GOAL_JITTER_INTERVAL_MIN = 2.0;
+const MONSTER_GOAL_JITTER_INTERVAL_MAX = 5.0;
+// Distance range over which the goal bias fades out — full variety far away, none up close.
+const MONSTER_GOAL_BIAS_FADE_START = 22;
+const MONSTER_GOAL_BIAS_FADE_END = 8;
+// Stuck detection: how often to sample position, minimum movement to be "not stuck",
+// and how long stuck samples must accumulate before triggering an escape.
+const MONSTER_STUCK_SAMPLE_INTERVAL = 0.8;
+const MONSTER_STUCK_MOVE_THRESHOLD = 0.5;
+const MONSTER_STUCK_ESCAPE_AFTER = 1.6;
+// Goal offset magnitude applied when breaking out of a stuck state.
+const MONSTER_STUCK_ESCAPE_RADIUS = 14;
 const PRIME_SPAWN_POSITION = { x: 0, y: 12, z: 0 };
 const PRIME_PLAYER_NAME = "DoomPrime";
 
@@ -212,6 +227,14 @@ type MonsterPathState = {
   waypointIndex: number;
   timeSinceReplan: number;
   jumpCooldown: number;
+  goalBiasX: number;
+  goalBiasZ: number;
+  timeSinceJitter: number;
+  jitterInterval: number;
+  stuckTimer: number;
+  lastSampleX: number;
+  lastSampleZ: number;
+  stuckSampleTimer: number;
 };
 type ProjectileState = {
   remainingTicks: number;
@@ -285,11 +308,21 @@ function createProjectileRenderMesh() {
 }
 
 function createMonsterPathState(timeSinceReplan = 0): MonsterPathState {
+  const angle = rng(0, Math.PI * 2);
+  const dist = rng(3, MONSTER_GOAL_JITTER_RADIUS);
   return {
     path: null,
     waypointIndex: 0,
     timeSinceReplan,
     jumpCooldown: 0,
+    goalBiasX: Math.cos(angle) * dist,
+    goalBiasZ: Math.sin(angle) * dist,
+    timeSinceJitter: rng(0, MONSTER_GOAL_JITTER_INTERVAL_MAX),
+    jitterInterval: rng(MONSTER_GOAL_JITTER_INTERVAL_MIN, MONSTER_GOAL_JITTER_INTERVAL_MAX),
+    stuckTimer: 0,
+    lastSampleX: Infinity,
+    lastSampleZ: Infinity,
+    stuckSampleTimer: rng(0, MONSTER_STUCK_SAMPLE_INTERVAL),
   };
 }
 
@@ -335,9 +368,47 @@ function registerBoxSteering(
         pathState.jumpCooldown = Math.max(0, pathState.jumpCooldown - tick.deltaSeconds);
         pathState.timeSinceReplan += tick.deltaSeconds;
 
+        // Rotate path bias on schedule so each monster takes a different sub-optimal route.
+        pathState.timeSinceJitter += tick.deltaSeconds;
+        if (pathState.timeSinceJitter >= pathState.jitterInterval) {
+          const angle = rng(0, Math.PI * 2);
+          const dist = rng(3, MONSTER_GOAL_JITTER_RADIUS);
+          pathState.goalBiasX = Math.cos(angle) * dist;
+          pathState.goalBiasZ = Math.sin(angle) * dist;
+          pathState.timeSinceJitter = 0;
+          pathState.jitterInterval = rng(MONSTER_GOAL_JITTER_INTERVAL_MIN, MONSTER_GOAL_JITTER_INTERVAL_MAX);
+          pathState.timeSinceReplan = MONSTER_REPLAN_INTERVAL;
+        }
+
+        // Stuck detection: sample position periodically; if stuck for long enough, pick a
+        // random escape direction and force an immediate replan via a large goal bias.
+        pathState.stuckSampleTimer += tick.deltaSeconds;
+        if (pathState.stuckSampleTimer >= MONSTER_STUCK_SAMPLE_INTERVAL) {
+          pathState.stuckSampleTimer = 0;
+          const displacement = Math.hypot(monsterX - pathState.lastSampleX, monsterZ - pathState.lastSampleZ);
+          if (displacement < MONSTER_STUCK_MOVE_THRESHOLD) {
+            pathState.stuckTimer += MONSTER_STUCK_SAMPLE_INTERVAL;
+            if (pathState.stuckTimer >= MONSTER_STUCK_ESCAPE_AFTER) {
+              const escapeAngle = rng(0, Math.PI * 2);
+              pathState.goalBiasX = Math.cos(escapeAngle) * MONSTER_STUCK_ESCAPE_RADIUS;
+              pathState.goalBiasZ = Math.sin(escapeAngle) * MONSTER_STUCK_ESCAPE_RADIUS;
+              pathState.stuckTimer = 0;
+              pathState.timeSinceReplan = MONSTER_REPLAN_INTERVAL;
+            }
+          } else {
+            pathState.stuckTimer = 0;
+          }
+          pathState.lastSampleX = monsterX;
+          pathState.lastSampleZ = monsterZ;
+        }
+
         if (pathState.path === null || pathState.timeSinceReplan >= MONSTER_REPLAN_INTERVAL) {
           const monsterFloorY = Position.y[eid] - PERSON_COLLIDER.halfHeight;
-          pathState.path = findPath(navmesh, monsterX, monsterZ, goalX, goalZ, monsterFloorY);
+          const biasScale = clamp(
+            (distToTarget - MONSTER_GOAL_BIAS_FADE_END) / (MONSTER_GOAL_BIAS_FADE_START - MONSTER_GOAL_BIAS_FADE_END),
+            0, 1,
+          );
+          pathState.path = findPath(navmesh, monsterX, monsterZ, goalX + pathState.goalBiasX * biasScale, goalZ + pathState.goalBiasZ * biasScale, monsterFloorY);
           pathState.waypointIndex = 0;
           pathState.timeSinceReplan = 0;
         }
@@ -525,7 +596,48 @@ function setupGame(
     ownership.addOwnedEntity(newEid);
   };
 
-  let cleanupPrimeControls = registerPrimeControls(engine.world, primeEid, ownership, onMonsterHit);
+  const onDebugMonsterHit = (world: CoreWorld, monsterEid: number) => {
+    const { Position, Velocity, Rotation, Health, Player } = world.components;
+    const pathState = pathStates.get(monsterEid);
+    const baseSpeed = baseSpeeds.get(monsterEid);
+    console.log("[DEBUG MONSTER]", {
+      eid: monsterEid,
+      name: Player[monsterEid]?.name,
+      health: Health[monsterEid],
+      baseSpeed,
+      position: {
+        x: Position.x[monsterEid],
+        y: Position.y[monsterEid],
+        z: Position.z[monsterEid],
+      },
+      velocity: {
+        x: Velocity.x[monsterEid],
+        y: Velocity.y[monsterEid],
+        z: Velocity.z[monsterEid],
+      },
+      rotation: {
+        pitch: Rotation.pitch[monsterEid],
+        yaw: Rotation.yaw[monsterEid],
+        roll: Rotation.roll[monsterEid],
+      },
+      pathState: pathState
+        ? {
+            waypointIndex: pathState.waypointIndex,
+            totalWaypoints: pathState.path?.length ?? 0,
+            timeSinceReplan: pathState.timeSinceReplan,
+            jumpCooldown: pathState.jumpCooldown,
+            goalBias: { x: pathState.goalBiasX, z: pathState.goalBiasZ },
+            timeSinceJitter: pathState.timeSinceJitter,
+            jitterInterval: pathState.jitterInterval,
+            stuckTimer: pathState.stuckTimer,
+            stuckSampleTimer: pathState.stuckSampleTimer,
+            path: pathState.path,
+          }
+        : null,
+    });
+  };
+
+  let cleanupPrimeControls = registerPrimeControls(engine.world, primeEid, ownership, onMonsterHit, onDebugMonsterHit);
   let cleanupBoxSteering = registerBoxSteering(engine.world, boxEids, baseSpeeds, primeEid, navmesh, pathStates);
 
   engine.world.controls.onTick((activeWorld) => {
@@ -537,7 +649,7 @@ function setupGame(
     primeEid = createPrimePlayer(activeWorld, floorEids);
     engine.setCameraFollowTarget(primeEid);
     ownership.addOwnedEntity(primeEid);
-    cleanupPrimeControls = registerPrimeControls(activeWorld, primeEid, ownership, onMonsterHit);
+    cleanupPrimeControls = registerPrimeControls(activeWorld, primeEid, ownership, onMonsterHit, onDebugMonsterHit);
     cleanupBoxSteering = registerBoxSteering(activeWorld, boxEids, baseSpeeds, primeEid, navmesh, pathStates);
   });
 
@@ -620,8 +732,10 @@ function registerPrimeControls(
   eid: number,
   ownership: OwnershipCallbacks,
   onMonsterHit: (world: CoreWorld, monsterEid: number) => void,
+  onDebugMonsterHit: (world: CoreWorld, monsterEid: number) => void,
 ): () => void {
   const projectiles: ProjectileRegistry = new Map();
+  const debugProjectiles = new Set<number>();
 
   const isControllingPrime = (activeWorld: CoreWorld) => {
     return (
@@ -652,7 +766,7 @@ function registerPrimeControls(
     markFlaginatorComponentChanged(activeWorld, "Gravity", eid);
   };
 
-  const fireProjectile = (activeWorld: CoreWorld) => {
+  const fireProjectile = (activeWorld: CoreWorld, debug = false) => {
     if (
       !hasEntityComponents(activeWorld, eid, [
         "Position",
@@ -702,6 +816,7 @@ function registerPrimeControls(
       remainingTicks: PROJECTILE_TTL_TICKS,
       bounceCooldownsByTarget: new Map(),
     });
+    if (debug) debugProjectiles.add(projectileEid);
     ownership.addOwnedEntity(projectileEid);
   };
 
@@ -725,6 +840,7 @@ function registerPrimeControls(
         ])
       ) {
         ownership.signalEntityDestroyed(projectileEid);
+        debugProjectiles.delete(projectileEid);
         projectiles.delete(projectileEid);
         continue;
       }
@@ -734,6 +850,7 @@ function registerPrimeControls(
       if (projectile.remainingTicks <= 0) {
         ownership.signalEntityDestroyed(projectileEid);
         destroyEntity(activeWorld, projectileEid);
+        debugProjectiles.delete(projectileEid);
         projectiles.delete(projectileEid);
         continue;
       }
@@ -768,7 +885,12 @@ function registerPrimeControls(
           isMonsterPlayer(t) && hasNetFlag(activeWorld, t, NET.OWNED)
         );
         if (hitOwnedMonster !== undefined) {
-          onMonsterHit(activeWorld, hitOwnedMonster);
+          if (debugProjectiles.has(projectileEid)) {
+            onDebugMonsterHit(activeWorld, hitOwnedMonster);
+          } else {
+            onMonsterHit(activeWorld, hitOwnedMonster);
+          }
+          debugProjectiles.delete(projectileEid);
           ownership.signalEntityDestroyed(projectileEid);
           destroyEntity(activeWorld, projectileEid);
           projectiles.delete(projectileEid);
@@ -779,7 +901,12 @@ function registerPrimeControls(
           isMonsterPlayer(t) && !hasNetFlag(activeWorld, t, NET.OWNED)
         );
         if (hitRemoteMonster !== undefined) {
-          ownership.signalHitOnRemoteEntity(hitRemoteMonster);
+          if (debugProjectiles.has(projectileEid)) {
+            onDebugMonsterHit(activeWorld, hitRemoteMonster);
+          } else {
+            ownership.signalHitOnRemoteEntity(hitRemoteMonster);
+          }
+          debugProjectiles.delete(projectileEid);
           ownership.signalEntityDestroyed(projectileEid);
           destroyEntity(activeWorld, projectileEid);
           projectiles.delete(projectileEid);
@@ -843,11 +970,14 @@ function registerPrimeControls(
         },
       );
       if (sweptHit && isMonsterPlayer(sweptHit.colliderEid)) {
-        if (hasNetFlag(activeWorld, sweptHit.colliderEid, NET.OWNED)) {
+        if (debugProjectiles.has(projectileEid)) {
+          onDebugMonsterHit(activeWorld, sweptHit.colliderEid);
+        } else if (hasNetFlag(activeWorld, sweptHit.colliderEid, NET.OWNED)) {
           onMonsterHit(activeWorld, sweptHit.colliderEid);
         } else {
           ownership.signalHitOnRemoteEntity(sweptHit.colliderEid);
         }
+        debugProjectiles.delete(projectileEid);
         ownership.signalEntityDestroyed(projectileEid);
         destroyEntity(activeWorld, projectileEid);
         projectiles.delete(projectileEid);
@@ -1104,6 +1234,18 @@ function registerPrimeControls(
     },
   );
 
+  const unsubDebugFire = world.controls.on(
+    {
+      source: ControlSources.Keyboard,
+      controlId: "Digit1",
+      phase: "start",
+    },
+    (activeWorld) => {
+      if (!isControllingPrime(activeWorld)) return;
+      fireProjectile(activeWorld, true);
+    },
+  );
+
   const unsubCrosshair = world.controls.onTick((activeWorld) => {
     if (!isControllingPrime(activeWorld)) return;
     const { Position } = activeWorld.components;
@@ -1145,6 +1287,7 @@ function registerPrimeControls(
     unsubJump();
     unsubBoost();
     unsubFire();
+    unsubDebugFire();
     unsubCrosshair();
   };
 }

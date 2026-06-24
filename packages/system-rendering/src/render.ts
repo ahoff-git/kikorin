@@ -1,6 +1,7 @@
 import type { CoreWorld } from "@kikorin/ecs";
 import { log, logLevels } from "@kikorin/util";
 import {
+  Color,
   Scene,
   PerspectiveCamera,
   WebGLRenderer,
@@ -10,13 +11,20 @@ import {
   DirectionalLight,
   AmbientLight,
   PCFSoftShadowMap,
+  Vector3,
 } from "three";
 import { setActiveCamera, getActiveCamera } from "./renderCamera";
 
 let scene: Scene | null = null;
 let renderer: WebGLRenderer | null = null;
+let sunLight: DirectionalLight | null = null;
 let rendererViewportWidth = 0;
 let rendererViewportHeight = 0;
+
+const _camDir = new Vector3();
+// Shadow frustum half-extent and derived texel size for snapping
+const SUN_FRUSTUM_HALF = 60;
+const SUN_TEXEL_SIZE = (SUN_FRUSTUM_HALF * 2) / 4096;
 
 const objectsByEid = new Map<number, Object3D>();
 const poolsByKey = new Map<string, Object3D[]>();
@@ -77,6 +85,22 @@ export function renderSystem(world: CoreWorld) {
     });
   }
 
+  if (sunLight) {
+    // Center the shadow frustum on where the camera looks (player's feet),
+    // not the camera body, which sits ~10 units behind the player.
+    cam.getWorldDirection(_camDir);
+    const groundT = _camDir.y < -0.001 ? -cam.position.y / _camDir.y : 12;
+    const lookX = cam.position.x + _camDir.x * groundT;
+    const lookZ = cam.position.z + _camDir.z * groundT;
+
+    // Texel-snap to prevent shadow edges from crawling as the camera moves.
+    const cx = Math.round(lookX / SUN_TEXEL_SIZE) * SUN_TEXEL_SIZE;
+    const cz = Math.round(lookZ / SUN_TEXEL_SIZE) * SUN_TEXEL_SIZE;
+
+    sunLight.target.position.set(cx, 0, cz);
+    sunLight.position.set(cx + 50, 100, cz + 30);
+  }
+
   renderer.render(scene, cam);
 }
 
@@ -117,6 +141,7 @@ function clearRenderState() {
 
   scene?.clear();
   scene = null;
+  sunLight = null;
   setActiveCamera(null);
   rendererViewportWidth = 0;
   rendererViewportHeight = 0;
@@ -188,22 +213,26 @@ export function setupRenderer(canvas: HTMLCanvasElement | null) {
   renderer.shadowMap.type = PCFSoftShadowMap;
   setRendererViewportSize(width, height);
 
-  const ambientLight = new AmbientLight(0xffffff, 0.7);
+  scene.background = new Color(0x87ceeb);
+
+  const ambientLight = new AmbientLight(0xffd9a0, 1.2);
   scene.add(ambientLight);
 
-  const sunLight = new DirectionalLight(0xffffff, 0.35);
+  sunLight = new DirectionalLight(0xfff5e0, 2.5);
   sunLight.position.set(50, 100, 30);
   sunLight.castShadow = true;
-  sunLight.shadow.mapSize.width = 2048;
-  sunLight.shadow.mapSize.height = 2048;
-  sunLight.shadow.camera.near = 1;
-  sunLight.shadow.camera.far = 350;
-  sunLight.shadow.camera.left = -90;
-  sunLight.shadow.camera.right = 90;
-  sunLight.shadow.camera.top = 90;
-  sunLight.shadow.camera.bottom = -90;
+  // 4096 map over a tight 50-unit frustum → ~82 texels/unit vs the previous ~11
+  sunLight.shadow.mapSize.width = 4096;
+  sunLight.shadow.mapSize.height = 4096;
+  sunLight.shadow.camera.near = 0.5;
+  sunLight.shadow.camera.far = 200;
+  sunLight.shadow.camera.left = -SUN_FRUSTUM_HALF;
+  sunLight.shadow.camera.right = SUN_FRUSTUM_HALF;
+  sunLight.shadow.camera.top = SUN_FRUSTUM_HALF;
+  sunLight.shadow.camera.bottom = -SUN_FRUSTUM_HALF;
   sunLight.shadow.bias = -0.001;
   scene.add(sunLight);
+  scene.add(sunLight.target);
 
   logRenderDebug("renderer setup complete", {
     width,

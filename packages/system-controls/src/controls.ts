@@ -101,6 +101,10 @@ export function setupControlInputs(
 
   if (element) {
     const onPointerDown = (event: PointerEvent) => {
+      // Prevent browsers from handling thumb buttons as back/forward navigation.
+      if (event.button === 3 || event.button === 4) {
+        event.preventDefault();
+      }
       if ("setPointerCapture" in element) {
         try {
           element.setPointerCapture(event.pointerId);
