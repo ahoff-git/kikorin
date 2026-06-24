@@ -337,11 +337,25 @@ describe('movementSystem', () => {
         expect(filter(wallEid)).toBe(true)
       })
 
-      it('excludes Floor entities from blocking', () => {
+      it('blocks the player when the floor surface is above the player foot level (genuine side wall)', () => {
         const filter = getFilterPredicate()
         const floorEid = addEntity(world)
         addComponent(world, floorEid, world.components.Floor)
         world.components.Floor[floorEid] = 1
+        world.components.Position.y[floorEid] = 0.5
+        world.components.Collider.HalfHeight[floorEid] = 0.5 // surface at y=1.0
+        // player bottom = 0 (default), surface = 1.0 → 0 < 0.9 → blocked
+        expect(filter(floorEid)).toBe(true)
+      })
+
+      it('ignores floor contact at the player foot level (surface-transition lip)', () => {
+        const filter = getFilterPredicate()
+        const floorEid = addEntity(world)
+        addComponent(world, floorEid, world.components.Floor)
+        world.components.Floor[floorEid] = 1
+        world.components.Position.y[floorEid] = 0
+        world.components.Collider.HalfHeight[floorEid] = 0 // surface at y=0
+        // player bottom = 0 (default), surface = 0 → 0 < -0.1 → false (lip, skip)
         expect(filter(floorEid)).toBe(false)
       })
 

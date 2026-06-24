@@ -6,7 +6,7 @@ vi.mock('@kikorin/system-physics', async (importOriginal) => {
   const actual = await importOriginal() as Record<string, unknown>
   return {
     ...actual,
-    castEntityCollider: vi.fn(() => null),
+    castRayFromTo: vi.fn(() => null),
     findHighestFloorTopAtPosition: vi.fn(() => null),
   }
 })
@@ -18,10 +18,11 @@ vi.mock('@kikorin/system-rendering', () => ({
 }))
 
 const { cameraFollowSystem, resetCameraTarget, setCameraFollowTarget } = await import('../cameraFollow')
-const { castEntityCollider } = await import('@kikorin/system-physics')
+const { castRayFromTo } = await import('@kikorin/system-physics')
 const { setCameraPosition } = await import('@kikorin/system-rendering')
 
 const MAX_ENTITIES = 100
+const DEFAULT_DT = 1 / 60
 
 function makeTestWorld(): CoreWorld {
   const n = MAX_ENTITIES
@@ -49,7 +50,7 @@ function makeTestWorld(): CoreWorld {
       touchPairIndexByKey: new Map(), touchPairKeysByIndex: [], scratchTouching: [],
       bounceSuggestions: { Active: new Int8Array(n), x: new Float32Array(n), y: new Float32Array(n), z: new Float32Array(n), DirtyList: new Int32Array(n), DirtyCount: 0, DirtyFlagSet: new Int8Array(n) },
     },
-    time: { delta: 0, elapsed: 0, then: 0, deltaBuffer: { push: () => {}, average: () => 0, clear: () => {}, size: () => 0 }, avgDelta: 0, ticksPerSecond: 0 },
+    time: { delta: DEFAULT_DT, elapsed: 0, then: 0, deltaBuffer: { push: () => {}, average: () => 0, clear: () => {}, size: () => 0 }, avgDelta: 0, ticksPerSecond: 0 },
     commands: { queue: [], handlers: new Map(), enqueue: () => 0, on: () => () => {}, process: () => {}, clear: () => {} },
     controls: { queue: [], states: new Map(), enqueue: () => 0, on: () => () => {}, onTick: () => () => {}, process: () => {}, getState: () => undefined, getStates: () => [], getActiveStates: () => [], isActive: () => false, isAnyActive: () => false, getAxis: () => 0, cancelActive: () => {}, clear: () => {} },
     chillUpdater: { setUpdate: () => {}, check: () => false },
@@ -65,27 +66,24 @@ describe('cameraFollowSystem', () => {
   beforeEach(() => {
     world = makeTestWorld()
     vi.clearAllMocks()
-    vi.mocked(castEntityCollider).mockReturnValue(null)
+    vi.mocked(castRayFromTo).mockReturnValue(null)
 
-    // Reset module-level camera state
     resetCameraTarget()
 
-    // Spawn a player entity with Position
     playerEid = addEntity(world)
     addComponent(world, playerEid, world.components.Position)
     world.components.Position.x[playerEid] = 0
     world.components.Position.y[playerEid] = 0
     world.components.Position.z[playerEid] = 0
 
-    // Set camera to follow this entity (default offset: 0,4,10)
     setCameraFollowTarget(playerEid)
   })
 
   it('places camera at player position + follow offset when no wall blocks', () => {
     cameraFollowSystem(world)
 
-    // Default offset is (0,4,10); player at (0,0,0) → camera at (0,4,10)
-    expect(setCameraPosition).toHaveBeenCalledWith(0, 4, 10)
+    // Default offset is (0,6,10); player at (0,0,0) → camera at (0,6,10)
+    expect(setCameraPosition).toHaveBeenCalledWith(0, 6, 10)
   })
 
   it('does nothing when mode is off', () => {
@@ -95,53 +93,67 @@ describe('cameraFollowSystem', () => {
     expect(setCameraPosition).not.toHaveBeenCalled()
   })
 
-  it('moves camera closer to player when a wall is between player and camera', () => {
-    // Wall detected at toi=0.5 along player→camera direction
-    vi.mocked(castEntityCollider).mockReturnValueOnce({
-      colliderEid: 99,
-      toi: 0.5,
-      witness1: { x: 0, y: 0, z: 0 },
-      witness2: { x: 0, y: 0, z: 0 },
-      normal1: { x: 0, y: 0, z: -1 },
-      normal2: { x: 0, y: 0, z: 1 },
-    })
+  it('snaps camera in immediately when a wall blocks the path', () => {
+    // Wall detected at toi=0.5 along player→camera direction (normalized)
+    vi.mocked(castRayFromTo).mockReturnValue({ toi: 0.5, colliderEid: 99 })
 
     cameraFollowSystem(world)
 
-    // Camera should be placed somewhere BETWEEN player and desired camera pos
-    // desired Z = 10; wall at toi=0.5 → camera Z should be < 10
-    const call = vi.mocked(setCameraPosition).mock.calls[0]!
-    const cameraZ = call[2]!
+    const [, , cameraZ] = vi.mocked(setCameraPosition).mock.calls[0]!
+    // Camera must be between player (Z=0) and full desired position (Z=10)
     expect(cameraZ).toBeGreaterThan(0)
     expect(cameraZ).toBeLessThan(10)
   })
 
-  it('does not adjust camera when wall is beyond the camera (toi >= 1)', () => {
-    // toi=1 means wall is exactly AT the desired camera position — barely past it
-    vi.mocked(castEntityCollider).mockReturnValueOnce({
-      colliderEid: 99,
-      toi: 1.0,
-      witness1: { x: 0, y: 0, z: 0 },
-      witness2: { x: 0, y: 0, z: 0 },
-      normal1: { x: 0, y: 0, z: -1 },
-      normal2: { x: 0, y: 0, z: 1 },
-    })
+  it('does not adjust camera when wall is at or beyond the camera (toi >= 1)', () => {
+    vi.mocked(castRayFromTo).mockReturnValue({ toi: 1.0, colliderEid: 99 })
 
     cameraFollowSystem(world)
 
-    // Camera should be at the desired position — wall is at or beyond camera
-    expect(setCameraPosition).toHaveBeenCalledWith(0, 4, 10)
+    expect(setCameraPosition).toHaveBeenCalledWith(0, 6, 10)
   })
 
-  it('calls castEntityCollider from player toward desired camera position', () => {
+  it('springs camera distance back toward follow distance when wall clears', () => {
+    // Frame 1: wall at toi=0.5 → camera snaps close
+    vi.mocked(castRayFromTo).mockReturnValue({ toi: 0.5, colliderEid: 99 })
+    cameraFollowSystem(world)
+    const [, , zAfterWall] = vi.mocked(setCameraPosition).mock.calls[0]!
+
+    // Frame 2: wall gone → camera springs back
+    vi.clearAllMocks()
+    vi.mocked(castRayFromTo).mockReturnValue(null)
+    cameraFollowSystem(world)
+    const [, , zAfterClear] = vi.mocked(setCameraPosition).mock.calls[0]!
+
+    // Camera should have moved further from player than it was at the snap-in frame
+    expect(zAfterClear).toBeGreaterThan(zAfterWall!)
+  })
+
+  it('fully restores camera distance after enough frames with no wall', () => {
+    // Snap in with a wall
+    vi.mocked(castRayFromTo).mockReturnValue({ toi: 0.5, colliderEid: 99 })
     cameraFollowSystem(world)
 
-    // Player at (0,0,0); desired camera at (0,4,10) → direction (0,4,10)
-    expect(castEntityCollider).toHaveBeenCalledWith(
+    // Run enough frames at DEFAULT_DT for the spring to fully restore
+    vi.mocked(castRayFromTo).mockReturnValue(null)
+    // CAMERA_RESTORE_SPEED=6, followDistance≈11.66 — needs ≈2s of frames to restore
+    for (let i = 0; i < 180; i++) {
+      vi.clearAllMocks()
+      cameraFollowSystem(world)
+    }
+
+    const [, , z] = vi.mocked(setCameraPosition).mock.calls[0]!
+    expect(z).toBeCloseTo(10, 0) // Should be back near Z=10
+  })
+
+  it('calls castRayFromTo from look-at height toward desired camera position', () => {
+    cameraFollowSystem(world)
+
+    // Player at (0,0,0); look-at origin is 0.75 above feet; camera at (0,6,10)
+    expect(castRayFromTo).toHaveBeenCalledWith(
       world,
-      playerEid,
-      expect.objectContaining({ x: 0, y: 0, z: 0 }),
-      expect.objectContaining({ x: 0, y: 4, z: 10 }),
+      expect.objectContaining({ x: 0, y: 0.75, z: 0 }),
+      expect.objectContaining({ x: 0, y: 6, z: 10 }),
       expect.any(Object),
     )
   })
@@ -149,8 +161,8 @@ describe('cameraFollowSystem', () => {
   describe('filterPredicate for camera wall cast', () => {
     function getCameraFilterPredicate(): (targetEid: number) => boolean {
       cameraFollowSystem(world)
-      const call = vi.mocked(castEntityCollider).mock.calls[0]!
-      const opts = call[4] as { filterPredicate: (eid: number) => boolean }
+      const call = vi.mocked(castRayFromTo).mock.calls[0]!
+      const opts = call[3] as { filterPredicate: (eid: number) => boolean }
       return opts.filterPredicate
     }
 

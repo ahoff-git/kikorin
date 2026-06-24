@@ -18,6 +18,7 @@
       "@kikorin/system-flaginator": ["../../packages/system-flaginator/src/index.ts"],
       "@kikorin/system-health": ["../../packages/system-health/src/index.ts"],
       "@kikorin/system-movement": ["../../packages/system-movement/src/index.ts"],
+      "@kikorin/system-pathfinding": ["../../packages/system-pathfinding/src/index.ts"],
       "@kikorin/system-physics": ["../../packages/system-physics/src/index.ts"],
       "@kikorin/system-rendering": ["../../packages/system-rendering/src/index.ts"],
       "@kikorin/system-time": ["../../packages/system-time/src/index.ts"],

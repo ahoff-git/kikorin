@@ -17,6 +17,7 @@
     "@kikorin/ecs": "workspace:*",
     "@kikorin/engine": "workspace:*",
     "@kikorin/events": "workspace:*",
+    "@kikorin/system-pathfinding": "workspace:*",
     "@kikorin/system-physics": "workspace:*",
     "@kikorin/util": "workspace:*",
     "@mui/material": "^7.3.8",

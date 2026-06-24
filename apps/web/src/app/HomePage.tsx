@@ -15,6 +15,9 @@ import {
   useKikorin,
   useKikorinEvent,
 } from "@kikorin/react";
+import { eventBus } from "@kikorin/events";
+import { getActiveCamera } from "@kikorin/engine";
+import { Vector3 } from "three";
 import { setupGame } from "./kikorin";
 import { useNetworking, type ChatMessage } from "./useNetworking";
 import { PlayerReactControls } from "./kikorinControls";
@@ -22,9 +25,6 @@ import { Box } from "@mui/material";
 import { PageLayout } from "./kikorinLayout";
 
 const CAMERA_DRAG_SENSITIVITY = 0.006;
-const CHARACTER_SPIN_SENSITIVITY = 0.006;
-const PRIMARY_POINTER_BUTTON_MASK = 1;
-const SECONDARY_POINTER_BUTTON_MASK = 2;
 const MIDDLE_POINTER_BUTTON_MASK = 4;
 const CLICK_MAX_MOVEMENT_PX = 4;
 
@@ -32,6 +32,7 @@ const canvasViewportStyle: CSSProperties = {
   flex: 1,
   minHeight: 0,
   display: "flex",
+  position: "relative",
 };
 
 const canvasStyle: CSSProperties = {
@@ -186,11 +187,6 @@ export default function Home() {
       (active) => {
         engine.setCameraFollowOrbitControlActive(active);
       },
-      (deltaX) => {
-        const { Rotation } = engine.world.components;
-        const newYaw = Rotation.yaw[eid] - deltaX * CHARACTER_SPIN_SENSITIVITY;
-        engine.setEntityRotation(eid, { yaw: newYaw });
-      },
       () => {
         engine.resetCameraFollowOrbitBehindTarget();
       },
@@ -272,15 +268,10 @@ function createCameraDragController(
   canvas: HTMLCanvasElement,
   onCameraDrag: (deltaX: number, deltaY: number) => void,
   onCameraDragActiveChange: ((active: boolean) => void) | undefined,
-  onCharacterDrag: (deltaX: number, deltaY: number) => void,
   onMiddleClick: (() => void) | undefined,
 ): CameraDragController {
-  type SessionType = "camera" | "character";
-
   type Session = {
     pointerId: number;
-    buttonsMask: number;
-    type: SessionType;
     startX: number;
     startY: number;
     lastX: number;
@@ -293,45 +284,32 @@ function createCameraDragController(
   function stopSession(pointerId?: number) {
     if (session === null) return;
     if (pointerId !== undefined && session.pointerId !== pointerId) return;
-
     const ended = session;
     session = null;
-    canvas.style.cursor = "default";
-
-    if (ended.type === "camera") {
-      if (ended.hasDragged) {
-        onCameraDragActiveChange?.(false);
-      } else {
-        onMiddleClick?.();
-      }
-    }
+    if (!ended.hasDragged) onMiddleClick?.();
+    else onCameraDragActiveChange?.(false);
+    if (document.pointerLockElement !== canvas) canvas.style.cursor = "default";
   }
 
+  const onPointerLockChange = () => {
+    canvas.style.cursor = document.pointerLockElement === canvas ? "none" : "default";
+  };
+
   function onPointerDown(event: PointerEvent) {
-    if (session !== null) return;
+    if (event.pointerType !== "mouse") return;
 
-    let sessionType: SessionType | null = null;
-    let buttonsMask = 0;
-
-    if (event.pointerType === "mouse") {
-      if (event.button === 1) {
-        sessionType = "camera";
-        buttonsMask = MIDDLE_POINTER_BUTTON_MASK;
-      } else if (event.button === 2) {
-        sessionType = "character";
-        buttonsMask = SECONDARY_POINTER_BUTTON_MASK;
+    if (event.button === 2) {
+      if (document.pointerLockElement !== canvas) {
+        void canvas.requestPointerLock();
       }
-    } else if (event.button === 0) {
-      sessionType = "camera";
-      buttonsMask = PRIMARY_POINTER_BUTTON_MASK;
+      event.preventDefault();
+      return;
     }
 
-    if (sessionType === null) return;
+    if (event.button !== 1 || session !== null) return;
 
     session = {
       pointerId: event.pointerId,
-      buttonsMask,
-      type: sessionType,
       startX: event.clientX,
       startY: event.clientY,
       lastX: event.clientX,
@@ -350,7 +328,7 @@ function createCameraDragController(
 
   function onPointerMove(event: PointerEvent) {
     if (session === null || session.pointerId !== event.pointerId) return;
-    if ((event.buttons & session.buttonsMask) === 0) {
+    if ((event.buttons & MIDDLE_POINTER_BUTTON_MASK) === 0) {
       stopSession(event.pointerId);
       return;
     }
@@ -365,25 +343,20 @@ function createCameraDragController(
       const totalDY = event.clientY - session.startY;
       if (Math.hypot(totalDX, totalDY) > CLICK_MAX_MOVEMENT_PX) {
         session.hasDragged = true;
-        if (session.type === "camera") {
-          canvas.style.cursor = "grabbing";
-          onCameraDragActiveChange?.(true);
-        }
+        canvas.style.cursor = "grabbing";
+        onCameraDragActiveChange?.(true);
       }
     }
 
     if (!session.hasDragged || (deltaX === 0 && deltaY === 0)) return;
-
-    if (session.type === "camera") {
-      onCameraDrag(deltaX, deltaY);
-    } else {
-      onCharacterDrag(deltaX, deltaY);
-    }
-
+    onCameraDrag(deltaX, deltaY);
     event.preventDefault();
   }
 
   function onPointerUp(event: PointerEvent) {
+    if (event.pointerType === "mouse" && event.button === 2) {
+      document.exitPointerLock();
+    }
     try {
       canvas.releasePointerCapture(event.pointerId);
     } catch {
@@ -404,6 +377,7 @@ function createCameraDragController(
     event.preventDefault();
   }
 
+  document.addEventListener("pointerlockchange", onPointerLockChange);
   canvas.addEventListener("pointerdown", onPointerDown);
   canvas.addEventListener("pointermove", onPointerMove);
   canvas.addEventListener("pointerup", onPointerUp);
@@ -413,6 +387,8 @@ function createCameraDragController(
 
   return {
     disconnect() {
+      if (document.pointerLockElement === canvas) document.exitPointerLock();
+      document.removeEventListener("pointerlockchange", onPointerLockChange);
       canvas.removeEventListener("pointerdown", onPointerDown);
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", onPointerUp);
@@ -424,14 +400,91 @@ function createCameraDragController(
   };
 }
 
+const crosshairStyle: CSSProperties = {
+  position: "absolute",
+  pointerEvents: "none",
+  transform: "translate(-50%, -50%)",
+};
+
+const scratchVec = new Vector3();
+
+type AimPointData = {
+  wx: number; wy: number; wz: number;
+  hitWx: number; hitWy: number; hitWz: number;
+  hasHit: boolean;
+  ready: boolean;
+};
+
+// Projects a world point to CSS screen coords; returns null if behind camera.
+function projectToScreen(wx: number, wy: number, wz: number, camera: ReturnType<typeof getActiveCamera>) {
+  if (!camera) return null;
+  scratchVec.set(wx, wy, wz).project(camera);
+  if (scratchVec.z > 1) return null;
+  return {
+    left: `${((scratchVec.x + 1) / 2) * 100}%`,
+    top: `${((1 - (scratchVec.y + 1) / 2)) * 100}%`,
+  };
+}
+
+
 function CanvasViewport({
   canvasRef,
 }: {
   canvasRef: RefObject<HTMLCanvasElement | null>;
 }) {
+  const hitDotRef = useRef<SVGSVGElement>(null);
+
+  useEffect(() => {
+    const hitDot = hitDotRef.current;
+    if (!hitDot) return;
+
+    const latest: AimPointData = { wx: 0, wy: 0, wz: 0, hitWx: 0, hitWy: 0, hitWz: 0, hasHit: false, ready: false };
+
+    const onAimPoint = (data: Omit<AimPointData, "ready">) => {
+      Object.assign(latest, data, { ready: true });
+    };
+    eventBus.on("ui:crosshairAimPoint", onAimPoint);
+
+    let rafId = 0;
+    const tick = () => {
+      rafId = requestAnimationFrame(tick);
+      if (!latest.ready) return;
+
+      if (latest.hasHit) {
+        const camera = getActiveCamera();
+        const hit = projectToScreen(latest.hitWx, latest.hitWy, latest.hitWz, camera);
+        if (hit) {
+          hitDot.style.left = hit.left;
+          hitDot.style.top = hit.top;
+          hitDot.style.visibility = "visible";
+        } else {
+          hitDot.style.visibility = "hidden";
+        }
+      } else {
+        hitDot.style.visibility = "hidden";
+      }
+    };
+    rafId = requestAnimationFrame(tick);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      eventBus.off("ui:crosshairAimPoint", onAimPoint);
+    };
+  }, []);
+
   return (
     <div style={canvasViewportStyle}>
       <canvas ref={canvasRef} style={canvasStyle} />
+      <svg
+        ref={hitDotRef}
+        width="10"
+        height="10"
+        viewBox="-5 -5 10 10"
+        style={{ ...crosshairStyle, visibility: "hidden" }}
+      >
+        <circle cx="0" cy="0" r="3.5" fill="black" />
+        <circle cx="0" cy="0" r="2.5" fill="white" />
+      </svg>
     </div>
   );
 }

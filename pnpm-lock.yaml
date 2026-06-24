@@ -41,6 +41,9 @@ importers:
       '@kikorin/react':
         specifier: workspace:*
         version: link:../../packages/react
+      '@kikorin/system-pathfinding':
+        specifier: workspace:*
+        version: link:../../packages/system-pathfinding
       '@kikorin/system-physics':
         specifier: workspace:*
         version: link:../../packages/system-physics
@@ -404,6 +407,22 @@ importers:
       vitest:
         specifier: ^3.2.0
         version: 3.2.6(@types/node@20.19.33)
+
+  packages/system-pathfinding:
+    dependencies:
+      '@kikorin/ecs':
+        specifier: workspace:*
+        version: link:../ecs
+      '@kikorin/system-physics':
+        specifier: workspace:*
+        version: link:../system-physics
+    devDependencies:
+      '@types/node':
+        specifier: ^20
+        version: 20.19.33
+      typescript:
+        specifier: ^5
+        version: 5.9.3
 
   packages/system-physics:
     dependencies:

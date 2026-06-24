@@ -173,13 +173,37 @@ export function setupControlInputs(
       });
     };
 
+    const onPointerMove = (event: PointerEvent) => {
+      if (event.buttons === 0 && document.pointerLockElement !== element) return;
+      world.controls.enqueue({
+        timestamp: event.timeStamp,
+        source: ControlSources.Pointer,
+        controlId: PointerControls.Move,
+        phase: "change",
+        value: 1,
+        payload: {
+          movementX: event.movementX,
+          movementY: event.movementY,
+          buttons: event.buttons,
+        },
+      });
+    };
+
+    const onContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+    };
+
     element.addEventListener("pointerdown", onPointerDown);
     element.addEventListener("pointerup", onPointerUp);
     element.addEventListener("pointercancel", onPointerCancel);
+    element.addEventListener("pointermove", onPointerMove);
+    element.addEventListener("contextmenu", onContextMenu);
     element.addEventListener("click", onClick);
     disconnectors.push(() => element.removeEventListener("pointerdown", onPointerDown));
     disconnectors.push(() => element.removeEventListener("pointerup", onPointerUp));
     disconnectors.push(() => element.removeEventListener("pointercancel", onPointerCancel));
+    disconnectors.push(() => element.removeEventListener("pointermove", onPointerMove));
+    disconnectors.push(() => element.removeEventListener("contextmenu", onContextMenu));
     disconnectors.push(() => element.removeEventListener("click", onClick));
   }
 

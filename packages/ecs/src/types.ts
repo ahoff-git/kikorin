@@ -189,6 +189,7 @@ export const PointerControls = {
     Primary: "primary",
     Middle: "middle",
     Secondary: "secondary",
+    Move: "move",
 } as const
 
 export const KeyboardControls = {

@@ -2,7 +2,7 @@ import { hasComponent, query } from "bitecs"
 import type { CoreWorld } from "@kikorin/ecs"
 import { isProjectileType, shouldSimulateLocally } from "@kikorin/ecs"
 import { markFlaginatorComponentChanged } from "@kikorin/system-flaginator"
-import { castEntityCollider, resolveFloorPosition } from "@kikorin/system-physics"
+import { castEntityCollider, computeFloorSurfaceY, resolveFloorPosition } from "@kikorin/system-physics"
 import {
     getYawFromXZDirection,
     markTransformDirty,
@@ -12,6 +12,10 @@ import {
 const FACE_VELOCITY_MIN_SPEED_SQUARED = 0.0001
 // Pull back from wall face to avoid starting the next frame inside the wall
 const WALL_SEPARATION_TOI = 0.001
+// Floor contacts within this distance above the player's foot level are surface-transition
+// lips — skip wall collision and let the floor-snap system handle the step-up instead.
+// Any floor whose surface is more than this above the foot is a genuine blocking wall.
+const FLOOR_LIP_THRESHOLD = 0.1
 
 export function movementSystem(world: CoreWorld) {
     const { Collider, FaceVelocity, Floor, Gravity, Player, Position, Rotation, Velocity } = world.components
@@ -50,7 +54,22 @@ export function movementSystem(world: CoreWorld) {
         ) {
             const currentPos = { x: posX[eid], y: posY[eid], z: posZ[eid] }
             const hit = castEntityCollider(world, eid, currentPos, { x: dx, y: 0, z: dz }, {
-                filterPredicate: (targetEid) => !Floor[targetEid] && !Collider.Sensor[targetEid] && !hasComponent(world, targetEid, Player) && !isProjectileType(world, targetEid),
+                filterPredicate: (targetEid) => {
+                    if (Collider.Sensor[targetEid]) return false
+                    if (hasComponent(world, targetEid, Player)) return false
+                    if (isProjectileType(world, targetEid)) return false
+                    if (Floor[targetEid]) {
+                        // Skip floor entities whose surface is at or above the player's
+                        // foot — a horizontal hit there is a transition lip between two
+                        // co-planar surfaces, not a genuine wall. The floor-snap system
+                        // handles the step-up. Floors whose surface is well above the
+                        // foot (player approaching from below) still block as walls.
+                        const playerBottom = posY[eid] - Collider.HalfHeight[eid]!
+                        const surfaceY = computeFloorSurfaceY(world, targetEid, posX[eid], posZ[eid])
+                        return playerBottom < surfaceY - FLOOR_LIP_THRESHOLD
+                    }
+                    return true
+                },
             })
 
             if (hit) {

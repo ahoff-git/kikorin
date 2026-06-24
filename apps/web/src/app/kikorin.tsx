@@ -18,6 +18,7 @@ import {
   PointerControls,
   queryEntities,
   rotateLocalVectorByEntityRotation,
+  rotateLocalVectorByYaw,
   setEntityPosition,
   setEntityRotation,
   setEntityVelocity,
@@ -30,7 +31,8 @@ import {
   type Vec3,
   type Velocity,
 } from "@kikorin/engine";
-import { findHighestFloorTopAtPosition } from "@kikorin/system-physics";
+import { castRayFromTo, findHighestFloorTopAtPosition } from "@kikorin/system-physics";
+import { NavMesh, findPath, type Waypoint } from "@kikorin/system-pathfinding";
 import { clamp, rng } from "@kikorin/util";
 import {
   BoxGeometry,
@@ -38,7 +40,7 @@ import {
   LineBasicMaterial,
   LineSegments,
   Mesh,
-  MeshBasicMaterial,
+  MeshLambertMaterial,
   SphereGeometry,
 } from "three";
 import { PlayerReactControls } from "./kikorinControls";
@@ -74,10 +76,10 @@ const PROJECTILE_COLLIDER = {
 const PROJECTILE_GEOMETRY = new SphereGeometry(PROJECTILE_RADIUS, 14, 10);
 const PROJECTILE_BODY_COLOR = 0xf97316;
 const PROJECTILE_TOUCH_COLOR = 0xea580c;
-const PROJECTILE_BASE_MATERIAL = new MeshBasicMaterial({
+const PROJECTILE_BASE_MATERIAL = new MeshLambertMaterial({
   color: PROJECTILE_BODY_COLOR,
 });
-const PROJECTILE_TOUCH_MATERIAL = new MeshBasicMaterial({
+const PROJECTILE_TOUCH_MATERIAL = new MeshLambertMaterial({
   color: PROJECTILE_TOUCH_COLOR,
 });
 const FLOOR_COLLIDER = {
@@ -92,18 +94,18 @@ const FLOOR_GEOMETRY = new BoxGeometry(
   FLOOR_COLLIDER.halfDepth * 2,
 );
 const FLOOR_EDGE_GEOMETRY = new EdgesGeometry(FLOOR_GEOMETRY);
-const FLOOR_BASE_MATERIAL = new MeshBasicMaterial({ color: 0x445342 });
+const FLOOR_BASE_MATERIAL = new MeshLambertMaterial({ color: 0x445342 });
 const FLOOR_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x243022 });
 const FLOOR_POSITION = {
   x: 0,
   y: FLOOR_TOP_Y - FLOOR_COLLIDER.halfHeight,
   z: 0,
 };
-const WALL_BASE_MATERIAL = new MeshBasicMaterial({ color: 0xb0a090 });
+const WALL_BASE_MATERIAL = new MeshLambertMaterial({ color: 0xb0a090 });
 const WALL_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x5a4a3a });
-const RAMP_BASE_MATERIAL = new MeshBasicMaterial({ color: 0x6a7f55 });
+const RAMP_BASE_MATERIAL = new MeshLambertMaterial({ color: 0x6a7f55 });
 const RAMP_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x3a4f35 });
-const STEP_BASE_MATERIAL = new MeshBasicMaterial({ color: 0x8a9a7a });
+const STEP_BASE_MATERIAL = new MeshLambertMaterial({ color: 0x8a9a7a });
 const STEP_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x4a5a3a });
 const PLAYER_ACCELERATION = 30;
 const PLAYER_MAX_SPEED = 18;
@@ -137,6 +139,8 @@ const PLAYER_LOOK_RIGHT_KEYS = [
 const PLAYER_PITCH_UP_KEYS = [KeyboardControls.KeyI];
 const PLAYER_PITCH_DOWN_KEYS = [KeyboardControls.KeyK];
 const PLAYER_PITCH_SPEED = 1.5;
+const MOUSE_PITCH_SENSITIVITY = 0.003;
+const MOUSE_YAW_SENSITIVITY = 0.003;
 const PLAYER_YAW_SPEED = 1.5;
 const PLAYER_MAX_PITCH = Math.PI * 0.45;
 const PROJECTILE_SPEED = 42;
@@ -148,6 +152,7 @@ const PROJECTILE_BOUNCE_REPEAT_COOLDOWN_TICKS = 6;
 const PROJECTILE_SWEEP_REWIND_TOI = 0.002;
 const PROJECTILE_BOUNCE_SEPARATION_DISTANCE = 0.04;
 const PROJECTILE_FALLBACK_BOUNCE_RESTITUTION = 0.8;
+const CROSSHAIR_MAX_DIST = 120;
 const AMBIENT_PERSON_COUNT = 30;
 const BOX_MIN_SPEED = 2;
 const BOX_MAX_SPEED = 5;
@@ -157,20 +162,30 @@ const BOX_STEER_SPEED_MIN_FRACTION = 0.35;
 const BOX_STEER_TURN_BOOST = 1.5;
 // Monsters repel each other when closer than this distance (monsters are 1 unit wide).
 const MONSTER_SEPARATION_RADIUS = 2.5;
-const MONSTER_SEPARATION_STRENGTH = 2.0;
+const MONSTER_SEPARATION_STRENGTH = 0;
 // Monsters probe ahead for walls and steer away before hitting them.
 const WALL_AVOIDANCE_LOOKAHEAD = 4.0;
 const WALL_AVOIDANCE_STRENGTH = 4.0;
+// Path-following: advance to next waypoint once within this horizontal distance.
+const MONSTER_WAYPOINT_REACH = 1.8;
+// Seconds between A* replans per monster.
+const MONSTER_REPLAN_INTERVAL = 0.5;
+// Upward velocity applied to step up a staircase.
+const MONSTER_JUMP_SPEED = 9.0;
+// Horizontal proximity to a jump waypoint at which the impulse fires.
+const MONSTER_JUMP_TRIGGER_DIST = 2.5;
+// Seconds before a monster can jump again (avoids repeated impulses in mid-air).
+const MONSTER_JUMP_COOLDOWN = 0.9;
 const PRIME_SPAWN_POSITION = { x: 0, y: 12, z: 0 };
 const PRIME_PLAYER_NAME = "DoomPrime";
 
 function createPersonFaceMaterials(bodyColor: number, frontColor: number) {
   return [
     ...Array.from({ length: 5 }, () => {
-      return new MeshBasicMaterial({ color: bodyColor });
+      return new MeshLambertMaterial({ color: bodyColor });
     }),
     // BoxGeometry groups are +X, -X, +Y, -Y, +Z, -Z. This project treats -Z as forward.
-    new MeshBasicMaterial({ color: frontColor }),
+    new MeshLambertMaterial({ color: frontColor }),
   ];
 }
 
@@ -192,6 +207,12 @@ type OwnershipCallbacks = {
 };
 
 type FloorEids = ArrayLike<number>;
+type MonsterPathState = {
+  path: Waypoint[] | null;
+  waypointIndex: number;
+  timeSinceReplan: number;
+  jumpCooldown: number;
+};
 type ProjectileState = {
   remainingTicks: number;
   bounceCooldownsByTarget: Map<number, number>;
@@ -200,6 +221,8 @@ type ProjectileRegistry = Map<number, ProjectileState>;
 
 function createPersonRenderMesh() {
   const mesh = new Mesh(PERSON_GEOMETRY, PERSON_BASE_MATERIALS);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   const outline = new LineSegments(PERSON_EDGE_GEOMETRY, PERSON_EDGE_MATERIAL);
   outline.renderOrder = 1;
   outline.scale.setScalar(1.001);
@@ -211,6 +234,7 @@ function createPersonRenderMesh() {
 
 function createFloorRenderMesh() {
   const mesh = new Mesh(FLOOR_GEOMETRY, FLOOR_BASE_MATERIAL);
+  mesh.receiveShadow = true;
   const outline = new LineSegments(FLOOR_EDGE_GEOMETRY, FLOOR_EDGE_MATERIAL);
   outline.renderOrder = 1;
   outline.scale.setScalar(1.0005);
@@ -222,6 +246,8 @@ function createWallRenderMesh(halfWidth: number, halfHeight: number, halfDepth: 
   const geometry = new BoxGeometry(halfWidth * 2, halfHeight * 2, halfDepth * 2);
   const edgeGeometry = new EdgesGeometry(geometry);
   const mesh = new Mesh(geometry, WALL_BASE_MATERIAL);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   const outline = new LineSegments(edgeGeometry, WALL_EDGE_MATERIAL);
   outline.renderOrder = 1;
   outline.scale.setScalar(1.0005);
@@ -237,6 +263,7 @@ function createWall(
   halfDepth: number,
 ) {
   return spawnEntity(world, {
+    floor: true,
     position,
     collider: { halfWidth, halfHeight, halfDepth },
     renderMesh: () => createWallRenderMesh(halfWidth, halfHeight, halfDepth),
@@ -246,6 +273,7 @@ function createWall(
 
 function createProjectileRenderMesh() {
   const mesh = new Mesh(PROJECTILE_GEOMETRY, PROJECTILE_BASE_MATERIAL);
+  mesh.castShadow = true;
   mesh.scale.set(
     PROJECTILE_SCALE.x,
     PROJECTILE_SCALE.y,
@@ -256,19 +284,33 @@ function createProjectileRenderMesh() {
   return mesh;
 }
 
+function createMonsterPathState(timeSinceReplan = 0): MonsterPathState {
+  return {
+    path: null,
+    waypointIndex: 0,
+    timeSinceReplan,
+    jumpCooldown: 0,
+  };
+}
+
 function registerBoxSteering(
   world: CoreWorld,
   boxEids: number[],
   baseSpeeds: Map<number, number>,
   primeEid: number,
+  navmesh: NavMesh,
+  pathStates: Map<number, MonsterPathState>,
 ): () => void {
   return world.controls.onTick((activeWorld, tick) => {
     if (tick.deltaSeconds === 0) return;
     if (!hasEntityComponents(activeWorld, primeEid, ["Position"])) return;
 
-    const { Position, Velocity, Collider, Floor } = activeWorld.components;
+    const { Position, Velocity, Collider, Floor, Gravity } = activeWorld.components;
     const targetX = Position.x[primeEid];
     const targetZ = Position.z[primeEid];
+    // Predict where the player will be shortly — monsters cut off movement instead of trailing.
+    const goalX = targetX + Velocity.x[primeEid] * 0.4;
+    const goalZ = targetZ + Velocity.z[primeEid] * 0.4;
     const maxSteer = BOX_MAX_STEER_RADIANS_PER_SECOND * tick.deltaSeconds;
 
     for (const eid of boxEids) {
@@ -277,14 +319,78 @@ function registerBoxSteering(
       const currentSpeed = Math.hypot(Velocity.x[eid], Velocity.z[eid]);
       if (currentSpeed === 0) continue;
 
-      const dx = targetX - Position.x[eid];
-      const dz = targetZ - Position.z[eid];
+      const monsterX = Position.x[eid];
+      const monsterZ = Position.z[eid];
+      const dx = targetX - monsterX;
+      const dz = targetZ - monsterZ;
       const distToTarget = Math.hypot(dx, dz);
       if (distToTarget === 0) continue;
 
-      // Desired direction: unit vector toward player plus repulsion from nearby monsters.
-      let desiredX = dx / distToTarget;
-      let desiredZ = dz / distToTarget;
+      // Desired direction from A* waypoints inside the navmesh, direct pursuit outside.
+      let desiredX: number;
+      let desiredZ: number;
+
+      const pathState = pathStates.get(eid);
+      if (pathState !== undefined && navmesh.inBounds(monsterX, monsterZ)) {
+        pathState.jumpCooldown = Math.max(0, pathState.jumpCooldown - tick.deltaSeconds);
+        pathState.timeSinceReplan += tick.deltaSeconds;
+
+        if (pathState.path === null || pathState.timeSinceReplan >= MONSTER_REPLAN_INTERVAL) {
+          const monsterFloorY = Position.y[eid] - PERSON_COLLIDER.halfHeight;
+          pathState.path = findPath(navmesh, monsterX, monsterZ, goalX, goalZ, monsterFloorY);
+          pathState.waypointIndex = 0;
+          pathState.timeSinceReplan = 0;
+        }
+
+        const path = pathState.path;
+        if (path !== null && path.length > 0 && pathState.waypointIndex < path.length) {
+          // Advance past waypoints already reached.
+          while (pathState.waypointIndex < path.length) {
+            const wp = path[pathState.waypointIndex]!;
+            if (Math.hypot(wp.x - monsterX, wp.z - monsterZ) >= MONSTER_WAYPOINT_REACH) break;
+            pathState.waypointIndex++;
+          }
+
+          // Path exhausted — force replan on next tick.
+          if (pathState.waypointIndex >= path.length) {
+            pathState.timeSinceReplan = MONSTER_REPLAN_INTERVAL;
+          }
+
+          if (pathState.waypointIndex < path.length) {
+            const wp = path[pathState.waypointIndex]!;
+            const wpDX = wp.x - monsterX;
+            const wpDZ = wp.z - monsterZ;
+            const wpHorizDist = Math.hypot(wpDX, wpDZ);
+
+            desiredX = wpHorizDist > 0 ? wpDX / wpHorizDist : dx / distToTarget;
+            desiredZ = wpHorizDist > 0 ? wpDZ / wpHorizDist : dz / distToTarget;
+
+            // Fire jump impulse when approaching a step-up waypoint while grounded.
+            if (
+              wp.requiresJump &&
+              pathState.jumpCooldown <= 0 &&
+              Gravity.Grounded[eid] === 1 &&
+              wpHorizDist < MONSTER_JUMP_TRIGGER_DIST
+            ) {
+              setEntityVelocity(activeWorld, eid, {
+                x: Velocity.x[eid],
+                y: MONSTER_JUMP_SPEED,
+                z: Velocity.z[eid],
+              });
+              pathState.jumpCooldown = MONSTER_JUMP_COOLDOWN;
+            }
+          } else {
+            desiredX = dx / distToTarget;
+            desiredZ = dz / distToTarget;
+          }
+        } else {
+          desiredX = dx / distToTarget;
+          desiredZ = dz / distToTarget;
+        }
+      } else {
+        desiredX = dx / distToTarget;
+        desiredZ = dz / distToTarget;
+      }
       for (const otherId of boxEids) {
         if (otherId === eid) continue;
         const odx = Position.x[eid] - Position.x[otherId];
@@ -390,27 +496,37 @@ function setupGame(
   spawnTerrain(engine.world);
 
   const floorEids = queryFloorEids(engine.world);
+  // Build the navmesh once after terrain is spawned. Monsters inside its bounds
+  // use A* to navigate ramps, stairs, and ledges; outside they fall back to direct pursuit.
+  const navmesh = new NavMesh(engine.world, floorEids);
   let primeEid = createPrimePlayer(engine.world, floorEids);
   engine.setCameraFollowTarget(primeEid);
 
   const baseSpeeds = new Map<number, number>();
+  const pathStates = new Map<number, MonsterPathState>();
   const boxEids = spawnAmbientPeople(engine.world, floorEids, baseSpeeds);
+  // Stagger initial replans so 30 monsters don't all run A* on the same tick.
+  for (let i = 0; i < boxEids.length; i++) {
+    pathStates.set(boxEids[i]!, createMonsterPathState(i * (MONSTER_REPLAN_INTERVAL / boxEids.length)));
+  }
   let nextMonsterIndex = boxEids.length;
 
   const onMonsterHit = (world: CoreWorld, monsterEid: number) => {
     const idx = boxEids.indexOf(monsterEid);
     if (idx !== -1) boxEids.splice(idx, 1);
     baseSpeeds.delete(monsterEid);
+    pathStates.delete(monsterEid);
     ownership.signalEntityDestroyed(monsterEid);
     destroyEntity(world, monsterEid);
 
     const newEid = spawnEdgeMonster(world, floorEids, `Doom${nextMonsterIndex++}`, baseSpeeds);
     boxEids.push(newEid);
+    pathStates.set(newEid, createMonsterPathState());
     ownership.addOwnedEntity(newEid);
   };
 
   let cleanupPrimeControls = registerPrimeControls(engine.world, primeEid, ownership, onMonsterHit);
-  let cleanupBoxSteering = registerBoxSteering(engine.world, boxEids, baseSpeeds, primeEid);
+  let cleanupBoxSteering = registerBoxSteering(engine.world, boxEids, baseSpeeds, primeEid, navmesh, pathStates);
 
   engine.world.controls.onTick((activeWorld) => {
     if (hasEntityComponents(activeWorld, primeEid, ["Player"])) return;
@@ -422,7 +538,7 @@ function setupGame(
     engine.setCameraFollowTarget(primeEid);
     ownership.addOwnedEntity(primeEid);
     cleanupPrimeControls = registerPrimeControls(activeWorld, primeEid, ownership, onMonsterHit);
-    cleanupBoxSteering = registerBoxSteering(activeWorld, boxEids, baseSpeeds, primeEid);
+    cleanupBoxSteering = registerBoxSteering(activeWorld, boxEids, baseSpeeds, primeEid, navmesh, pathStates);
   });
 
   return {
@@ -522,7 +638,8 @@ function registerPrimeControls(
     if (!isControllingPrime(activeWorld)) return;
 
     const { Gravity, Velocity } = activeWorld.components;
-    if (!evaluateFlaginatorFlag(activeWorld, CoreFlags.OnGround, eid)) return;
+    const isGrounded = evaluateFlaginatorFlag(activeWorld, CoreFlags.OnGround, eid);
+    if (!isGrounded && airJumpsUsed >= 1) return;
 
     Velocity.y[eid] = clamp(
       PLAYER_JUMP_SPEED,
@@ -530,6 +647,7 @@ function registerPrimeControls(
       PLAYER_MAX_SPEED,
     );
     Gravity.Grounded[eid] = 0;
+    if (!isGrounded) airJumpsUsed++;
     markFlaginatorComponentChanged(activeWorld, "Velocity", eid);
     markFlaginatorComponentChanged(activeWorld, "Gravity", eid);
   };
@@ -591,7 +709,7 @@ function registerPrimeControls(
     activeWorld: CoreWorld,
     deltaSeconds: number,
   ) => {
-    const { Floor, Position, Velocity } = activeWorld.components;
+    const { Position, Velocity } = activeWorld.components;
     // Only monsters (non-prime players) should be hit by projectiles.
     const isMonsterPlayer = (t: number) =>
       hasEntityComponents(activeWorld, t, ["Player"]) &&
@@ -633,7 +751,6 @@ function registerPrimeControls(
       const isFreshBounceTarget = (targetEid: number) => {
         return (
           targetEid !== eid &&
-          !Floor[targetEid] &&
           !isProjectileType(activeWorld, targetEid) &&
           (projectile.bounceCooldownsByTarget.get(targetEid) ?? 0) === 0
         );
@@ -797,9 +914,27 @@ function registerPrimeControls(
 
   let sprintStamina = PLAYER_SPRINT_STAMINA_MAX;
   let lastEmittedSprintStamina = sprintStamina;
+  let airJumpsUsed = 0;
+  let wasGrounded = true;
+  let pendingMousePitchDelta = 0;
+  let pendingMouseYawDelta = 0;
+
+  const unsubMousePitch = world.controls.on(
+    { source: ControlSources.Pointer, controlId: PointerControls.Move, phase: "change" },
+    (_activeWorld, event) => {
+      if (typeof document === "undefined" || !document.pointerLockElement) return;
+      const payload = event.payload as { movementX: number; movementY: number };
+      pendingMousePitchDelta += payload.movementY;
+      pendingMouseYawDelta -= payload.movementX;
+    },
+  );
 
   const unsubMovement = world.controls.onTick((activeWorld, tick, controls) => {
     if (!isControllingPrime(activeWorld)) return;
+
+    const isGrounded = activeWorld.components.Gravity.Grounded[eid] === 1;
+    if (isGrounded && !wasGrounded) airJumpsUsed = 0;
+    wasGrounded = isGrounded;
 
     const dt = tick.deltaSeconds;
     if (dt === 0) return;
@@ -837,13 +972,17 @@ function registerPrimeControls(
     Velocity.x[eid] *= drag;
     Velocity.z[eid] *= drag;
 
+    const isRightClickHeld = controls.isActive(PointerControls.Secondary, ControlSources.Pointer);
+    const adStrafeAxis = isRightClickHeld
+      ? controls.getAxis(PLAYER_LOOK_LEFT_KEYS, PLAYER_LOOK_RIGHT_KEYS, ControlSources.Keyboard)
+      : 0;
     const localAcceleration = {
       x:
-        controls.getAxis(
+        (controls.getAxis(
           PLAYER_STRAFE_LEFT_KEYS,
           PLAYER_STRAFE_RIGHT_KEYS,
           ControlSources.Keyboard,
-        ) * sprintAccel,
+        ) + adStrafeAxis) * sprintAccel,
       y: 0,
       z:
         controls.getAxis(
@@ -857,12 +996,14 @@ function registerPrimeControls(
       PLAYER_PITCH_UP_KEYS,
       ControlSources.Keyboard,
     );
-    const yawAxis = controls.getAxis(
-      PLAYER_LOOK_RIGHT_KEYS,
-      PLAYER_LOOK_LEFT_KEYS,
-      ControlSources.Keyboard,
-    );
-    const worldAcceleration = rotateLocalVectorByEntityRotation(
+    const yawAxis = isRightClickHeld
+      ? 0
+      : controls.getAxis(
+          PLAYER_LOOK_RIGHT_KEYS,
+          PLAYER_LOOK_LEFT_KEYS,
+          ControlSources.Keyboard,
+        );
+    const worldAcceleration = rotateLocalVectorByYaw(
       activeWorld,
       eid,
       localAcceleration,
@@ -892,18 +1033,25 @@ function registerPrimeControls(
       markFlaginatorComponentChanged(activeWorld, "Velocity", eid);
     }
 
-    if (pitchAxis === 0 && yawAxis === 0) return;
+    const mousePitchDelta = pendingMousePitchDelta;
+    pendingMousePitchDelta = 0;
+    const mouseYawDelta = pendingMouseYawDelta;
+    pendingMouseYawDelta = 0;
+
+    if (pitchAxis === 0 && yawAxis === 0 && mousePitchDelta === 0 && mouseYawDelta === 0) return;
 
     const nextRotation: Partial<Rotation> = {};
-    if (pitchAxis !== 0) {
+    if (pitchAxis !== 0 || mousePitchDelta !== 0) {
       nextRotation.pitch = clamp(
-        Rotation.pitch[eid] + pitchAxis * PLAYER_PITCH_SPEED * dt,
+        Rotation.pitch[eid] +
+          pitchAxis * PLAYER_PITCH_SPEED * dt -
+          mousePitchDelta * MOUSE_PITCH_SENSITIVITY,
         -PLAYER_MAX_PITCH,
         PLAYER_MAX_PITCH,
       );
     }
-    if (yawAxis !== 0) {
-      nextRotation.yaw = Rotation.yaw[eid] + yawAxis * PLAYER_YAW_SPEED * dt;
+    if (yawAxis !== 0 || mouseYawDelta !== 0) {
+      nextRotation.yaw = Rotation.yaw[eid] + yawAxis * PLAYER_YAW_SPEED * dt + mouseYawDelta * MOUSE_YAW_SENSITIVITY;
     }
     setEntityRotation(activeWorld, eid, nextRotation);
   });
@@ -929,14 +1077,9 @@ function registerPrimeControls(
       if (!isControllingPrime(activeWorld)) return;
 
       const { Velocity } = activeWorld.components;
-      const forward = getEntityForward(activeWorld, eid);
+      const forward = rotateLocalVectorByYaw(activeWorld, eid, { x: 0, y: 0, z: -1 });
       Velocity.x[eid] = clamp(
         Velocity.x[eid] + forward.x * PLAYER_FORWARD_BOOST,
-        -PLAYER_MAX_SPEED,
-        PLAYER_MAX_SPEED,
-      );
-      Velocity.y[eid] = clamp(
-        Velocity.y[eid] + forward.y * PLAYER_FORWARD_BOOST,
         -PLAYER_MAX_SPEED,
         PLAYER_MAX_SPEED,
       );
@@ -961,12 +1104,48 @@ function registerPrimeControls(
     },
   );
 
+  const unsubCrosshair = world.controls.onTick((activeWorld) => {
+    if (!isControllingPrime(activeWorld)) return;
+    const { Position } = activeWorld.components;
+    const forward = getEntityForward(activeWorld, eid);
+    const spawnOrigin = clampSpawnPositionToFloor(
+      activeWorld,
+      {
+        x: Position.x[eid]! + forward.x * PROJECTILE_FORWARD_SPAWN_OFFSET,
+        y: Position.y[eid]! + PROJECTILE_SPAWN_HEIGHT + forward.y * PROJECTILE_FORWARD_SPAWN_OFFSET,
+        z: Position.z[eid]! + forward.z * PROJECTILE_FORWARD_SPAWN_OFFSET,
+      },
+      PROJECTILE_COLLIDER.halfHeight,
+    );
+    const ox = spawnOrigin.x;
+    const oy = spawnOrigin.y;
+    const oz = spawnOrigin.z;
+    const ex = ox + forward.x * CROSSHAIR_MAX_DIST;
+    const ey = oy + forward.y * CROSSHAIR_MAX_DIST;
+    const ez = oz + forward.z * CROSSHAIR_MAX_DIST;
+    const hit = castRayFromTo(
+      activeWorld,
+      { x: ox, y: oy, z: oz },
+      { x: ex, y: ey, z: ez },
+      { filterPredicate: (otherEid) => otherEid !== eid && !isProjectileType(activeWorld, otherEid) },
+    );
+    eventBus.emit("ui:crosshairAimPoint", {
+      wx: ex, wy: ey, wz: ez,
+      hasHit: hit !== null,
+      hitWx: hit ? ox + (ex - ox) * hit.toi : ex,
+      hitWy: hit ? oy + (ey - oy) * hit.toi : ey,
+      hitWz: hit ? oz + (ez - oz) * hit.toi : ez,
+    });
+  });
+
   return () => {
     unsubProjectiles();
     unsubMovement();
+    unsubMousePitch();
     unsubJump();
     unsubBoost();
     unsubFire();
+    unsubCrosshair();
   };
 }
 
@@ -976,11 +1155,14 @@ function clampSpawnPositionToFloor(
   halfHeight: number,
   floorEids: FloorEids = queryFloorEids(world),
 ) {
+  // Only consider floors at or below the spawn Y so platforms above the player
+  // don't push the spawn position up through raised geometry.
   const floorTop = findHighestFloorTopAtPosition(
     world,
     floorEids,
     position.x,
     position.z,
+    position.y,
   );
   if (floorTop === null) {
     return position;
@@ -1234,7 +1416,7 @@ function createFloorSlab(
   halfWidth: number,
   halfHeight: number,
   halfDepth: number,
-  baseMaterial: MeshBasicMaterial,
+  baseMaterial: MeshLambertMaterial,
   edgeMaterial: LineBasicMaterial,
   pitch = 0,
   yaw = 0,
@@ -1248,6 +1430,8 @@ function createFloorSlab(
     collider: { halfWidth, halfHeight, halfDepth },
     renderMesh: () => {
       const mesh = new Mesh(geometry, baseMaterial);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
       const outline = new LineSegments(edgeGeometry, edgeMaterial);
       outline.renderOrder = 1;
       outline.scale.setScalar(1.0005);

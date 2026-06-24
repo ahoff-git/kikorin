@@ -155,8 +155,9 @@ export {
   getEntityForward,
   getYawFromXZDirection,
   markTransformDirty,
-  setEntityPosition,
   rotateLocalVectorByEntityRotation,
+  rotateLocalVectorByYaw,
+  setEntityPosition,
   setEntityRotation,
   setEntityVelocity,
 } from "@kikorin/system-movement";

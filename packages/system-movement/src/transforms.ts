@@ -143,6 +143,24 @@ export function rotateLocalVectorByEntityRotation(
   };
 }
 
+// Rotates using yaw only — keeps vectors on the ground plane regardless of aim pitch.
+export function rotateLocalVectorByYaw(
+  world: CoreWorld,
+  eid: number,
+  localVector: Vec3,
+): Vec3 {
+  const { Rotation } = world.components;
+  scratchEuler.set(0, Rotation.yaw[eid], 0);
+  scratchVector.set(localVector.x, localVector.y, localVector.z);
+  scratchVector.applyEuler(scratchEuler);
+
+  return {
+    x: scratchVector.x,
+    y: scratchVector.y,
+    z: scratchVector.z,
+  };
+}
+
 export function getEntityForward(world: CoreWorld, eid: number): Vec3 {
   return rotateLocalVectorByEntityRotation(world, eid, { x: 0, y: 0, z: -1 });
 }

@@ -501,6 +501,49 @@ export function castEntityCollider(
     }
 }
 
+export function castRayFromTo(
+    world: CoreWorld,
+    from: { x: number; y: number; z: number },
+    to: { x: number; y: number; z: number },
+    opts: {
+        filterFlags?: QueryFilterFlags;
+        filterPredicate?: (eid: number) => boolean;
+    } = {},
+): { toi: number; colliderEid: number } | null {
+    const { collision } = world
+    const rapierWorld = collision.world
+    if (!rapierWorld) return null
+
+    const dx = to.x - from.x
+    const dy = to.y - from.y
+    const dz = to.z - from.z
+    const distance = Math.hypot(dx, dy, dz)
+    if (distance === 0) return null
+
+    const ray = new RAPIER.Ray(from, { x: dx / distance, y: dy / distance, z: dz / distance })
+    const hit = rapierWorld.castRay(
+        ray,
+        distance,
+        true,
+        opts.filterFlags,
+        undefined,
+        undefined,
+        undefined,
+        opts.filterPredicate
+            ? (collider) => {
+                  const eid = collision.eidByColliderHandle.get(collider.handle)
+                  return eid !== undefined && opts.filterPredicate!(eid)
+              }
+            : undefined,
+    )
+    if (!hit) return null
+
+    const colliderEid = collision.eidByColliderHandle.get(hit.collider.handle)
+    if (colliderEid === undefined) return null
+
+    return { toi: hit.toi / distance, colliderEid }
+}
+
 export function getTouchPairs(world: CoreWorld) {
     return world.collision.touchPairs
 }

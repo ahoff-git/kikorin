@@ -2,7 +2,7 @@ import { hasComponent, query } from "bitecs";
 import type { CoreWorld } from "@kikorin/ecs";
 import { isProjectileType } from "@kikorin/ecs";
 import { log, logLevels } from "@kikorin/util";
-import { castEntityCollider, findHighestFloorTopAtPosition } from "@kikorin/system-physics";
+import { castRayFromTo, findHighestFloorTopAtPosition } from "@kikorin/system-physics";
 import { lookCameraAt, readCameraPosition, setCameraPosition } from "@kikorin/system-rendering";
 
 type Vec3 = { x: number; y: number; z: number };
@@ -17,8 +17,14 @@ const DEFAULT_STATIONARY_POSITION: Vec3 = { x: 0, y: 4, z: 10 };
 const MIN_FOLLOW_DISTANCE = 0.1;
 const MAX_FOLLOW_PITCH = Math.PI * 0.48;
 const CAMERA_GROUND_CLEARANCE = 0.1;
-// Distance to keep camera away from a wall face when pulling in to avoid occlusion
+// Small gap to keep between the camera and the wall face it is pulled in front of.
 const CAMERA_WALL_SEPARATION = 0.3;
+// Speed (world-units per second) at which the camera zooms back out after a wall clears.
+// The camera always snaps in instantly; it only springs back slowly.
+const CAMERA_RESTORE_SPEED = 6.0;
+// How high above the entity's position the camera looks, in world units.
+// Keeps the player character framed above their feet rather than staring at the ground.
+const LOOK_AT_HEIGHT_OFFSET = 0.75;
 const CAMERA_PITCH_DRAG_MIN_RESPONSE = 0.2;
 const CAMERA_PITCH_DRAG_EDGE_EXPONENT = 2;
 const CAMERA_DEBUG_FRAME_INTERVAL = 30;
@@ -34,6 +40,9 @@ const cameraState: {
   targetEid: number;
   followOffset: Vec3;
   followDistance: number;
+  // Current rendered camera distance. Snaps in when a wall blocks the view;
+  // springs back toward followDistance at CAMERA_RESTORE_SPEED when the path clears.
+  actualCameraDistance: number;
   followYaw: number;
   followPitch: number;
   lastTargetYaw: number;
@@ -44,6 +53,7 @@ const cameraState: {
   targetEid: -1,
   followOffset: { ...DEFAULT_FOLLOW_OFFSET },
   followDistance: 1,
+  actualCameraDistance: DEFAULT_FOLLOW_DISTANCE,
   followYaw: 0,
   followPitch: 0,
   lastTargetYaw: Number.NaN,
@@ -148,32 +158,6 @@ function clampCameraHeightToFloor(
   return true;
 }
 
-function clampCameraToWalls(
-  world: CoreWorld,
-  playerEid: number,
-  playerPos: Vec3,
-  desiredPosition: Vec3,
-): void {
-  const { Floor, Player } = world.components;
-  const dx = desiredPosition.x - playerPos.x;
-  const dy = desiredPosition.y - playerPos.y;
-  const dz = desiredPosition.z - playerPos.z;
-
-  const hit = castEntityCollider(world, playerEid, playerPos, { x: dx, y: dy, z: dz }, {
-    filterPredicate: (targetEid) => !Floor[targetEid] && !isProjectileType(world, targetEid) && !hasComponent(world, targetEid, Player),
-  });
-
-  if (!hit || hit.toi >= 1) return;
-
-  const distance = Math.hypot(dx, dy, dz);
-  const toi = distance > 0
-    ? Math.max(0, hit.toi - CAMERA_WALL_SEPARATION / distance)
-    : 0;
-  desiredPosition.x = playerPos.x + dx * toi;
-  desiredPosition.y = playerPos.y + dy * toi;
-  desiredPosition.z = playerPos.z + dz * toi;
-}
-
 syncFollowOrbitFromOffset();
 
 export function resetCameraTarget() {
@@ -196,6 +180,7 @@ export function setCameraFollowTarget(
   cameraState.lastTargetYaw = Number.NaN;
   assignVec3(cameraState.followOffset, opts.offset);
   syncFollowOrbitFromOffset();
+  cameraState.actualCameraDistance = cameraState.followDistance;
   logCameraDebug("set follow target", {
     targetEid: cameraState.targetEid,
     followOffset: {
@@ -248,6 +233,7 @@ export function resetCameraFollowOrbitBehindTarget() {
   cameraState.followYaw = cameraState.lastTargetYaw;
   cameraState.followPitch = DEFAULT_FOLLOW_PITCH;
   cameraState.followDistance = DEFAULT_FOLLOW_DISTANCE;
+  cameraState.actualCameraDistance = DEFAULT_FOLLOW_DISTANCE;
   syncFollowOffsetFromOrbit();
 }
 
@@ -332,10 +318,52 @@ export function cameraFollowSystem(world: CoreWorld) {
       cameraState.lastTargetYaw = Number.NaN;
     }
 
-    const offset = cameraState.followOffset;
-    desiredCameraX = tx + offset.x;
-    desiredCameraY = ty + offset.y;
-    desiredCameraZ = tz + offset.z;
+    const { Floor, Player } = world.components;
+    const { followOffset, followDistance } = cameraState;
+
+    // Cast from the look-at point (player body centre) so walls that clip between
+    // the camera and the player's head are detected, not just their feet.
+    const lookAtOrigin = { x: tx, y: ty + LOOK_AT_HEIGHT_OFFSET, z: tz };
+    const desiredCameraFull = {
+      x: tx + followOffset.x,
+      y: ty + followOffset.y,
+      z: tz + followOffset.z,
+    };
+
+    const wallHit = castRayFromTo(world, lookAtOrigin, desiredCameraFull, {
+      filterPredicate: (targetEid) =>
+        !Floor[targetEid] &&
+        !isProjectileType(world, targetEid) &&
+        !hasComponent(world, targetEid, Player),
+    });
+
+    // toi is normalized to [0,1] over the look-at-to-camera ray.  Convert to a
+    // maximum scale factor for followOffset, backing off by CAMERA_WALL_SEPARATION.
+    const occlusionRayLen = Math.hypot(
+      followOffset.x,
+      followOffset.y - LOOK_AT_HEIGHT_OFFSET,
+      followOffset.z,
+    );
+    const maxT = wallHit && wallHit.toi < 1
+      ? Math.max(0, wallHit.toi - CAMERA_WALL_SEPARATION / occlusionRayLen)
+      : 1;
+    const maxDistance = maxT * followDistance;
+
+    // Snap in immediately when blocked; spring back smoothly when the path clears.
+    if (cameraState.actualCameraDistance > maxDistance) {
+      cameraState.actualCameraDistance = maxDistance;
+    } else {
+      cameraState.actualCameraDistance = Math.min(
+        followDistance,
+        cameraState.actualCameraDistance + CAMERA_RESTORE_SPEED * world.time.delta,
+      );
+    }
+
+    // Scale the follow offset proportionally to the current camera distance.
+    const t = followDistance > 0 ? cameraState.actualCameraDistance / followDistance : 0;
+    desiredCameraX = tx + followOffset.x * t;
+    desiredCameraY = ty + followOffset.y * t;
+    desiredCameraZ = tz + followOffset.z * t;
   } else {
     const p = cameraState.stationaryPosition;
     desiredCameraX = p.x;
@@ -357,9 +385,6 @@ export function cameraFollowSystem(world: CoreWorld) {
     desiredCameraPosition,
     currentCameraPosition,
   );
-  if (cameraState.mode === "follow") {
-    clampCameraToWalls(world, eid, { x: tx, y: ty, z: tz }, desiredCameraPosition);
-  }
   desiredCameraX = desiredCameraPosition.x;
   desiredCameraY = desiredCameraPosition.y;
   desiredCameraZ = desiredCameraPosition.z;
@@ -369,7 +394,7 @@ export function cameraFollowSystem(world: CoreWorld) {
     desiredCameraY,
     desiredCameraZ,
   );
-  const lookAtOk = lookCameraAt(tx, ty, tz);
+  const lookAtOk = lookCameraAt(tx, ty + LOOK_AT_HEIGHT_OFFSET, tz);
   const shouldLogFrame =
     cameraFollowFrameCount % CAMERA_DEBUG_FRAME_INTERVAL === 0 ||
     !setPositionOk ||
@@ -407,6 +432,7 @@ export function cameraFollowSystem(world: CoreWorld) {
         cameraState.mode === "follow"
           ? {
               distance: cameraState.followDistance,
+              actualDistance: cameraState.actualCameraDistance,
               yaw: cameraState.followYaw,
               pitch: cameraState.followPitch,
               orbitControlActive: cameraState.orbitControlActive,

@@ -7,6 +7,9 @@ import {
   Object3D,
   Material,
   BufferGeometry,
+  DirectionalLight,
+  AmbientLight,
+  PCFSoftShadowMap,
 } from "three";
 import { setActiveCamera, getActiveCamera } from "./renderCamera";
 
@@ -181,7 +184,26 @@ export function setupRenderer(canvas: HTMLCanvasElement | null) {
   });
 
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = PCFSoftShadowMap;
   setRendererViewportSize(width, height);
+
+  const ambientLight = new AmbientLight(0xffffff, 0.7);
+  scene.add(ambientLight);
+
+  const sunLight = new DirectionalLight(0xffffff, 0.35);
+  sunLight.position.set(50, 100, 30);
+  sunLight.castShadow = true;
+  sunLight.shadow.mapSize.width = 2048;
+  sunLight.shadow.mapSize.height = 2048;
+  sunLight.shadow.camera.near = 1;
+  sunLight.shadow.camera.far = 350;
+  sunLight.shadow.camera.left = -90;
+  sunLight.shadow.camera.right = 90;
+  sunLight.shadow.camera.top = 90;
+  sunLight.shadow.camera.bottom = -90;
+  sunLight.shadow.bias = -0.001;
+  scene.add(sunLight);
 
   logRenderDebug("renderer setup complete", {
     width,

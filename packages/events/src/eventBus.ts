@@ -8,6 +8,7 @@ export type EventBusEvents = {
   "ui:timeMetricsUpdate": { timeMetrics: CoreWorld["time"] };
   "ui:controlsUpdate": { controlStates: ControlState[] };
   "ui:sprintStaminaUpdate": { stamina: number };
+  "ui:crosshairAimPoint": { wx: number; wy: number; wz: number; hasHit: boolean; hitWx: number; hitWy: number; hitWz: number };
 };
 
 export const eventBus = mitt<EventBusEvents>();
