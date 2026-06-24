@@ -785,6 +785,83 @@ describe('netcode integration', () => {
   })
 
   // -------------------------------------------------------------------------
+  // PeerList — mesh introduction protocol
+  // -------------------------------------------------------------------------
+
+  describe('peer list / mesh introduction', () => {
+    it('sendPeerList delivers peer ids to the receiver via onPeerList', async () => {
+      const [pA, pB] = ['peer-alice', 'peer-bob'].map(id => makePeer(id, mockNet))
+      allPeers = [pA, pB]
+      await connectAll(allPeers)
+
+      const received: { peers: string[]; from: string }[] = []
+      pB.net.onPeerList((peers, from) => received.push({ peers, from }))
+
+      pA.net.sendPeerList('peer-bob', ['peer-carol', 'peer-dave'])
+
+      expect(received).toHaveLength(1)
+      expect(received[0].from).toBe('peer-alice')
+      expect(received[0].peers).toEqual(['peer-carol', 'peer-dave'])
+    })
+
+    it('sendPeerList with empty list is a no-op (no message sent)', async () => {
+      const [pA, pB] = ['peer-alice', 'peer-bob'].map(id => makePeer(id, mockNet))
+      allPeers = [pA, pB]
+      await connectAll(allPeers)
+
+      const received: string[][] = []
+      pB.net.onPeerList(peers => received.push(peers))
+
+      pA.net.sendPeerList('peer-bob', [])
+
+      expect(received).toHaveLength(0)
+    })
+
+    it('receiver filters its own id out of incoming peer lists', async () => {
+      const [pA, pB] = ['peer-alice', 'peer-bob'].map(id => makePeer(id, mockNet))
+      allPeers = [pA, pB]
+      await connectAll(allPeers)
+
+      const received: string[][] = []
+      pB.net.onPeerList(peers => received.push(peers))
+
+      // alice erroneously includes bob's own id in the list
+      pA.net.sendPeerList('peer-bob', ['peer-bob', 'peer-carol'])
+
+      expect(received).toHaveLength(1)
+      expect(received[0]).toEqual(['peer-carol'])
+    })
+
+    it('onPeerList unsubscribe stops future deliveries', async () => {
+      const [pA, pB] = ['peer-alice', 'peer-bob'].map(id => makePeer(id, mockNet))
+      allPeers = [pA, pB]
+      await connectAll(allPeers)
+
+      const received: string[][] = []
+      const unsub = pB.net.onPeerList(peers => received.push(peers))
+      unsub()
+
+      pA.net.sendPeerList('peer-bob', ['peer-carol'])
+
+      expect(received).toHaveLength(0)
+    })
+
+    it('multiple onPeerList handlers all fire', async () => {
+      const [pA, pB] = ['peer-alice', 'peer-bob'].map(id => makePeer(id, mockNet))
+      allPeers = [pA, pB]
+      await connectAll(allPeers)
+
+      const calls: number[] = []
+      pB.net.onPeerList(() => calls.push(1))
+      pB.net.onPeerList(() => calls.push(2))
+
+      pA.net.sendPeerList('peer-bob', ['peer-carol'])
+
+      expect(calls).toEqual([1, 2])
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // Large-scale stress
   // -------------------------------------------------------------------------
 

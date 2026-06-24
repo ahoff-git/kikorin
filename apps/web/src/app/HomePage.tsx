@@ -16,7 +16,7 @@ import {
   useKikorinEvent,
 } from "@kikorin/react";
 import { setupGame } from "./kikorin";
-import { useNetworking } from "./useNetworking";
+import { useNetworking, type ChatMessage } from "./useNetworking";
 import { PlayerReactControls } from "./kikorinControls";
 import { Box } from "@mui/material";
 import { PageLayout } from "./kikorinLayout";
@@ -69,8 +69,36 @@ const helperTextStyle: CSSProperties = {
   color: "#555",
 };
 
-const controlsSectionStyle: CSSProperties = {
+const chatBoxStyle: CSSProperties = {
   marginTop: 12,
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+};
+
+const chatLogStyle: CSSProperties = {
+  height: 140,
+  overflowY: "auto",
+  background: "#111",
+  borderRadius: 4,
+  padding: "6px 8px",
+  fontSize: 11,
+  fontFamily: "monospace",
+  display: "flex",
+  flexDirection: "column",
+  gap: 2,
+};
+
+const chatInputRowStyle: CSSProperties = {
+  display: "flex",
+  gap: 4,
+};
+
+const chatInputStyle: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  fontFamily: "monospace",
+  fontSize: 11,
 };
 
 const networkPanelStyle: CSSProperties = { marginTop: 16 };
@@ -130,7 +158,7 @@ export default function Home() {
   const [playerEid, setPlayerEid] = useState<number | null>(null);
   const [ownedEids, setOwnedEids] = useState<readonly number[]>([]);
   const uiState = useWorldUiState();
-  const { localPeerId, connectedPeers, connect, addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity, setHitHandler } = useNetworking(
+  const { localPeerId, connectedPeers, chatMessages, connect, sendChatMessage, addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity, setHitHandler } = useNetworking(
     engine,
     playerEid,
     ownedEids,
@@ -199,6 +227,8 @@ export default function Home() {
           localPeerId={localPeerId}
           connectedPeers={connectedPeers}
           onConnect={connect}
+          chatMessages={chatMessages}
+          onSendChat={sendChatMessage}
         />
       }
       footer={<Footer sprintStamina={uiState.sprintStamina} />}
@@ -438,14 +468,17 @@ function RightPanel({
   player,
   playerPosition,
   timeMetrics,
-  controlStates,
   localPeerId,
   connectedPeers,
   onConnect,
-}: WorldUiState & {
+  chatMessages,
+  onSendChat,
+}: Omit<WorldUiState, "controlStates"> & {
   localPeerId: string | null;
   connectedPeers: string[];
   onConnect: (peerId: string) => void;
+  chatMessages: ChatMessage[];
+  onSendChat: (text: string) => void;
 }) {
   const averageDelta = Math.round(timeMetrics?.avgDelta ?? 0);
   const ticksPerSecond = Math.round(timeMetrics?.ticksPerSecond ?? 0);
@@ -465,25 +498,83 @@ function RightPanel({
         <div>Level: {playerLevel}</div>
         <div>Position: {positionLabel}</div>
       </div>
-      <div style={controlsSectionStyle}>
-        <div>Controls:</div>
-        {controlStates.length === 0 ? (
-          <div>No controls seen yet</div>
-        ) : (
-          controlStates.map((controlState) => (
-            <div key={controlState.key}>
-              {controlState.key}:{" "}
-              {controlState.active ? "active" : controlState.phase} for{" "}
-              {Math.round(controlState.durationMs)}ms
-            </div>
-          ))
-        )}
-      </div>
+      <ChatBox
+        messages={chatMessages}
+        localPeerId={localPeerId}
+        onSend={onSendChat}
+      />
       <NetworkPanel
         localPeerId={localPeerId}
         connectedPeers={connectedPeers}
         onConnect={onConnect}
       />
+    </div>
+  );
+}
+
+function ChatBox({
+  messages,
+  localPeerId,
+  onSend,
+}: {
+  messages: ChatMessage[];
+  localPeerId: string | null;
+  onSend: (text: string) => void;
+}) {
+  const [input, setInput] = useState("");
+  const logRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages]);
+
+  function handleSend() {
+    const trimmed = input.trim();
+    if (!trimmed) return;
+    onSend(trimmed);
+    setInput("");
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter") handleSend();
+  }
+
+  return (
+    <div style={chatBoxStyle}>
+      <div style={sectionLabelStyle}>Chat</div>
+      <div ref={logRef} style={chatLogStyle}>
+        {messages.length === 0 ? (
+          <div style={{ color: "#555" }}>No messages yet</div>
+        ) : (
+          messages.map((msg) => (
+            <div key={msg.id} style={{ color: msg.from === "me" ? "#4ade80" : "#ff44aa" }}>
+              <span style={{ fontWeight: 700 }}>
+                {msg.from === "me" ? "You" : msg.from.slice(0, 8)}
+              </span>
+              {": "}
+              {msg.text}
+            </div>
+          ))
+        )}
+      </div>
+      <div style={chatInputRowStyle}>
+        <input
+          style={chatInputStyle}
+          placeholder="Type a message…"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          disabled={!localPeerId}
+        />
+        <button
+          type="button"
+          onClick={handleSend}
+          disabled={!localPeerId || !input.trim()}
+        >
+          Send
+        </button>
+      </div>
     </div>
   );
 }

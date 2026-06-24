@@ -45,6 +45,7 @@ export class PeerNet {
   private _ack = 0
   private _rttMs = 50
   private _gameEventHandlers: ((payload: ArrayBuffer, from: PeerId) => void)[] = []
+  private _peerListHandlers: ((peers: PeerId[], from: PeerId) => void)[] = []
 
   constructor(config: PeerNetConfig) {
     this.localPeerId = config.peerId
@@ -123,6 +124,31 @@ export class PeerNet {
 
   onPeerDisconnect(handler: (peerId: PeerId) => void): () => void {
     return this._pool.onDisconnect(handler)
+  }
+
+  /**
+   * Send a list of peer IDs to a specific peer so it can auto-connect to them.
+   * No-ops when the list is empty.
+   */
+  sendPeerList(toPeer: PeerId, peers: PeerId[]): void {
+    if (peers.length === 0) return
+    const payload = encodeJson({ peers })
+    this._send(toPeer, {
+      type: MessageType.PeerList,
+      flags: MessageFlag.Reliable,
+      seq: this._nextSeq(),
+      ack: this._ack,
+      payload,
+    })
+  }
+
+  /** Register a handler that fires when a remote peer sends us a PeerList message. */
+  onPeerList(handler: (peers: PeerId[], from: PeerId) => void): () => void {
+    this._peerListHandlers.push(handler)
+    return () => {
+      const idx = this._peerListHandlers.indexOf(handler)
+      if (idx !== -1) this._peerListHandlers.splice(idx, 1)
+    }
   }
 
   sendGameEvent(peerId: PeerId, payload: ArrayBuffer): void {
@@ -276,6 +302,10 @@ export class PeerNet {
         }
         break
       }
+      case MessageType.PeerList: {
+        this._onPeerList(msg, from)
+        break
+      }
       case MessageType.GameEvent: {
         for (const h of this._gameEventHandlers) h(msg.payload, from)
         break
@@ -299,6 +329,17 @@ export class PeerNet {
         break
       }
     }
+  }
+
+  private _onPeerList(msg: NetMessage, from: PeerId): void {
+    try {
+      const { peers } = decodeJson(msg.payload)
+      if (!Array.isArray(peers)) return
+      const valid = peers.filter((p): p is PeerId => typeof p === 'string' && p !== this.localPeerId)
+      if (valid.length > 0) {
+        for (const h of this._peerListHandlers) h(valid, from)
+      }
+    } catch { /* malformed */ }
   }
 
   private _onSubscribe(msg: NetMessage, from: PeerId): void {

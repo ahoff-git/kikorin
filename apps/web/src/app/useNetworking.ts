@@ -46,10 +46,22 @@ function createRemoteProjectileMesh() {
   return mesh;
 }
 
+export type ChatMessage = {
+  id: number;
+  from: string; // "me" for locally sent, peerId for remote
+  text: string;
+};
+
+// GameEvent payload type prefix bytes — keeps hit notifications and chat distinct.
+const GAME_EVENT_HIT = 0x01;
+const GAME_EVENT_CHAT = 0x02;
+
 export interface UseNetworkingReturn {
   localPeerId: string | null;
   connectedPeers: string[];
+  chatMessages: ChatMessage[];
   connect: (remotePeerId: string) => void;
+  sendChatMessage: (text: string) => void;
   addOwnedEntity: (eid: number) => void;
   removeOwnedEntity: (eid: number) => void;
   signalEntityDestroyed: (eid: number) => void;
@@ -64,7 +76,11 @@ export function useNetworking(
 ): UseNetworkingReturn {
   const [localPeerId, setLocalPeerId] = useState<string | null>(null);
   const [connectedPeers, setConnectedPeers] = useState<string[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const netRef = useRef<PeerNet | null>(null);
+  // All peer IDs we've successfully connected to or received data from, for chat broadcast.
+  const knownPeerIdsRef = useRef<Set<string>>(new Set());
+  const chatIdRef = useRef(0);
   // peerId → Map<remoteEid, localEid>
   const remoteEntitiesRef = useRef(new Map<string, Map<number, number>>());
   // localEid → { peerId, remoteEid } — reverse lookup so the shooter can route
@@ -89,9 +105,26 @@ export function useNetworking(
     if (!net) return;
     const owner = mirrorOwnerRef.current.get(localMirrorEid);
     if (!owner) return;
-    const payload = new ArrayBuffer(4);
-    new DataView(payload).setUint32(0, owner.remoteEid, true);
+    // Byte 0 = GAME_EVENT_HIT, bytes 1-4 = remote entity ID (little-endian Uint32).
+    const payload = new ArrayBuffer(5);
+    const view = new DataView(payload);
+    view.setUint8(0, GAME_EVENT_HIT);
+    view.setUint32(1, owner.remoteEid, true);
     net.sendGameEvent(owner.peerId, payload);
+  }, []);
+
+  const sendChatMessage = useCallback((text: string) => {
+    const net = netRef.current;
+    if (!net) return;
+    const encoded = new TextEncoder().encode(text);
+    const payload = new ArrayBuffer(1 + encoded.byteLength);
+    const view = new DataView(payload);
+    view.setUint8(0, GAME_EVENT_CHAT);
+    new Uint8Array(payload, 1).set(encoded);
+    for (const peerId of knownPeerIdsRef.current) {
+      net.sendGameEvent(peerId, payload);
+    }
+    setChatMessages(prev => [...prev, { id: chatIdRef.current++, from: "me", text }]);
   }, []);
 
   const addOwnedEntity = useCallback((eid: number) => {
@@ -146,6 +179,7 @@ export function useNetworking(
     let cancelled = false;
     let unsubTick: (() => void) | undefined;
     let unsubGameEvents: (() => void) | undefined;
+    let unsubPeerList: (() => void) | undefined;
 
     const posSchema: ComponentSchema = {
       id: POSITION_COMPONENT_ID,
@@ -195,6 +229,33 @@ export function useNetworking(
         net.registerComponent(netFlagsSchema);
         net.createGroup({ id: GROUP_ID, tickRateMs: 50 });
 
+        // When a connected peer introduces us to new peers, auto-connect to complete the mesh.
+        unsubPeerList = net.onPeerList((peers) => {
+          if (!net) return;
+          for (const peerId of peers) {
+            if (knownPeerIdsRef.current.has(peerId)) continue;
+            // Claim the slot immediately so concurrent introductions don't double-connect.
+            knownPeerIdsRef.current.add(peerId);
+            void net.connectPeer(peerId).then(() => {
+              if (!net) return;
+              net.joinGroup(GROUP_ID, [peerId]);
+              net.sendFullSync(GROUP_ID, peerId, [...ownedEntitySetRef.current]);
+              // Tell the new peer about our other known peers.
+              const others = [...knownPeerIdsRef.current].filter(p => p !== peerId);
+              if (others.length > 0) net.sendPeerList(peerId, others);
+              // Announce the new peer to everyone we already know.
+              for (const existingId of knownPeerIdsRef.current) {
+                if (existingId !== peerId) net.sendPeerList(existingId, [peerId]);
+              }
+              setConnectedPeers((prev) =>
+                prev.includes(peerId) ? prev : [...prev, peerId],
+              );
+            }).catch(() => {
+              knownPeerIdsRef.current.delete(peerId);
+            });
+          }
+        });
+
         net.onPeerDisconnect((peerId: string) => {
           const peerMap = remoteEntitiesRef.current.get(peerId);
           if (peerMap) {
@@ -204,13 +265,25 @@ export function useNetworking(
             }
             remoteEntitiesRef.current.delete(peerId);
           }
+          knownPeerIdsRef.current.delete(peerId);
           setConnectedPeers((prev) => prev.filter((id) => id !== peerId));
         });
 
-        unsubGameEvents = net.onGameEvent((payload, _fromPeer) => {
-          if (payload.byteLength < 4) return;
-          const remoteEid = new DataView(payload).getUint32(0, true);
-          hitHandlerRef.current?.(remoteEid);
+        unsubGameEvents = net.onGameEvent((payload, fromPeer) => {
+          if (payload.byteLength < 1) return;
+          const view = new DataView(payload);
+          const kind = view.getUint8(0);
+          if (kind === GAME_EVENT_HIT) {
+            if (payload.byteLength < 5) return;
+            const remoteEid = view.getUint32(1, true);
+            hitHandlerRef.current?.(remoteEid);
+          } else if (kind === GAME_EVENT_CHAT) {
+            const text = new TextDecoder().decode(new Uint8Array(payload, 1));
+            setChatMessages(prev => [
+              ...prev,
+              { id: chatIdRef.current++, from: fromPeer, text },
+            ]);
+          }
         });
 
         net.onGroupDelta(GROUP_ID, (deltas, _gid, fromPeer) => {
@@ -218,9 +291,17 @@ export function useNetworking(
           const peerEntities = getOrCreatePeerMap(fromPeer);
 
           // When we first hear from a peer, send them our full state so they
-          // can spawn mirrors for all our boxes immediately.
+          // can spawn mirrors for all our boxes immediately, and exchange peer
+          // lists so the full mesh can form automatically.
           if (isNewPeer && net) {
             net.sendFullSync(GROUP_ID, fromPeer, [...ownedEntitySetRef.current]);
+            // fromPeer is not in knownPeerIdsRef yet at this point, so this gives
+            // exactly the set of peers we should introduce fromPeer to.
+            const existingPeers = [...knownPeerIdsRef.current];
+            if (existingPeers.length > 0) net.sendPeerList(fromPeer, existingPeers);
+            for (const peerId of existingPeers) {
+              net.sendPeerList(peerId, [fromPeer]);
+            }
           }
 
           // First pass: identify new projectiles (for spawning) and destroyed
@@ -380,6 +461,7 @@ export function useNetworking(
 
       peerEntities.set(remoteEid, localEid);
       mirrorOwnerRef.current.set(localEid, { peerId, remoteEid });
+      knownPeerIdsRef.current.add(peerId);
       setConnectedPeers((prev) =>
         prev.includes(peerId) ? prev : [...prev, peerId],
       );
@@ -390,6 +472,7 @@ export function useNetworking(
       cancelled = true;
       unsubTick?.();
       unsubGameEvents?.();
+      unsubPeerList?.();
       net?.dispose();
       for (const peerMap of remoteEntitiesRef.current.values()) {
         for (const eid of peerMap.values()) eng.destroyEntity(eid);
@@ -405,17 +488,28 @@ export function useNetworking(
 
   function connect(remotePeerId: string) {
     const net = netRef.current;
-    if (!net) return;
+    if (!net || knownPeerIdsRef.current.has(remotePeerId)) return;
+    // Claim immediately so concurrent introductions don't double-connect.
+    knownPeerIdsRef.current.add(remotePeerId);
     void net.connectPeer(remotePeerId).then(() => {
       net.joinGroup(GROUP_ID, [remotePeerId]);
       // Send a full snapshot of all owned entities so the remote peer can
       // immediately spawn mirrors for all boxes, not just the player.
       net.sendFullSync(GROUP_ID, remotePeerId, [...ownedEntitySetRef.current]);
+      // Send the new peer our existing peer list so they can connect to the full mesh.
+      const others = [...knownPeerIdsRef.current].filter(p => p !== remotePeerId);
+      if (others.length > 0) net.sendPeerList(remotePeerId, others);
+      // Announce the new peer to everyone we already know.
+      for (const existingId of knownPeerIdsRef.current) {
+        if (existingId !== remotePeerId) net.sendPeerList(existingId, [remotePeerId]);
+      }
       setConnectedPeers((prev) =>
         prev.includes(remotePeerId) ? prev : [...prev, remotePeerId],
       );
+    }).catch(() => {
+      knownPeerIdsRef.current.delete(remotePeerId);
     });
   }
 
-  return { localPeerId, connectedPeers, connect, addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity, setHitHandler };
+  return { localPeerId, connectedPeers, chatMessages, connect, sendChatMessage, addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity, setHitHandler };
 }

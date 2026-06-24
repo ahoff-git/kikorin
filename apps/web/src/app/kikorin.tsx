@@ -158,6 +158,9 @@ const BOX_STEER_TURN_BOOST = 1.5;
 // Monsters repel each other when closer than this distance (monsters are 1 unit wide).
 const MONSTER_SEPARATION_RADIUS = 2.5;
 const MONSTER_SEPARATION_STRENGTH = 2.0;
+// Monsters probe ahead for walls and steer away before hitting them.
+const WALL_AVOIDANCE_LOOKAHEAD = 4.0;
+const WALL_AVOIDANCE_STRENGTH = 4.0;
 const PRIME_SPAWN_POSITION = { x: 0, y: 12, z: 0 };
 const PRIME_PLAYER_NAME = "DoomPrime";
 
@@ -240,22 +243,6 @@ function createWall(
   });
 }
 
-function spawnSampleWalls(world: World) {
-  const HALF_H = 4;
-  const THICK = 0.5;
-  const Y = FLOOR_TOP_Y + HALF_H;
-
-  // North wall — closes the U ahead of spawn
-  createWall(world, { x: 0, y: Y, z: -12 }, 8, HALF_H, THICK);
-  // East arm of the U
-  createWall(world, { x: 8, y: Y, z: -3 }, THICK, HALF_H, 9);
-  // West arm of the U
-  createWall(world, { x: -8, y: Y, z: -3 }, THICK, HALF_H, 9);
-  // Freestanding pillar to the east
-  createWall(world, { x: 20, y: Y, z: 5 }, 1, HALF_H, 1);
-  // Long wall to the south
-  createWall(world, { x: 0, y: Y, z: 18 }, 14, HALF_H, THICK);
-}
 
 function createProjectileRenderMesh() {
   const mesh = new Mesh(PROJECTILE_GEOMETRY, PROJECTILE_BASE_MATERIAL);
@@ -279,7 +266,7 @@ function registerBoxSteering(
     if (tick.deltaSeconds === 0) return;
     if (!hasEntityComponents(activeWorld, primeEid, ["Position"])) return;
 
-    const { Position, Velocity } = activeWorld.components;
+    const { Position, Velocity, Collider, Floor } = activeWorld.components;
     const targetX = Position.x[primeEid];
     const targetZ = Position.z[primeEid];
     const maxSteer = BOX_MAX_STEER_RADIANS_PER_SECOND * tick.deltaSeconds;
@@ -307,6 +294,26 @@ function registerBoxSteering(
         const strength = MONSTER_SEPARATION_STRENGTH * (1 - dist / MONSTER_SEPARATION_RADIUS);
         desiredX += (odx / dist) * strength;
         desiredZ += (odz / dist) * strength;
+      }
+
+      // Wall avoidance: probe ahead in the desired direction; push away from any wall found.
+      const desiredLen = Math.hypot(desiredX, desiredZ);
+      if (desiredLen > 0) {
+        const probeX = (desiredX / desiredLen) * WALL_AVOIDANCE_LOOKAHEAD;
+        const probeZ = (desiredZ / desiredLen) * WALL_AVOIDANCE_LOOKAHEAD;
+        const monsterPos = { x: Position.x[eid], y: Position.y[eid], z: Position.z[eid] };
+        const wallHit = castEntityCollider(activeWorld, eid, monsterPos, { x: probeX, y: 0, z: probeZ }, {
+          filterPredicate: (targetEid) =>
+            !Floor[targetEid] &&
+            !Collider.Sensor[targetEid] &&
+            !hasEntityComponents(activeWorld, targetEid, ["Player"]) &&
+            !isProjectileType(activeWorld, targetEid),
+        });
+        if (wallHit) {
+          const strength = WALL_AVOIDANCE_STRENGTH * (1 - wallHit.toi);
+          desiredX += wallHit.normal1.x * strength;
+          desiredZ += wallHit.normal1.z * strength;
+        }
       }
 
       const currentAngle = Math.atan2(Velocity.x[eid], Velocity.z[eid]);
@@ -380,7 +387,6 @@ function setupGame(
   ownership: OwnershipCallbacks,
 ): { playerEid: number; ownedEids: number[]; onRemoteEntityHit: (eid: number) => void } {
   createFloor(engine.world, FLOOR_POSITION);
-  spawnSampleWalls(engine.world);
   spawnTerrain(engine.world);
 
   const floorEids = queryFloorEids(engine.world);
@@ -1251,51 +1257,107 @@ function createFloorSlab(
   });
 }
 
-// Ramp: rises 4 units over a 15-unit horizontal run, running north (-Z).
-// Center Y is chosen so the south end surface sits at FLOOR_TOP_Y and the
-// north end surface sits at FLOOR_TOP_Y + 4.
-const RAMP_HW = 4;
-const RAMP_HH = 0.5;
-const RAMP_HZ = 7.5; // horizontal half-run = 7.5, total run = 15
-const RAMP_RISE = 4;
-const RAMP_PITCH = Math.atan2(RAMP_RISE, RAMP_HZ * 2);
-// surfaceY = cy + hh/cos(p) ± tan(p)*hz; mean = cy + hh/cos(p) = midpoint of [0, 4] = 2
-const RAMP_CY = FLOOR_TOP_Y + 2 - RAMP_HH / Math.cos(RAMP_PITCH);
+// Yaw values for ramps: determines which direction goes "up" (surface rises that way).
+// Derived from the closed-form surface equation: surfaceY = cy + hy/cos(p) - tan(p)*(sin(yaw)*(px-cx) + cos(yaw)*(pz-cz))
+const RAMP_YAW = { north: 0, south: Math.PI, east: -Math.PI / 2, west: Math.PI / 2 } as const
+
+// Spawn a ramp whose low end sits at FLOOR_TOP_Y and high end at FLOOR_TOP_Y+rise.
+// cx/cz is the horizontal center; run is the total horizontal distance; halfWidthPerp is width.
+function spawnRamp(
+  world: World,
+  cx: number,
+  cz: number,
+  run: number,
+  rise: number,
+  upward: keyof typeof RAMP_YAW,
+  halfWidthPerp: number,
+) {
+  const pitch = Math.atan2(rise, run)
+  const hzLocal = Math.hypot(rise, run) / 2
+  const cy = FLOOR_TOP_Y + rise / 2 - 0.4 / Math.cos(pitch)
+  createFloorSlab(world, { x: cx, y: cy, z: cz }, halfWidthPerp, 0.4, hzLocal,
+    RAMP_BASE_MATERIAL, RAMP_EDGE_MATERIAL, pitch, RAMP_YAW[upward])
+}
+
+// Spawn a flat walkable platform whose top surface is at topY.
+function spawnPlatform(
+  world: World,
+  cx: number,
+  topY: number,
+  cz: number,
+  halfWidth: number,
+  halfDepth: number,
+) {
+  const hh = 0.3
+  createFloorSlab(world, { x: cx, y: topY - hh, z: cz }, halfWidth, hh, halfDepth,
+    STEP_BASE_MATERIAL, STEP_EDGE_MATERIAL)
+}
 
 function spawnTerrain(world: World) {
-  // Ramp — east of the arena, runs from z=10 (ground level) north to z=-5 (4 units up)
-  const RAMP_CX = 30;
-  const RAMP_CZ = 2.5; // midpoint between z=-5 and z=10
-  createFloorSlab(
-    world,
-    { x: RAMP_CX, y: RAMP_CY, z: RAMP_CZ },
-    RAMP_HW, RAMP_HH, RAMP_HZ,
-    RAMP_BASE_MATERIAL, RAMP_EDGE_MATERIAL,
-    RAMP_PITCH,
-  );
+  // ── EAST WING (y=4) ───────────────────────────────────────────────────────
+  // Ramp: low at x=10 (ground), high at x=22 (y=4). run=12, rise=4, going east.
+  spawnRamp(world, 16, 2, 12, 4, 'east', 5)
+  // Large east platform. Extends far enough north to lap under the north bridge.
+  spawnPlatform(world, 31, 4, -6, 9, 22)
+  // Narrow walkway jutting east off the platform → small balcony overlook
+  spawnPlatform(world, 43, 4, 0, 1.5, 3)
+  spawnPlatform(world, 49, 4, 0, 3, 4)
 
-  // Elevated landing platform at the top of the ramp
-  createFloorSlab(
-    world,
-    { x: RAMP_CX, y: FLOOR_TOP_Y + RAMP_RISE - 0.25, z: -10 },
-    RAMP_HW, 0.25, 5,
-    RAMP_BASE_MATERIAL, RAMP_EDGE_MATERIAL,
-  );
-
-  // Steps — west of the arena, each 1 unit above the previous, jumpable in sequence.
-  // Max jump height ≈ v²/2g = 8²/(2*24) ≈ 1.33 units, so 1-unit steps are always reachable.
-  const STEP_X = -28;
-  const STEP_HW = 3;
-  const STEP_RISE = 1.0;
+  // ── WEST WING (y=4) ───────────────────────────────────────────────────────
+  // Staircase going west — 4 steps of 1 unit each (max jump height ≈ 1.33 units).
+  // Each step is a solid block from ground to its top so visually they stack.
   for (let i = 0; i < 4; i++) {
-    const stepTop = FLOOR_TOP_Y + STEP_RISE * (i + 1);
+    const stepTop = FLOOR_TOP_Y + (i + 1)
     createFloorSlab(
       world,
-      { x: STEP_X, y: stepTop - STEP_RISE / 2, z: 8 - i * 5 },
-      STEP_HW, STEP_RISE / 2, 2,
+      { x: -(12 + i * 3), y: stepTop / 2, z: 5 },
+      1.5, stepTop / 2, 2.5,
       STEP_BASE_MATERIAL, STEP_EDGE_MATERIAL,
-    );
+    )
   }
+  // Large west platform. Same footprint as the east platform, mirrored.
+  spawnPlatform(world, -31, 4, -6, 9, 22)
+
+  // ── NORTH BRIDGE (y=4) ────────────────────────────────────────────────────
+  // Wide walkway connecting both wings across the north end.
+  spawnPlatform(world, 0, 4, -26, 22, 5)
+
+  // ── NORTH KEEP (y=4) ──────────────────────────────────────────────────────
+  // Fortified area hanging off the north end of the bridge.
+  spawnPlatform(world, 0, 4, -37, 8, 6)
+  createWall(world, { x: 0, y: 5.5, z: -43 }, 8, 1.5, 0.4)
+
+  // Stairs from keep (y=4) up to upper keep (y=8). Each step 1 unit higher.
+  for (let i = 0; i < 4; i++) {
+    const stepTop = 4 + (i + 1)
+    createFloorSlab(
+      world,
+      { x: 0, y: stepTop - 0.5, z: -(44 + i * 3) },
+      4, 0.5, 1.5,
+      STEP_BASE_MATERIAL, STEP_EDGE_MATERIAL,
+    )
+  }
+
+  // ── UPPER KEEP (y=8) ──────────────────────────────────────────────────────
+  spawnPlatform(world, 0, 8, -58, 5, 4)
+  createWall(world, { x: 0, y: 9.5, z: -62 }, 5, 1.5, 0.4)
+
+  // ── SOUTH TERRACE (y=3) ───────────────────────────────────────────────────
+  // Ramp: low at z=30 (ground), high at z=22 (y=3). run=8, rise=3, going north.
+  spawnRamp(world, 0, 26, 8, 3, 'north', 8)
+  spawnPlatform(world, 0, 3, 17, 12, 5)
+
+  // ── WALLS & PARAPETS ──────────────────────────────────────────────────────
+  // Courtyard cover near spawn
+  createWall(world, { x: -5, y: 1.5, z: -7 }, 0.5, 1.5, 3)
+  createWall(world, { x:  5, y: 1.5, z: -7 }, 0.5, 1.5, 3)
+  // East platform east parapet
+  createWall(world, { x: 40, y: 4.8, z: -6 }, 0.3, 0.8, 22)
+  // West platform west parapet
+  createWall(world, { x: -40, y: 4.8, z: -6 }, 0.3, 0.8, 22)
+  // North bridge north parapets (split at centre to leave an opening)
+  createWall(world, { x: -11, y: 4.8, z: -31 }, 11, 0.8, 0.4)
+  createWall(world, { x:  11, y: 4.8, z: -31 }, 11, 0.8, 0.4)
 }
 
 export { setupGame };
