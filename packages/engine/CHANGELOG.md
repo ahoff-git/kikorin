@@ -1,5 +1,29 @@
 # @kikorin/engine
 
+## 2.0.0
+
+### Major Changes
+
+- pathing
+
+### Patch Changes
+
+- Updated dependencies
+  - @kikorin/ecs@2.0.0
+  - @kikorin/events@2.0.0
+  - @kikorin/system-commands@2.0.0
+  - @kikorin/system-controls@2.0.0
+  - @kikorin/system-entity-cleanup@2.0.0
+  - @kikorin/system-experience@2.0.0
+  - @kikorin/system-flaginator@2.0.0
+  - @kikorin/system-health@2.0.0
+  - @kikorin/system-movement@2.0.0
+  - @kikorin/system-physics@2.0.0
+  - @kikorin/system-rendering@2.0.0
+  - @kikorin/system-time@2.0.0
+  - @kikorin/system-ui-bridge@2.0.0
+  - @kikorin/util@2.0.0
+
 ## 1.0.0
 
 ### Major Changes

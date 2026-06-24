@@ -1,5 +1,17 @@
 # @kikorin/system-ui-bridge
 
+## 2.0.0
+
+### Major Changes
+
+- pathing
+
+### Patch Changes
+
+- Updated dependencies
+  - @kikorin/ecs@2.0.0
+  - @kikorin/events@2.0.0
+
 ## 1.0.0
 
 ### Major Changes
