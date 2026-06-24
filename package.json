@@ -8,9 +8,13 @@
     "test": "turbo test",
     "typecheck": "turbo typecheck",
     "lint": "turbo lint",
-    "test:all": "turbo run test --parallel"
+    "test:all": "turbo run test --parallel",
+    "version": "changeset version",
+    "release": "turbo build --filter=@kikorin/netcode --filter=@kikorin/util && changeset publish",
+    "ship": "changeset && changeset version && turbo build --filter=@kikorin/netcode --filter=@kikorin/util && changeset publish"
   },
   "devDependencies": {
+    "@changesets/cli": "^2",
     "turbo": "^2.5.3",
     "typescript": "^5"
   },

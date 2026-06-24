@@ -1,5 +1,6 @@
 import { hasComponent, query } from "bitecs";
 import type { CoreWorld } from "@kikorin/ecs";
+import { isProjectileType } from "@kikorin/ecs";
 import { log, logLevels } from "@kikorin/util";
 import { castEntityCollider, findHighestFloorTopAtPosition } from "@kikorin/system-physics";
 import { lookCameraAt, readCameraPosition, setCameraPosition } from "@kikorin/system-rendering";
@@ -158,9 +159,8 @@ function clampCameraToWalls(
   const dy = desiredPosition.y - playerPos.y;
   const dz = desiredPosition.z - playerPos.z;
 
-  const { Projectile } = world.components;
   const hit = castEntityCollider(world, playerEid, playerPos, { x: dx, y: dy, z: dz }, {
-    filterPredicate: (targetEid) => !Floor[targetEid] && !Projectile[targetEid] && !hasComponent(world, targetEid, Player),
+    filterPredicate: (targetEid) => !Floor[targetEid] && !isProjectileType(world, targetEid) && !hasComponent(world, targetEid, Player),
   });
 
   if (!hit || hit.toi >= 1) return;

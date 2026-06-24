@@ -31,6 +31,7 @@ export const enum MessageType {
   LeadClaim   = 0x09,
   LeadYield   = 0x0a,
   PeerList    = 0x0b,
+  GameEvent   = 0x0c,
 }
 
 export const enum MessageFlag {

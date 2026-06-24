@@ -1,5 +1,6 @@
 import { hasComponent, query } from "bitecs"
 import type { CoreWorld } from "@kikorin/ecs"
+import { isProjectileType, shouldSimulateLocally } from "@kikorin/ecs"
 import { markFlaginatorComponentChanged } from "@kikorin/system-flaginator"
 import { castEntityCollider, resolveFloorPosition } from "@kikorin/system-physics"
 import {
@@ -13,7 +14,7 @@ const FACE_VELOCITY_MIN_SPEED_SQUARED = 0.0001
 const WALL_SEPARATION_TOI = 0.001
 
 export function movementSystem(world: CoreWorld) {
-    const { Collider, FaceVelocity, Floor, Gravity, Player, Position, Projectile, Rotation, Velocity } = world.components
+    const { Collider, FaceVelocity, Floor, Gravity, Player, Position, Rotation, Velocity } = world.components
     const delta = world.time.delta
     if (delta === 0) return
 
@@ -27,7 +28,7 @@ export function movementSystem(world: CoreWorld) {
     const velZ = Velocity.z
 
     for (const eid of query(world, [Position, Velocity])) {
-        if (hasComponent(world, eid, Projectile)) {
+        if (!shouldSimulateLocally(world, eid)) {
             continue
         }
 
@@ -49,7 +50,7 @@ export function movementSystem(world: CoreWorld) {
         ) {
             const currentPos = { x: posX[eid], y: posY[eid], z: posZ[eid] }
             const hit = castEntityCollider(world, eid, currentPos, { x: dx, y: 0, z: dz }, {
-                filterPredicate: (targetEid) => !Floor[targetEid] && !Collider.Sensor[targetEid] && !hasComponent(world, targetEid, Player),
+                filterPredicate: (targetEid) => !Floor[targetEid] && !Collider.Sensor[targetEid] && !hasComponent(world, targetEid, Player) && !isProjectileType(world, targetEid),
             })
 
             if (hit) {

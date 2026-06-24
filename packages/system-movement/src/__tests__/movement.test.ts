@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { addEntity, addComponent, createWorld } from 'bitecs'
 import { createFlaginator } from '@kikorin/system-flaginator'
+import { NET } from '@kikorin/ecs'
 import type { CoreWorld } from '@kikorin/ecs'
 
 vi.mock('@kikorin/system-physics', async (importOriginal) => {
@@ -26,7 +27,7 @@ function makeTestWorld(): CoreWorld {
       Velocity: { x: new Float32Array(n), y: new Float32Array(n), z: new Float32Array(n) },
       Rotation: { yaw: new Float32Array(n), pitch: new Float32Array(n), roll: new Float32Array(n) },
       FaceVelocity: new Int8Array(n),
-      Projectile: new Int8Array(n),
+      NetFlags: new Int8Array(n),
       Collider: { Active: new Int8Array(n), Sensor: new Int8Array(n), HalfWidth: new Float32Array(n), HalfHeight: new Float32Array(n), HalfDepth: new Float32Array(n) },
       Gravity: { Grounded: new Int8Array(n) },
       Floor: new Int8Array(n),
@@ -99,12 +100,42 @@ describe('movementSystem', () => {
     expect(world.components.Position.x[eid]).toBe(5)
   })
 
-  it('skips entities with the Projectile component', () => {
+  it('skips entities with the PROJECTILE net flag set', () => {
     const eid = addEntity(world)
     addComponent(world, eid, world.components.Position)
     addComponent(world, eid, world.components.Velocity)
-    addComponent(world, eid, world.components.Projectile)
-    world.components.Projectile[eid] = 1
+    world.components.NetFlags[eid] = NET.PROJECTILE
+
+    world.components.Position.x[eid] = 0
+    world.components.Velocity.x[eid] = 100
+    world.time.delta = 1000
+
+    movementSystem(world)
+
+    expect(world.components.Position.x[eid]).toBe(0)
+  })
+
+  it('moves owned projectile-type entities only when OWNED is set without PROJECTILE', () => {
+    // OWNED alone (non-projectile type) should simulate normally
+    const eid = addEntity(world)
+    addComponent(world, eid, world.components.Position)
+    addComponent(world, eid, world.components.Velocity)
+    world.components.NetFlags[eid] = NET.OWNED
+
+    world.components.Position.x[eid] = 0
+    world.components.Velocity.x[eid] = 10
+    world.time.delta = 1000
+
+    movementSystem(world)
+
+    expect(world.components.Position.x[eid]).toBeCloseTo(10)
+  })
+
+  it('skips remote-predicted entities that also carry PROJECTILE flag', () => {
+    const eid = addEntity(world)
+    addComponent(world, eid, world.components.Position)
+    addComponent(world, eid, world.components.Velocity)
+    world.components.NetFlags[eid] = NET.PREDICT | NET.PROJECTILE
 
     world.components.Position.x[eid] = 0
     world.components.Velocity.x[eid] = 100
@@ -328,6 +359,13 @@ describe('movementSystem', () => {
         addComponent(world, sensorEid, world.components.Collider)
         world.components.Collider.Sensor[sensorEid] = 1
         expect(filter(sensorEid)).toBe(false)
+      })
+
+      it('excludes projectile-type entities (NET.PROJECTILE flag) from blocking', () => {
+        const filter = getFilterPredicate()
+        const projEid = addEntity(world)
+        world.components.NetFlags[projEid] = NET.PROJECTILE
+        expect(filter(projEid)).toBe(false)
       })
     })
   })

@@ -10,8 +10,11 @@ import {
   getEntityForward,
   getYawFromXZDirection,
   hasEntityComponents,
+  hasNetFlag,
+  isProjectileType,
   KeyboardControls,
   markFlaginatorComponentChanged,
+  NET,
   PointerControls,
   queryEntities,
   rotateLocalVectorByEntityRotation,
@@ -138,7 +141,14 @@ const AMBIENT_PERSON_COUNT = 30;
 const BOX_MIN_SPEED = 2;
 const BOX_MAX_SPEED = 5;
 const BOX_MAX_STEER_RADIANS_PER_SECOND = 1.5;
+// At max misalignment (180°), speed drops to this fraction and turn rate scales up by (1 + this).
+const BOX_STEER_SPEED_MIN_FRACTION = 0.35;
+const BOX_STEER_TURN_BOOST = 1.5;
+// Monsters repel each other when closer than this distance (monsters are 1 unit wide).
+const MONSTER_SEPARATION_RADIUS = 2.5;
+const MONSTER_SEPARATION_STRENGTH = 2.0;
 const PRIME_SPAWN_POSITION = { x: 0, y: 12, z: 0 };
+const PRIME_PLAYER_NAME = "DoomPrime";
 
 function createPersonFaceMaterials(bodyColor: number, frontColor: number) {
   return [
@@ -164,6 +174,7 @@ type OwnershipCallbacks = {
   addOwnedEntity: (eid: number) => void;
   removeOwnedEntity: (eid: number) => void;
   signalEntityDestroyed: (eid: number) => void;
+  signalHitOnRemoteEntity: (localMirrorEid: number) => void;
 };
 
 type FloorEids = ArrayLike<number>;
@@ -250,9 +261,10 @@ function createProjectileRenderMesh() {
 function registerBoxSteering(
   world: CoreWorld,
   boxEids: number[],
+  baseSpeeds: Map<number, number>,
   primeEid: number,
-) {
-  world.controls.onTick((activeWorld, tick) => {
+): () => void {
+  return world.controls.onTick((activeWorld, tick) => {
     if (tick.deltaSeconds === 0) return;
     if (!hasEntityComponents(activeWorld, primeEid, ["Position"])) return;
 
@@ -269,42 +281,137 @@ function registerBoxSteering(
 
       const dx = targetX - Position.x[eid];
       const dz = targetZ - Position.z[eid];
-      if (Math.hypot(dx, dz) === 0) continue;
+      const distToTarget = Math.hypot(dx, dz);
+      if (distToTarget === 0) continue;
+
+      // Desired direction: unit vector toward player plus repulsion from nearby monsters.
+      let desiredX = dx / distToTarget;
+      let desiredZ = dz / distToTarget;
+      for (const otherId of boxEids) {
+        if (otherId === eid) continue;
+        const odx = Position.x[eid] - Position.x[otherId];
+        const odz = Position.z[eid] - Position.z[otherId];
+        const dist = Math.hypot(odx, odz);
+        if (dist === 0 || dist >= MONSTER_SEPARATION_RADIUS) continue;
+        const strength = MONSTER_SEPARATION_STRENGTH * (1 - dist / MONSTER_SEPARATION_RADIUS);
+        desiredX += (odx / dist) * strength;
+        desiredZ += (odz / dist) * strength;
+      }
 
       const currentAngle = Math.atan2(Velocity.x[eid], Velocity.z[eid]);
-      const targetAngle = Math.atan2(dx, dz);
+      const targetAngle = Math.atan2(desiredX, desiredZ);
       let angleDiff = targetAngle - currentAngle;
       if (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
       else if (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
 
-      const steer = clamp(angleDiff, -maxSteer, maxSteer);
-      if (steer === 0) continue;
+      // Scale turn rate up and speed down proportionally to misalignment angle.
+      // A monster facing away slows to BOX_STEER_SPEED_MIN_FRACTION and turns tighter.
+      // baseSpeed is the monster's intended full speed; targetSpeed recovers toward it as
+      // the monster re-aligns, so slow-down from turning doesn't compound across ticks.
+      const angleFraction = Math.abs(angleDiff) / Math.PI; // 0 = on-target, 1 = fully reversed
+      const boostedMaxSteer = maxSteer * (1 + angleFraction * BOX_STEER_TURN_BOOST);
+      const steer = clamp(angleDiff, -boostedMaxSteer, boostedMaxSteer);
+      const baseSpeed = baseSpeeds.get(eid) ?? currentSpeed;
+      const targetSpeed = baseSpeed * (1 - angleFraction * (1 - BOX_STEER_SPEED_MIN_FRACTION));
+
+      if (steer === 0 && Math.abs(currentSpeed - targetSpeed) < 0.01) continue;
 
       const newAngle = currentAngle + steer;
       setEntityVelocity(activeWorld, eid, {
-        x: Math.sin(newAngle) * currentSpeed,
+        x: Math.sin(newAngle) * targetSpeed,
         y: Velocity.y[eid],
-        z: Math.cos(newAngle) * currentSpeed,
+        z: Math.cos(newAngle) * targetSpeed,
       });
     }
   });
 }
 
+function spawnEdgeMonster(
+  world: World,
+  floorEids: FloorEids,
+  name: string,
+  baseSpeeds: Map<number, number>,
+): number {
+  const EDGE_INSET = 8;
+  const maxX = FLOOR_COLLIDER.halfWidth - EDGE_INSET;
+  const maxZ = FLOOR_COLLIDER.halfDepth - EDGE_INSET;
+
+  // Pick one of four edges: 0=North, 1=South, 2=East, 3=West
+  const side = Math.floor(rng(0, 3.99));
+  const x = side < 2 ? rng(-maxX, maxX) : side === 2 ? maxX : -maxX;
+  const z = side >= 2 ? rng(-maxZ, maxZ) : side === 0 ? -maxZ : maxZ;
+
+  const position = { x, y: FLOOR_TOP_Y + 4, z };
+  const dx = -x;
+  const dz = -z;
+  const len = Math.hypot(dx, dz);
+  const speed = rng(BOX_MIN_SPEED, BOX_MAX_SPEED, 1);
+  const velocity = len > 0
+    ? { x: (dx / len) * speed, y: 0, z: (dz / len) * speed }
+    : { x: 0, y: 0, z: -speed };
+
+  const eid = createPerson(
+    world,
+    position,
+    velocity,
+    { pitch: 0, yaw: getYawFromXZDirection(velocity.x, velocity.z), roll: 0 },
+    true,
+    100,
+    { level: 0, experience: 0, name },
+    floorEids,
+  );
+  baseSpeeds.set(eid, speed);
+  return eid;
+}
+
 function setupGame(
   engine: CoreWorldBox,
   ownership: OwnershipCallbacks,
-): { playerEid: number; ownedEids: number[] } {
+): { playerEid: number; ownedEids: number[]; onRemoteEntityHit: (eid: number) => void } {
   createFloor(engine.world, FLOOR_POSITION);
   spawnSampleWalls(engine.world);
 
   const floorEids = queryFloorEids(engine.world);
-  const prime = createPrimePlayer(engine.world, floorEids);
-  registerPrimeControls(engine.world, prime, ownership);
-  engine.setCameraFollowTarget(prime);
-  const ambientEids = spawnAmbientPeople(engine.world, floorEids);
-  registerBoxSteering(engine.world, ambientEids, prime);
+  let primeEid = createPrimePlayer(engine.world, floorEids);
+  engine.setCameraFollowTarget(primeEid);
 
-  return { playerEid: prime, ownedEids: [prime, ...ambientEids] };
+  const baseSpeeds = new Map<number, number>();
+  const boxEids = spawnAmbientPeople(engine.world, floorEids, baseSpeeds);
+  let nextMonsterIndex = boxEids.length;
+
+  const onMonsterHit = (world: CoreWorld, monsterEid: number) => {
+    const idx = boxEids.indexOf(monsterEid);
+    if (idx !== -1) boxEids.splice(idx, 1);
+    baseSpeeds.delete(monsterEid);
+    ownership.signalEntityDestroyed(monsterEid);
+    destroyEntity(world, monsterEid);
+
+    const newEid = spawnEdgeMonster(world, floorEids, `Doom${nextMonsterIndex++}`, baseSpeeds);
+    boxEids.push(newEid);
+    ownership.addOwnedEntity(newEid);
+  };
+
+  let cleanupPrimeControls = registerPrimeControls(engine.world, primeEid, ownership, onMonsterHit);
+  let cleanupBoxSteering = registerBoxSteering(engine.world, boxEids, baseSpeeds, primeEid);
+
+  engine.world.controls.onTick((activeWorld) => {
+    if (hasEntityComponents(activeWorld, primeEid, ["Player"])) return;
+
+    cleanupPrimeControls();
+    cleanupBoxSteering();
+
+    primeEid = createPrimePlayer(activeWorld, floorEids);
+    engine.setCameraFollowTarget(primeEid);
+    ownership.addOwnedEntity(primeEid);
+    cleanupPrimeControls = registerPrimeControls(activeWorld, primeEid, ownership, onMonsterHit);
+    cleanupBoxSteering = registerBoxSteering(activeWorld, boxEids, baseSpeeds, primeEid);
+  });
+
+  return {
+    playerEid: primeEid,
+    ownedEids: [primeEid, ...boxEids],
+    onRemoteEntityHit: (eid: number) => onMonsterHit(engine.world, eid),
+  };
 }
 
 function queryFloorEids(world: World): FloorEids {
@@ -319,7 +426,7 @@ function createPrimePlayer(world: CoreWorld, floorEids: FloorEids) {
     { pitch: 0, yaw: 0, roll: 0 },
     false,
     100,
-    { level: 0, experience: 0, name: "DoomPrime" },
+    { level: 0, experience: 0, name: PRIME_PLAYER_NAME },
     floorEids,
   );
 }
@@ -327,6 +434,7 @@ function createPrimePlayer(world: CoreWorld, floorEids: FloorEids) {
 function spawnAmbientPeople(
   world: CoreWorld,
   floorEids: FloorEids,
+  baseSpeeds: Map<number, number>,
   count = AMBIENT_PERSON_COUNT,
 ): number[] {
   const spawnRangeX = FLOOR_COLLIDER.halfWidth - 4;
@@ -348,7 +456,7 @@ function spawnAmbientPeople(
       ? { x: (dx / len) * speed, y: 0, z: (dz / len) * speed }
       : { x: 0, y: 0, z: -speed };
 
-    eids.push(createPerson(
+    const eid = createPerson(
       world,
       position,
       velocity,
@@ -365,13 +473,20 @@ function spawnAmbientPeople(
         name: `Doom${i}`,
       },
       floorEids,
-    ));
+    );
+    baseSpeeds.set(eid, speed);
+    eids.push(eid);
   }
 
   return eids;
 }
 
-function registerPrimeControls(world: CoreWorld, eid: number, ownership: OwnershipCallbacks) {
+function registerPrimeControls(
+  world: CoreWorld,
+  eid: number,
+  ownership: OwnershipCallbacks,
+  onMonsterHit: (world: CoreWorld, monsterEid: number) => void,
+): () => void {
   const projectiles: ProjectileRegistry = new Map();
 
   const isControllingPrime = (activeWorld: CoreWorld) => {
@@ -381,7 +496,7 @@ function registerPrimeControls(world: CoreWorld, eid: number, ownership: Ownersh
         "Velocity",
         "Rotation",
         "Gravity",
-      ]) && activeWorld.components.Player[eid]?.name === "DoomPrime"
+      ]) && activeWorld.components.Player[eid]?.name === PRIME_PLAYER_NAME
     );
   };
 
@@ -440,7 +555,9 @@ function registerPrimeControls(world: CoreWorld, eid: number, ownership: Ownersh
         yaw: Rotation.yaw[eid],
         roll: 0,
       },
-      projectile: true,
+      // PROJECTILE marks entity type (bullet mesh on remote, life/death signaling).
+      // addOwnedEntity below adds OWNED|SHARED so state is broadcast to peers.
+      netFlags: NET.PROJECTILE,
       collider: PROJECTILE_COLLIDER,
       renderMesh: createProjectileRenderMesh,
     });
@@ -457,6 +574,10 @@ function registerPrimeControls(world: CoreWorld, eid: number, ownership: Ownersh
     deltaSeconds: number,
   ) => {
     const { Floor, Position, Velocity } = activeWorld.components;
+    // Only monsters (non-prime players) should be hit by projectiles.
+    const isMonsterPlayer = (t: number) =>
+      hasEntityComponents(activeWorld, t, ["Player"]) &&
+      activeWorld.components.Player[t]?.name !== PRIME_PLAYER_NAME;
 
     for (const [projectileEid, projectile] of projectiles) {
       if (
@@ -491,11 +612,11 @@ function registerPrimeControls(world: CoreWorld, eid: number, ownership: Ownersh
         y: Velocity.y[projectileEid],
         z: Velocity.z[projectileEid],
       };
-      const { Projectile } = activeWorld.components;
       const isFreshBounceTarget = (targetEid: number) => {
         return (
+          targetEid !== eid &&
           !Floor[targetEid] &&
-          !Projectile[targetEid] &&
+          !isProjectileType(activeWorld, targetEid) &&
           (projectile.bounceCooldownsByTarget.get(targetEid) ?? 0) === 0
         );
       };
@@ -508,6 +629,28 @@ function registerPrimeControls(world: CoreWorld, eid: number, ownership: Ownersh
         .filter(isFreshBounceTarget);
 
       if (freshOverlapTargets.length > 0) {
+        const hitOwnedMonster = freshOverlapTargets.find(t =>
+          isMonsterPlayer(t) && hasNetFlag(activeWorld, t, NET.OWNED)
+        );
+        if (hitOwnedMonster !== undefined) {
+          onMonsterHit(activeWorld, hitOwnedMonster);
+          ownership.signalEntityDestroyed(projectileEid);
+          destroyEntity(activeWorld, projectileEid);
+          projectiles.delete(projectileEid);
+          continue;
+        }
+
+        const hitRemoteMonster = freshOverlapTargets.find(t =>
+          isMonsterPlayer(t) && !hasNetFlag(activeWorld, t, NET.OWNED)
+        );
+        if (hitRemoteMonster !== undefined) {
+          ownership.signalHitOnRemoteEntity(hitRemoteMonster);
+          ownership.signalEntityDestroyed(projectileEid);
+          destroyEntity(activeWorld, projectileEid);
+          projectiles.delete(projectileEid);
+          continue;
+        }
+
         let bouncedVelocity = currentVelocity;
         let didBounce = false;
 
@@ -564,6 +707,18 @@ function registerPrimeControls(world: CoreWorld, eid: number, ownership: Ownersh
           filterPredicate: isFreshBounceTarget,
         },
       );
+      if (sweptHit && isMonsterPlayer(sweptHit.colliderEid)) {
+        if (hasNetFlag(activeWorld, sweptHit.colliderEid, NET.OWNED)) {
+          onMonsterHit(activeWorld, sweptHit.colliderEid);
+        } else {
+          ownership.signalHitOnRemoteEntity(sweptHit.colliderEid);
+        }
+        ownership.signalEntityDestroyed(projectileEid);
+        destroyEntity(activeWorld, projectileEid);
+        projectiles.delete(projectileEid);
+        continue;
+      }
+
       if (!sweptHit) {
         setEntityPosition(activeWorld, projectileEid, {
           x: currentPosition.x + movementDelta.x,
@@ -618,11 +773,11 @@ function registerPrimeControls(world: CoreWorld, eid: number, ownership: Ownersh
     }
   };
 
-  world.controls.onTick((activeWorld, tick) => {
+  const unsubProjectiles = world.controls.onTick((activeWorld, tick) => {
     updateProjectiles(activeWorld, tick.deltaSeconds);
   });
 
-  world.controls.onTick((activeWorld, tick, controls) => {
+  const unsubMovement = world.controls.onTick((activeWorld, tick, controls) => {
     if (!isControllingPrime(activeWorld)) return;
 
     const dt = tick.deltaSeconds;
@@ -707,7 +862,7 @@ function registerPrimeControls(world: CoreWorld, eid: number, ownership: Ownersh
     setEntityRotation(activeWorld, eid, nextRotation);
   });
 
-  world.controls.on(
+  const unsubJump = world.controls.on(
     {
       source: ControlSources.Keyboard,
       controlId: KeyboardControls.Space,
@@ -718,7 +873,7 @@ function registerPrimeControls(world: CoreWorld, eid: number, ownership: Ownersh
     },
   );
 
-  world.controls.on(
+  const unsubBoost = world.controls.on(
     {
       source: ControlSources.React,
       controlId: PlayerReactControls.BoostForward,
@@ -748,7 +903,7 @@ function registerPrimeControls(world: CoreWorld, eid: number, ownership: Ownersh
     },
   );
 
-  world.controls.on(
+  const unsubFire = world.controls.on(
     {
       source: ControlSources.Pointer,
       controlId: PointerControls.Primary,
@@ -759,6 +914,14 @@ function registerPrimeControls(world: CoreWorld, eid: number, ownership: Ownersh
       fireProjectile(activeWorld);
     },
   );
+
+  return () => {
+    unsubProjectiles();
+    unsubMovement();
+    unsubJump();
+    unsubBoost();
+    unsubFire();
+  };
 }
 
 function clampSpawnPositionToFloor(

@@ -71,7 +71,7 @@ export class ChangeTracker {
         for (let fi = 0; fi < fieldCount; fi++) {
           const field = schema.fields[fi]
           const cur = field.array[eid]
-          if (compSnap[fi] !== cur) {
+          if (!Object.is(compSnap[fi], cur)) {
             compSnap[fi] = cur
             deltas.push({ entityId: eid, componentId: cid, fieldId: fi, value: cur })
           }

@@ -29,7 +29,7 @@ function makeTestWorld(): CoreWorld {
       Velocity: { x: new Float32Array(n), y: new Float32Array(n), z: new Float32Array(n) },
       Rotation: { yaw: new Float32Array(n), pitch: new Float32Array(n), roll: new Float32Array(n) },
       FaceVelocity: new Int8Array(n),
-      Projectile: new Int8Array(n),
+      NetFlags: new Int8Array(n),
       Collider: { Active: new Int8Array(n), Sensor: new Int8Array(n), HalfWidth: new Float32Array(n), HalfHeight: new Float32Array(n), HalfDepth: new Float32Array(n) },
       Gravity: { Grounded: new Int8Array(n) },
       Floor: new Int8Array(n),

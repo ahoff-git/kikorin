@@ -128,7 +128,7 @@ export default function Home() {
   const [playerEid, setPlayerEid] = useState<number | null>(null);
   const [ownedEids, setOwnedEids] = useState<readonly number[]>([]);
   const uiState = useWorldUiState();
-  const { localPeerId, connectedPeers, connect, addOwnedEntity, removeOwnedEntity } = useNetworking(
+  const { localPeerId, connectedPeers, connect, addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity, setHitHandler } = useNetworking(
     engine,
     playerEid,
     ownedEids,
@@ -137,7 +137,8 @@ export default function Home() {
   useEffect(() => {
     if (!engine) return;
 
-    const { playerEid: eid, ownedEids: owned } = setupGame(engine, { addOwnedEntity, removeOwnedEntity });
+    const { playerEid: eid, ownedEids: owned, onRemoteEntityHit } = setupGame(engine, { addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity });
+    setHitHandler(onRemoteEntityHit);
     setPlayerEid(eid);
     setOwnedEids(owned);
 
@@ -166,6 +167,7 @@ export default function Home() {
     );
 
     return () => {
+      setHitHandler(null);
       cameraDragController.disconnect();
       canvas.style.cursor = "default";
       setPlayerEid(null);

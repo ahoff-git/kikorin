@@ -103,6 +103,23 @@ export type {
   SetupCoreWorldOptions,
 } from "@kikorin/ecs";
 export type { CoreFlagCustomSourceName, CoreFlagName } from "@kikorin/ecs";
+export {
+  NET,
+  addNetFlag,
+  getNetFlags,
+  hasNetFlag,
+  isProjectileType,
+  makeOwnedPrivate,
+  makeOwnedShared,
+  makeProjectileType,
+  makeRemoteNetworkOnly,
+  makeRemotePredicted,
+  removeNetFlag,
+  setNetFlags,
+  shouldAcceptNetworkUpdate,
+  shouldSendState,
+  shouldSimulateLocally,
+} from "@kikorin/ecs";
 export type {
   FlaginatorBatchResult,
   FlaginatorDependency,
@@ -264,7 +281,7 @@ function createCoreWorldConfig(maxEntities: number): CoreWorld {
         roll: new Float32Array(maxEntities),
       },
       FaceVelocity: new Int8Array(maxEntities),
-      Projectile: new Int8Array(maxEntities),
+      NetFlags: new Int8Array(maxEntities),
       Collider: {
         Active: new Int8Array(maxEntities),
         Sensor: new Int8Array(maxEntities),

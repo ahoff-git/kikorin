@@ -54,7 +54,8 @@ export type CoreEntityBlueprint = {
     velocity?: Partial<Velocity>,
     rotation?: Partial<Rotation>,
     faceVelocity?: boolean,
-    projectile?: boolean,
+    // NET.* bitmask from netFlags.ts. Defaults to 0 (local-only, no networking).
+    netFlags?: number,
     collider?: CoreColliderConfig,
     render?: boolean,
     renderMesh?: Object3D | (() => Object3D),
@@ -304,7 +305,7 @@ export type CoreWorld = {
         Velocity: Velocities,
         Rotation: Rotations,
         FaceVelocity: Int8Array,
-        Projectile: Int8Array,
+        NetFlags: Int8Array,
         Collider: ColliderShapes,
         Gravity: GravityState,
         Floor: Int8Array,

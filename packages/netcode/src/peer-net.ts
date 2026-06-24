@@ -44,6 +44,7 @@ export class PeerNet {
   private _seq = 0
   private _ack = 0
   private _rttMs = 50
+  private _gameEventHandlers: ((payload: ArrayBuffer, from: PeerId) => void)[] = []
 
   constructor(config: PeerNetConfig) {
     this.localPeerId = config.peerId
@@ -117,6 +118,28 @@ export class PeerNet {
     this._pool.disconnect(peerId)
     for (const group of this._groups.values()) {
       group.removePeer(peerId)
+    }
+  }
+
+  onPeerDisconnect(handler: (peerId: PeerId) => void): () => void {
+    return this._pool.onDisconnect(handler)
+  }
+
+  sendGameEvent(peerId: PeerId, payload: ArrayBuffer): void {
+    this._send(peerId, {
+      type: MessageType.GameEvent,
+      flags: MessageFlag.None,
+      seq: this._nextSeq(),
+      ack: this._ack,
+      payload,
+    })
+  }
+
+  onGameEvent(handler: (payload: ArrayBuffer, from: PeerId) => void): () => void {
+    this._gameEventHandlers.push(handler)
+    return () => {
+      const idx = this._gameEventHandlers.indexOf(handler)
+      if (idx !== -1) this._gameEventHandlers.splice(idx, 1)
     }
   }
 
@@ -251,6 +274,10 @@ export class PeerNet {
         for (const group of this._groups.values()) {
           if (group.peerIds.has(from)) group.handleMessage(msg, from)
         }
+        break
+      }
+      case MessageType.GameEvent: {
+        for (const h of this._gameEventHandlers) h(msg.payload, from)
         break
       }
       case MessageType.Ping: {

@@ -1,52 +1,38 @@
-# kikorin
+# Kikorin
 
-A small ECS + Three.js sandbox with a friendlier default API.
+Game engine monorepo. The `apps/web` Next.js app is a throwaway testbed. The publishable packages are `@kikorin/netcode` (Hydra) and `@kikorin/util`.
 
-## Quick start
+## New machine setup
 
-The easiest way to boot a world now is with named options:
+1. Install **Node 22** — repo has `.nvmrc`, so `nvm use` / `fnm use` / `mise install` picks up the right version automatically
+2. Run `corepack enable` — activates pnpm at the pinned version
+3. Clone the repo
+4. Run `pnpm install`
 
-```ts
-import { setupCoreWorld, spawnEntity } from "@/packages/core/core";
+## Daily dev
 
-const worldBox = setupCoreWorld({
-  canvas,
-  autoStart: true,
-  maxEntities: 100000,
-});
-
-const player = spawnEntity(worldBox.world, {
-  position: { x: 0, y: 8, z: 0 },
-  velocity: { x: 0, y: 0, z: 0 },
-  gravity: true,
-  collider: {
-    halfWidth: 0.5,
-    halfHeight: 0.5,
-    halfDepth: 0.5,
-  },
-  renderMesh: createPlayerMesh,
-  health: 100,
-  player: {
-    name: "Pilot",
-    level: 1,
-    experience: 0,
-  },
-});
-
-worldBox.setCameraFollowTarget(player);
+```sh
+pnpm dev        # run the web app
+pnpm test       # run all tests
+pnpm build      # build all packages
+pnpm typecheck  # check types
 ```
 
-## Ergonomic helpers
+## Publish a release
 
-- `setupCoreWorld({ canvas, autoStart, maxEntities, worldTickRate })`
-- `spawnEntity(world, blueprint)` or `worldBox.spawnEntity(blueprint)`
-- `queryEntities(world, ["Floor", "Position", "Rotation", "Collider"])`
-- `hasEntityComponents(world, eid, ["Player", "Velocity"])`
-- `setEntityPosition`, `setEntityVelocity`, `setEntityRotation`
+```sh
+pnpm ship
+```
 
-## What changed in this usability pass
+Walks through an interactive prompt (which packages changed, patch / minor / major, one-line summary), then bumps versions, builds, and publishes to npm automatically. Requires a logged-in npm session — run `npm login` once if you get a 401.
 
-- World setup supports a named-options path instead of only positional args.
-- Each world now owns its own scheduler, so start/stop/dispose is less surprising.
-- Common entity setup no longer requires direct `bitecs` calls or manual render/collider wiring.
-- The demo world uses the higher-level engine API, so the example matches the easiest path.
+## Vercel deployment
+
+**One-time setup in the Vercel dashboard:** set the project's **Root Directory** to `apps/web`. After that, every push to `main` deploys automatically. `apps/web/vercel.json` handles the build and install commands.
+
+## Publishing a new package
+
+1. Add `tsup` to the package's `devDependencies` and `"build": "tsup"` to its scripts — copy `tsup.config.ts` from `packages/netcode/`
+2. Add `"files": ["dist"]` and a `publishConfig` block pointing exports to `dist/` — copy the pattern from `packages/netcode/package.json`
+3. Remove `"private": true` from the package's `package.json`
+4. Add `--filter=@kikorin/<pkg-name>` to the `ship` and `release` scripts in the root `package.json`

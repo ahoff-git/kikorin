@@ -2,6 +2,7 @@
 
 import { PeerNet, type ComponentSchema, type PeerJSPeer } from "@kikorin/netcode";
 import type { CoreWorldBox } from "@kikorin/engine";
+import { NET } from "@kikorin/engine";
 import { log, logLevels } from "@kikorin/util";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -17,8 +18,10 @@ import {
 const GROUP_ID = "world";
 const POSITION_COMPONENT_ID = 0;
 const ROTATION_COMPONENT_ID = 1;
-// Projectile flag lets remote peers distinguish bullets from people at spawn time.
-const PROJECTILE_COMPONENT_ID = 2;
+// NetFlags carries the entity type (NET.PROJECTILE) so remote peers can
+// choose the right mesh at spawn time. It also doubles as the life/death signal:
+// setting it to 0 tells peers to despawn the mirror entity.
+const NET_FLAGS_COMPONENT_ID = 2;
 
 // Person-sized collider for remote NPCs/players so they participate in local collision.
 const REMOTE_PERSON_COLLIDER = { halfWidth: 0.5, halfHeight: 0.5, halfDepth: 0.5 };
@@ -50,6 +53,8 @@ export interface UseNetworkingReturn {
   addOwnedEntity: (eid: number) => void;
   removeOwnedEntity: (eid: number) => void;
   signalEntityDestroyed: (eid: number) => void;
+  signalHitOnRemoteEntity: (localMirrorEid: number) => void;
+  setHitHandler: (handler: ((eid: number) => void) | null) => void;
 }
 
 export function useNetworking(
@@ -62,32 +67,59 @@ export function useNetworking(
   const netRef = useRef<PeerNet | null>(null);
   // peerId → Map<remoteEid, localEid>
   const remoteEntitiesRef = useRef(new Map<string, Map<number, number>>());
+  // localEid → { peerId, remoteEid } — reverse lookup so the shooter can route
+  // hit notifications to the entity's owner peer.
+  const mirrorOwnerRef = useRef(new Map<number, { peerId: string; remoteEid: number }>());
   // Mutable set of entity IDs this peer owns. Initialized from ownedEids inside
   // the setup effect (where playerEid and ownedEids land in the same React batch),
   // then managed dynamically by addOwnedEntity / removeOwnedEntity for projectiles.
   const ownedEntitySetRef = useRef(new Set<number>());
-  // Direct reference to the Projectile component array, set in the setup effect.
-  // Needed by signalEntityDestroyed, which runs outside the effect closure.
-  const projectileComponentRef = useRef<{ [index: number]: number } | null>(null);
+  // Direct reference to the NetFlags array so ownership callbacks can set flags
+  // without closing over stale world refs.
+  const netFlagsRef = useRef<Int8Array | null>(null);
+  // Called by the owner peer when a remote hit notification arrives.
+  const hitHandlerRef = useRef<((eid: number) => void) | null>(null);
+
+  const setHitHandler = useCallback((handler: ((eid: number) => void) | null) => {
+    hitHandlerRef.current = handler;
+  }, []);
+
+  const signalHitOnRemoteEntity = useCallback((localMirrorEid: number) => {
+    const net = netRef.current;
+    if (!net) return;
+    const owner = mirrorOwnerRef.current.get(localMirrorEid);
+    if (!owner) return;
+    const payload = new ArrayBuffer(4);
+    new DataView(payload).setUint32(0, owner.remoteEid, true);
+    net.sendGameEvent(owner.peerId, payload);
+  }, []);
 
   const addOwnedEntity = useCallback((eid: number) => {
     ownedEntitySetRef.current.add(eid);
+    const flags = netFlagsRef.current;
+    if (flags) flags[eid] |= NET.OWNED | NET.SHARED;
   }, []);
 
   const removeOwnedEntity = useCallback((eid: number) => {
     ownedEntitySetRef.current.delete(eid);
+    const flags = netFlagsRef.current;
+    if (flags) flags[eid] &= ~(NET.OWNED | NET.SHARED);
   }, []);
 
-  // Called by game code before destroying an owned bullet. Sets Projectile = 0,
-  // flushes that final delta so peers know to despawn the mirror entity, then
-  // removes the entity from the owned set. Must be called BEFORE destroyEntity.
+  // Called by game code before destroying an owned entity. Clears all NetFlags
+  // (which also clears PROJECTILE, signaling peers to despawn the mirror), flushes
+  // that final delta, then removes the entity from the owned set. Must be called
+  // BEFORE destroyEntity so the flush can still read the entity's position.
   const signalEntityDestroyed = useCallback((eid: number) => {
-    const arr = projectileComponentRef.current;
-    if (arr) arr[eid] = 0;
+    const flags = netFlagsRef.current;
+    if (flags) flags[eid] = 0;
     const net = netRef.current;
     if (net) {
       net.markEntitiesDirty([eid]);
       net.flushGroupDeltas(GROUP_ID, [eid]);
+      // Clear the snapshot so if this eid is recycled to a new entity, the next
+      // flush sends all fields rather than a diff against the old entity's values.
+      net.invalidateEntity(eid);
     }
     ownedEntitySetRef.current.delete(eid);
   }, []);
@@ -102,10 +134,18 @@ export function useNetworking(
     // Capture as non-null locals for use inside closures
     const eng = engine;
     const world = eng.world;
-    projectileComponentRef.current = world.components.Projectile as { [index: number]: number };
+    netFlagsRef.current = world.components.NetFlags;
+
+    // Mark all initially-owned entities as owned+shared so shouldSendState works.
+    const netFlagsArr = world.components.NetFlags;
+    for (const eid of ownedEids) {
+      netFlagsArr[eid] |= NET.OWNED | NET.SHARED;
+    }
+
     let net: PeerNet | null = null;
     let cancelled = false;
     let unsubTick: (() => void) | undefined;
+    let unsubGameEvents: (() => void) | undefined;
 
     const posSchema: ComponentSchema = {
       id: POSITION_COMPONENT_ID,
@@ -126,14 +166,13 @@ export function useNetworking(
       ],
     };
 
-    // Tracks the Projectile flag so remote peers can distinguish bullets from
-    // people when spawning mirror entities. Included in full syncs and the
-    // first delta batch for any projectile (its value only changes 0→1 once).
-    const projectileSchema: ComponentSchema = {
-      id: PROJECTILE_COMPONENT_ID,
-      name: "Projectile",
+    // Transmit the full NetFlags byte so remote peers can determine entity type
+    // (NET.PROJECTILE bit) for spawning and detect destruction (value → 0).
+    const netFlagsSchema: ComponentSchema = {
+      id: NET_FLAGS_COMPONENT_ID,
+      name: "NetFlags",
       fields: [
-        { id: 0, name: "flag", array: world.components.Projectile },
+        { id: 0, name: "flags", array: world.components.NetFlags },
       ],
     };
 
@@ -153,8 +192,26 @@ export function useNetworking(
         net.attachPeer(peer as unknown as PeerJSPeer);
         net.registerComponent(posSchema);
         net.registerComponent(rotSchema);
-        net.registerComponent(projectileSchema);
+        net.registerComponent(netFlagsSchema);
         net.createGroup({ id: GROUP_ID, tickRateMs: 50 });
+
+        net.onPeerDisconnect((peerId: string) => {
+          const peerMap = remoteEntitiesRef.current.get(peerId);
+          if (peerMap) {
+            for (const localEid of peerMap.values()) {
+              eng.destroyEntity(localEid);
+              mirrorOwnerRef.current.delete(localEid);
+            }
+            remoteEntitiesRef.current.delete(peerId);
+          }
+          setConnectedPeers((prev) => prev.filter((id) => id !== peerId));
+        });
+
+        unsubGameEvents = net.onGameEvent((payload, _fromPeer) => {
+          if (payload.byteLength < 4) return;
+          const remoteEid = new DataView(payload).getUint32(0, true);
+          hitHandlerRef.current?.(remoteEid);
+        });
 
         net.onGroupDelta(GROUP_ID, (deltas, _gid, fromPeer) => {
           const isNewPeer = !remoteEntitiesRef.current.has(fromPeer);
@@ -167,12 +224,12 @@ export function useNetworking(
           }
 
           // First pass: identify new projectiles (for spawning) and destroyed
-          // entities (Projectile = 0 on a known entity = despawn signal).
+          // entities (NetFlags = 0 on a known entity = despawn signal).
           const projectileRemoteEids = new Set<number>();
           const destroyedRemoteEids = new Set<number>();
           for (const d of deltas) {
-            if (d.componentId === PROJECTILE_COMPONENT_ID) {
-              if (d.value === 1) {
+            if (d.componentId === NET_FLAGS_COMPONENT_ID) {
+              if ((d.value & NET.PROJECTILE) !== 0) {
                 projectileRemoteEids.add(d.entityId);
               } else if (d.value === 0 && peerEntities.has(d.entityId)) {
                 destroyedRemoteEids.add(d.entityId);
@@ -186,6 +243,7 @@ export function useNetworking(
             if (localEid !== undefined) {
               eng.destroyEntity(localEid);
               peerEntities.delete(remoteEid);
+              mirrorOwnerRef.current.delete(localEid);
             }
           }
 
@@ -199,9 +257,9 @@ export function useNetworking(
           >();
 
           for (const d of deltas) {
-            // Skip all deltas belonging to despawned or unknown-destroy entities.
+            // Skip all deltas belonging to despawned entities.
             if (destroyedRemoteEids.has(d.entityId)) continue;
-            if (d.componentId === PROJECTILE_COMPONENT_ID && d.value === 0) continue;
+            if (d.componentId === NET_FLAGS_COMPONENT_ID && d.value === 0) continue;
             const localEid = getOrSpawnRemote(
               fromPeer,
               d.entityId,
@@ -230,12 +288,41 @@ export function useNetworking(
         // Owned entities run movement locally; remote peers skip movement for
         // entities they receive (they have no Velocity component) and only use
         // the incoming positions. Collision runs on all peers independently.
+        //
+        // fallCleanupSystem (which destroys entities that fall off the world)
+        // runs AFTER controlsSystem in the engine loop, so entities it destroys
+        // never get signalEntityDestroyed called. We detect them here — if an
+        // owned eid no longer has Position it was silently destroyed — and send
+        // NetFlags=0 so peers can despawn their mirrors.
         unsubTick = world.controls.onTick(() => {
           if (!net) return;
-          const ids = [...ownedEntitySetRef.current];
-          if (ids.length === 0) return;
-          net.markEntitiesDirty(ids);
-          net.flushGroupDeltas(GROUP_ID, ids);
+          const ownedIds = ownedEntitySetRef.current;
+          if (ownedIds.size === 0) return;
+
+          const toFlush: number[] = [];
+          const silentlyDestroyed: number[] = [];
+          for (const eid of ownedIds) {
+            if (eng.hasEntityComponents(eid, ["Position"])) {
+              toFlush.push(eid);
+            } else {
+              silentlyDestroyed.push(eid);
+            }
+          }
+
+          if (silentlyDestroyed.length > 0) {
+            const flags = netFlagsRef.current;
+            for (const eid of silentlyDestroyed) {
+              if (flags) flags[eid] = 0;
+              ownedIds.delete(eid);
+            }
+            net.markEntitiesDirty(silentlyDestroyed);
+            net.flushGroupDeltas(GROUP_ID, silentlyDestroyed);
+            for (const eid of silentlyDestroyed) net.invalidateEntity(eid);
+          }
+
+          if (toFlush.length === 0) return;
+          net.markEntitiesDirty(toFlush);
+          net.flushGroupDeltas(GROUP_ID, toFlush);
         });
 
         netRef.current = net;
@@ -257,7 +344,7 @@ export function useNetworking(
     }
 
     // Spawns a local mirror entity for an entity owned by a remote peer.
-    // Projectiles get the correct bullet mesh; all others get person mesh with
+    // Projectile-type entities get the bullet mesh; all others get person mesh with
     // a collider so they participate in local collision detection.
     // Neither type gets Velocity or Gravity, so the movement system skips them —
     // positions come entirely from network updates.
@@ -275,15 +362,24 @@ export function useNetworking(
             position: { x: 0, y: 0, z: 0 },
             rotation: { pitch: 0, yaw: 0, roll: 0 },
             renderMesh: createRemoteProjectileMesh,
+            // NET.PREDICT could be set here to enable local bullet prediction.
+            // Left as 0 (network-only) since remote bullet state is authoritative.
+            netFlags: NET.PROJECTILE,
           })
         : eng.spawnEntity({
             position: { x: 0, y: 0, z: 0 },
             rotation: { pitch: 0, yaw: 0, roll: 0 },
             collider: REMOTE_PERSON_COLLIDER,
             renderMesh: createRemotePersonMesh,
+            // No OWNED — positions come from network. Add NET.PREDICT to also run
+            // local movement prediction while accepting network corrections.
+            netFlags: 0,
+            // Person component so camera/movement filters treat this like a local person.
+            player: { level: 0, experience: 0, name: '' },
           });
 
       peerEntities.set(remoteEid, localEid);
+      mirrorOwnerRef.current.set(localEid, { peerId, remoteEid });
       setConnectedPeers((prev) =>
         prev.includes(peerId) ? prev : [...prev, peerId],
       );
@@ -293,12 +389,14 @@ export function useNetworking(
     return () => {
       cancelled = true;
       unsubTick?.();
+      unsubGameEvents?.();
       net?.dispose();
       for (const peerMap of remoteEntitiesRef.current.values()) {
         for (const eid of peerMap.values()) eng.destroyEntity(eid);
       }
       remoteEntitiesRef.current.clear();
-      projectileComponentRef.current = null;
+      mirrorOwnerRef.current.clear();
+      netFlagsRef.current = null;
       netRef.current = null;
       setLocalPeerId(null);
       setConnectedPeers([]);
@@ -319,5 +417,5 @@ export function useNetworking(
     });
   }
 
-  return { localPeerId, connectedPeers, connect, addOwnedEntity, removeOwnedEntity, signalEntityDestroyed };
+  return { localPeerId, connectedPeers, connect, addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity, setHitHandler };
 }
