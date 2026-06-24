@@ -42,6 +42,7 @@ import {
   SphereGeometry,
 } from "three";
 import { PlayerReactControls } from "./kikorinControls";
+import { eventBus } from "@kikorin/events";
 
 const PERSON_COLLIDER = {
   halfWidth: 0.5,
@@ -100,11 +101,21 @@ const FLOOR_POSITION = {
 };
 const WALL_BASE_MATERIAL = new MeshBasicMaterial({ color: 0xb0a090 });
 const WALL_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x5a4a3a });
+const RAMP_BASE_MATERIAL = new MeshBasicMaterial({ color: 0x6a7f55 });
+const RAMP_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x3a4f35 });
+const STEP_BASE_MATERIAL = new MeshBasicMaterial({ color: 0x8a9a7a });
+const STEP_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x4a5a3a });
 const PLAYER_ACCELERATION = 30;
 const PLAYER_MAX_SPEED = 18;
 const PLAYER_DRAG_PER_SECOND = 4;
 const PLAYER_JUMP_SPEED = 8;
 const PLAYER_FORWARD_BOOST = 10;
+const PLAYER_SPRINT_ACCELERATION_MULTIPLIER = 1.8;
+const PLAYER_SPRINT_MAX_SPEED_MULTIPLIER = 1.6;
+const PLAYER_SPRINT_STAMINA_MAX = 1.0;
+const PLAYER_SPRINT_DRAIN_PER_SECOND = 0.35;
+const PLAYER_SPRINT_REGEN_PER_SECOND = 0.2;
+const PLAYER_SPRINT_KEYS = [KeyboardControls.ShiftLeft];
 const PLAYER_FORWARD_KEYS = [
   KeyboardControls.KeyW,
   KeyboardControls.ArrowUp,
@@ -370,6 +381,7 @@ function setupGame(
 ): { playerEid: number; ownedEids: number[]; onRemoteEntityHit: (eid: number) => void } {
   createFloor(engine.world, FLOOR_POSITION);
   spawnSampleWalls(engine.world);
+  spawnTerrain(engine.world);
 
   const floorEids = queryFloorEids(engine.world);
   let primeEid = createPrimePlayer(engine.world, floorEids);
@@ -777,11 +789,39 @@ function registerPrimeControls(
     updateProjectiles(activeWorld, tick.deltaSeconds);
   });
 
+  let sprintStamina = PLAYER_SPRINT_STAMINA_MAX;
+  let lastEmittedSprintStamina = sprintStamina;
+
   const unsubMovement = world.controls.onTick((activeWorld, tick, controls) => {
     if (!isControllingPrime(activeWorld)) return;
 
     const dt = tick.deltaSeconds;
     if (dt === 0) return;
+
+    const isSprinting =
+      controls.isActive(KeyboardControls.ShiftLeft, ControlSources.Keyboard) &&
+      sprintStamina > 0;
+
+    if (isSprinting) {
+      sprintStamina = Math.max(0, sprintStamina - PLAYER_SPRINT_DRAIN_PER_SECOND * dt);
+    } else {
+      sprintStamina = Math.min(
+        PLAYER_SPRINT_STAMINA_MAX,
+        sprintStamina + PLAYER_SPRINT_REGEN_PER_SECOND * dt,
+      );
+    }
+
+    if (Math.abs(sprintStamina - lastEmittedSprintStamina) > 0.005) {
+      eventBus.emit("ui:sprintStaminaUpdate", { stamina: sprintStamina });
+      lastEmittedSprintStamina = sprintStamina;
+    }
+
+    const sprintAccel = isSprinting
+      ? PLAYER_ACCELERATION * PLAYER_SPRINT_ACCELERATION_MULTIPLIER
+      : PLAYER_ACCELERATION;
+    const sprintMaxSpeed = isSprinting
+      ? PLAYER_MAX_SPEED * PLAYER_SPRINT_MAX_SPEED_MULTIPLIER
+      : PLAYER_MAX_SPEED;
 
     const drag = Math.max(0, 1 - PLAYER_DRAG_PER_SECOND * dt);
     const { Velocity, Rotation } = activeWorld.components;
@@ -797,14 +837,14 @@ function registerPrimeControls(
           PLAYER_STRAFE_LEFT_KEYS,
           PLAYER_STRAFE_RIGHT_KEYS,
           ControlSources.Keyboard,
-        ) * PLAYER_ACCELERATION,
+        ) * sprintAccel,
       y: 0,
       z:
         controls.getAxis(
           PLAYER_FORWARD_KEYS,
           PLAYER_BACKWARD_KEYS,
           ControlSources.Keyboard,
-        ) * PLAYER_ACCELERATION,
+        ) * sprintAccel,
     };
     const pitchAxis = controls.getAxis(
       PLAYER_PITCH_DOWN_KEYS,
@@ -824,8 +864,8 @@ function registerPrimeControls(
 
     Velocity.x[eid] = clamp(
       Velocity.x[eid] + worldAcceleration.x * dt,
-      -PLAYER_MAX_SPEED,
-      PLAYER_MAX_SPEED,
+      -sprintMaxSpeed,
+      sprintMaxSpeed,
     );
     Velocity.y[eid] = clamp(
       Velocity.y[eid] + worldAcceleration.y * dt,
@@ -834,8 +874,8 @@ function registerPrimeControls(
     );
     Velocity.z[eid] = clamp(
       Velocity.z[eid] + worldAcceleration.z * dt,
-      -PLAYER_MAX_SPEED,
-      PLAYER_MAX_SPEED,
+      -sprintMaxSpeed,
+      sprintMaxSpeed,
     );
 
     if (
@@ -1180,6 +1220,82 @@ function createFloor(world: World, position: Position) {
     collider: FLOOR_COLLIDER,
     renderMesh: createFloorRenderMesh,
   });
+}
+
+function createFloorSlab(
+  world: World,
+  position: Position,
+  halfWidth: number,
+  halfHeight: number,
+  halfDepth: number,
+  baseMaterial: MeshBasicMaterial,
+  edgeMaterial: LineBasicMaterial,
+  pitch = 0,
+  yaw = 0,
+) {
+  const geometry = new BoxGeometry(halfWidth * 2, halfHeight * 2, halfDepth * 2);
+  const edgeGeometry = new EdgesGeometry(geometry);
+  return spawnEntity(world, {
+    position,
+    rotation: { pitch, yaw, roll: 0 },
+    floor: true,
+    collider: { halfWidth, halfHeight, halfDepth },
+    renderMesh: () => {
+      const mesh = new Mesh(geometry, baseMaterial);
+      const outline = new LineSegments(edgeGeometry, edgeMaterial);
+      outline.renderOrder = 1;
+      outline.scale.setScalar(1.0005);
+      mesh.add(outline);
+      return mesh;
+    },
+  });
+}
+
+// Ramp: rises 4 units over a 15-unit horizontal run, running north (-Z).
+// Center Y is chosen so the south end surface sits at FLOOR_TOP_Y and the
+// north end surface sits at FLOOR_TOP_Y + 4.
+const RAMP_HW = 4;
+const RAMP_HH = 0.5;
+const RAMP_HZ = 7.5; // horizontal half-run = 7.5, total run = 15
+const RAMP_RISE = 4;
+const RAMP_PITCH = Math.atan2(RAMP_RISE, RAMP_HZ * 2);
+// surfaceY = cy + hh/cos(p) ± tan(p)*hz; mean = cy + hh/cos(p) = midpoint of [0, 4] = 2
+const RAMP_CY = FLOOR_TOP_Y + 2 - RAMP_HH / Math.cos(RAMP_PITCH);
+
+function spawnTerrain(world: World) {
+  // Ramp — east of the arena, runs from z=10 (ground level) north to z=-5 (4 units up)
+  const RAMP_CX = 30;
+  const RAMP_CZ = 2.5; // midpoint between z=-5 and z=10
+  createFloorSlab(
+    world,
+    { x: RAMP_CX, y: RAMP_CY, z: RAMP_CZ },
+    RAMP_HW, RAMP_HH, RAMP_HZ,
+    RAMP_BASE_MATERIAL, RAMP_EDGE_MATERIAL,
+    RAMP_PITCH,
+  );
+
+  // Elevated landing platform at the top of the ramp
+  createFloorSlab(
+    world,
+    { x: RAMP_CX, y: FLOOR_TOP_Y + RAMP_RISE - 0.25, z: -10 },
+    RAMP_HW, 0.25, 5,
+    RAMP_BASE_MATERIAL, RAMP_EDGE_MATERIAL,
+  );
+
+  // Steps — west of the arena, each 1 unit above the previous, jumpable in sequence.
+  // Max jump height ≈ v²/2g = 8²/(2*24) ≈ 1.33 units, so 1-unit steps are always reachable.
+  const STEP_X = -28;
+  const STEP_HW = 3;
+  const STEP_RISE = 1.0;
+  for (let i = 0; i < 4; i++) {
+    const stepTop = FLOOR_TOP_Y + STEP_RISE * (i + 1);
+    createFloorSlab(
+      world,
+      { x: STEP_X, y: stepTop - STEP_RISE / 2, z: 8 - i * 5 },
+      STEP_HW, STEP_RISE / 2, 2,
+      STEP_BASE_MATERIAL, STEP_EDGE_MATERIAL,
+    );
+  }
 }
 
 export { setupGame };

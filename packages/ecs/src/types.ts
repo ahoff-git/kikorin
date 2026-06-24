@@ -207,6 +207,7 @@ export const KeyboardControls = {
     Space: "Space",
     Enter: "Enter",
     Escape: "Escape",
+    ShiftLeft: "ShiftLeft",
 } as const
 
 export type ControlSourceId = typeof ControlSources[keyof typeof ControlSources]

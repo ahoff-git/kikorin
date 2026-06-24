@@ -7,6 +7,7 @@ export type EventBusEvents = {
   "ui:healthChange": { health: CoreWorld["components"]["Health"][number] };
   "ui:timeMetricsUpdate": { timeMetrics: CoreWorld["time"] };
   "ui:controlsUpdate": { controlStates: ControlState[] };
+  "ui:sprintStaminaUpdate": { stamina: number };
 };
 
 export const eventBus = mitt<EventBusEvents>();

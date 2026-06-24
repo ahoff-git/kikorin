@@ -18,6 +18,7 @@ import {
 import { setupGame } from "./kikorin";
 import { useNetworking } from "./useNetworking";
 import { PlayerReactControls } from "./kikorinControls";
+import { Box } from "@mui/material";
 import { PageLayout } from "./kikorinLayout";
 
 const CAMERA_DRAG_SENSITIVITY = 0.006;
@@ -116,6 +117,7 @@ type WorldUiState = {
   playerPosition: Position | null;
   timeMetrics: Time | null;
   controlStates: ControlState[];
+  sprintStamina: number;
 };
 
 type CameraDragController = {
@@ -199,7 +201,7 @@ export default function Home() {
           onConnect={connect}
         />
       }
-      footer={<Footer />}
+      footer={<Footer sprintStamina={uiState.sprintStamina} />}
     >
       <CanvasViewport canvasRef={canvasRef} />
     </PageLayout>
@@ -211,6 +213,7 @@ const INITIAL_UI_STATE: WorldUiState = {
   playerPosition: null,
   timeMetrics: null,
   controlStates: [],
+  sprintStamina: 1,
 };
 
 function useWorldUiState(): WorldUiState {
@@ -227,6 +230,9 @@ function useWorldUiState(): WorldUiState {
   );
   useKikorinEvent("ui:controlsUpdate", ({ controlStates }) =>
     setState(s => ({ ...s, controlStates })),
+  );
+  useKikorinEvent("ui:sprintStaminaUpdate", ({ stamina }) =>
+    setState(s => ({ ...s, sprintStamina: stamina })),
   );
 
   return state;
@@ -598,9 +604,58 @@ function useFps(): number {
   return fps;
 }
 
-function Footer() {
+const FOOTER_COLUMN_TEMPLATE = {
+  xs: "1fr",
+  md: "clamp(200px, 20%, 300px) minmax(0, 1fr) clamp(200px, 20%, 300px)",
+};
+
+const sprintBarTrackStyle: CSSProperties = {
+  height: 6,
+  background: "#1a1a1a",
+  borderRadius: 3,
+  overflow: "hidden",
+};
+
+function Footer({ sprintStamina }: { sprintStamina: number }) {
   const fps = useFps();
-  return <>{fps} FPS</>;
+  return (
+    <Box
+      sx={{
+        display: "grid",
+        gridTemplateColumns: FOOTER_COLUMN_TEMPLATE,
+        columnGap: 2,
+        px: 0,
+        py: "6px",
+      }}
+    >
+      <Box
+        sx={{
+          display: { xs: "none", md: "flex" },
+          alignItems: "center",
+          justifyContent: "flex-end",
+          fontSize: 11,
+          color: "#555",
+          pr: 1,
+        }}
+      >
+        {fps} FPS
+      </Box>
+      <Box sx={{ display: "flex", flexDirection: "column", gap: "4px", justifyContent: "center" }}>
+        <div style={sprintBarTrackStyle}>
+          <div
+            style={{
+              height: "100%",
+              width: `${sprintStamina * 100}%`,
+              background: sprintStamina > 0.3 ? "#4ade80" : "#f97316",
+              borderRadius: 3,
+              transition: "width 0.05s linear, background 0.2s",
+            }}
+          />
+        </div>
+      </Box>
+      <Box sx={{ display: { xs: "none", md: "block" } }} />
+    </Box>
+  );
 }
 
 function formatPosition(position: Position | null) {

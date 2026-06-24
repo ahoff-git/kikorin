@@ -1,7 +1,7 @@
 import { query } from "bitecs"
 import type { CoreWorld } from "@kikorin/ecs"
 import { markFlaginatorComponentChanged } from "@kikorin/system-flaginator"
-import { fillWorldHalfExtents } from "./colliderUtils"
+import { computeFloorSurfaceY, fillWorldHalfExtents } from "./colliderUtils"
 
 const WORLD_GRAVITY = 24
 const MAX_FALL_SPEED = 48
@@ -35,7 +35,7 @@ export function findHighestFloorTopAtPosition(
             continue
         }
 
-        const floorTop = Position.y[floorEid] + floorHalfExtents.y
+        const floorTop = computeFloorSurfaceY(world, floorEid, desiredX, desiredZ)
         if (floorTop > maxFloorTop) continue
 
         if (floorTop > bestFloorTop) {
@@ -81,7 +81,7 @@ function findSupportingFloorY(
             continue
         }
 
-        const floorTop = Position.y[floorEid] + floorHalfExtents.y
+        const floorTop = computeFloorSurfaceY(world, floorEid, desiredX, desiredZ)
         if (currentBottom < floorTop - FLOOR_RECOVERY_DISTANCE) continue
         if (desiredBottom > floorTop + snapDistance) continue
 
