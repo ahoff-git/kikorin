@@ -1,5 +1,29 @@
 # @kikorin/engine
 
+## 3.0.0
+
+### Major Changes
+
+- pathfinding and camera work plus an xp overhaul
+
+### Patch Changes
+
+- Updated dependencies
+  - @kikorin/ecs@3.0.0
+  - @kikorin/events@3.0.0
+  - @kikorin/system-commands@3.0.0
+  - @kikorin/system-controls@3.0.0
+  - @kikorin/system-entity-cleanup@3.0.0
+  - @kikorin/system-experience@3.0.0
+  - @kikorin/system-flaginator@3.0.0
+  - @kikorin/system-health@3.0.0
+  - @kikorin/system-movement@3.0.0
+  - @kikorin/system-physics@3.0.0
+  - @kikorin/system-rendering@3.0.0
+  - @kikorin/system-time@3.0.0
+  - @kikorin/system-ui-bridge@3.0.0
+  - @kikorin/util@3.0.0
+
 ## 2.0.0
 
 ### Major Changes

@@ -1,5 +1,18 @@
 # @kikorin/system-health
 
+## 3.0.0
+
+### Major Changes
+
+- pathfinding and camera work plus an xp overhaul
+
+### Patch Changes
+
+- Updated dependencies
+  - @kikorin/ecs@3.0.0
+  - @kikorin/system-entity-cleanup@3.0.0
+  - @kikorin/system-flaginator@3.0.0
+
 ## 2.0.0
 
 ### Major Changes
