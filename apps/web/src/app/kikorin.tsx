@@ -32,6 +32,7 @@ import {
   type Velocity,
 } from "@kikorin/engine";
 import { castRayFromTo, findHighestFloorTopAtPosition } from "@kikorin/system-physics";
+import { awardXP } from "@kikorin/system-experience";
 import { NavMesh, findPath, type Waypoint } from "@kikorin/system-pathfinding";
 import { clamp, rng } from "@kikorin/util";
 import {
@@ -168,29 +169,26 @@ const WALL_AVOIDANCE_LOOKAHEAD = 4.0;
 const WALL_AVOIDANCE_STRENGTH = 4.0;
 // Path-following: advance to next waypoint once within this horizontal distance.
 const MONSTER_WAYPOINT_REACH = 1.8;
-// Seconds between A* replans per monster.
-const MONSTER_REPLAN_INTERVAL = 0.5;
+
 // Upward velocity applied to step up a staircase.
 const MONSTER_JUMP_SPEED = 9.0;
 // Horizontal proximity to a jump waypoint at which the impulse fires.
 const MONSTER_JUMP_TRIGGER_DIST = 2.5;
 // Seconds before a monster can jump again (avoids repeated impulses in mid-air).
 const MONSTER_JUMP_COOLDOWN = 0.9;
-// Per-monster goal offset radius (world units) for sub-optimal path variety.
-const MONSTER_GOAL_JITTER_RADIUS = 8;
-// How long a monster keeps the same path bias before picking a new one (seconds).
-const MONSTER_GOAL_JITTER_INTERVAL_MIN = 2.0;
-const MONSTER_GOAL_JITTER_INTERVAL_MAX = 5.0;
-// Distance range over which the goal bias fades out — full variety far away, none up close.
-const MONSTER_GOAL_BIAS_FADE_START = 22;
-const MONSTER_GOAL_BIAS_FADE_END = 8;
-// Stuck detection: how often to sample position, minimum movement to be "not stuck",
-// and how long stuck samples must accumulate before triggering an escape.
+// How close to a jump-waypoint's floor Y the monster must be before that waypoint counts
+// as cleared. Mirrors navmesh.ts JUMP_HEIGHT_THRESHOLD — same value that marks an edge as
+// needing a jump is used to confirm the monster has actually climbed it.
+const MONSTER_JUMP_HEIGHT_TOLERANCE = 0.5;
+// Probability that a monster picks a detour route instead of the optimal one.
+const MONSTER_DETOUR_CHANCE = 0.4;
+// How far the player must move from the last planned goal before a monster replans.
+// Keeping this high prevents constant micro-corrections that cause wiggling.
+const MONSTER_REPLAN_PLAYER_MOVE = 5;
+// Stuck detection: sample interval, movement threshold, and escape threshold.
 const MONSTER_STUCK_SAMPLE_INTERVAL = 0.8;
 const MONSTER_STUCK_MOVE_THRESHOLD = 0.5;
 const MONSTER_STUCK_ESCAPE_AFTER = 1.6;
-// Goal offset magnitude applied when breaking out of a stuck state.
-const MONSTER_STUCK_ESCAPE_RADIUS = 14;
 const PRIME_SPAWN_POSITION = { x: 0, y: 12, z: 0 };
 const PRIME_PLAYER_NAME = "DoomPrime";
 
@@ -225,12 +223,10 @@ type FloorEids = ArrayLike<number>;
 type MonsterPathState = {
   path: Waypoint[] | null;
   waypointIndex: number;
-  timeSinceReplan: number;
+  lastGoalX: number;
+  lastGoalZ: number;
   jumpCooldown: number;
-  goalBiasX: number;
-  goalBiasZ: number;
-  timeSinceJitter: number;
-  jitterInterval: number;
+  routeSeed: number;
   stuckTimer: number;
   lastSampleX: number;
   lastSampleZ: number;
@@ -307,18 +303,14 @@ function createProjectileRenderMesh() {
   return mesh;
 }
 
-function createMonsterPathState(timeSinceReplan = 0): MonsterPathState {
-  const angle = rng(0, Math.PI * 2);
-  const dist = rng(3, MONSTER_GOAL_JITTER_RADIUS);
+function createMonsterPathState(): MonsterPathState {
   return {
     path: null,
     waypointIndex: 0,
-    timeSinceReplan,
+    lastGoalX: Infinity,
+    lastGoalZ: Infinity,
     jumpCooldown: 0,
-    goalBiasX: Math.cos(angle) * dist,
-    goalBiasZ: Math.sin(angle) * dist,
-    timeSinceJitter: rng(0, MONSTER_GOAL_JITTER_INTERVAL_MAX),
-    jitterInterval: rng(MONSTER_GOAL_JITTER_INTERVAL_MIN, MONSTER_GOAL_JITTER_INTERVAL_MAX),
+    routeSeed: 0,
     stuckTimer: 0,
     lastSampleX: Infinity,
     lastSampleZ: Infinity,
@@ -366,22 +358,9 @@ function registerBoxSteering(
       const pathState = pathStates.get(eid);
       if (pathState !== undefined && navmesh.inBounds(monsterX, monsterZ)) {
         pathState.jumpCooldown = Math.max(0, pathState.jumpCooldown - tick.deltaSeconds);
-        pathState.timeSinceReplan += tick.deltaSeconds;
 
-        // Rotate path bias on schedule so each monster takes a different sub-optimal route.
-        pathState.timeSinceJitter += tick.deltaSeconds;
-        if (pathState.timeSinceJitter >= pathState.jitterInterval) {
-          const angle = rng(0, Math.PI * 2);
-          const dist = rng(3, MONSTER_GOAL_JITTER_RADIUS);
-          pathState.goalBiasX = Math.cos(angle) * dist;
-          pathState.goalBiasZ = Math.sin(angle) * dist;
-          pathState.timeSinceJitter = 0;
-          pathState.jitterInterval = rng(MONSTER_GOAL_JITTER_INTERVAL_MIN, MONSTER_GOAL_JITTER_INTERVAL_MAX);
-          pathState.timeSinceReplan = MONSTER_REPLAN_INTERVAL;
-        }
-
-        // Stuck detection: sample position periodically; if stuck for long enough, pick a
-        // random escape direction and force an immediate replan via a large goal bias.
+        // Stuck detection: if the monster barely moves over several samples, force a fresh
+        // path using the direct (optimal) route to break free.
         pathState.stuckSampleTimer += tick.deltaSeconds;
         if (pathState.stuckSampleTimer >= MONSTER_STUCK_SAMPLE_INTERVAL) {
           pathState.stuckSampleTimer = 0;
@@ -389,11 +368,11 @@ function registerBoxSteering(
           if (displacement < MONSTER_STUCK_MOVE_THRESHOLD) {
             pathState.stuckTimer += MONSTER_STUCK_SAMPLE_INTERVAL;
             if (pathState.stuckTimer >= MONSTER_STUCK_ESCAPE_AFTER) {
-              const escapeAngle = rng(0, Math.PI * 2);
-              pathState.goalBiasX = Math.cos(escapeAngle) * MONSTER_STUCK_ESCAPE_RADIUS;
-              pathState.goalBiasZ = Math.sin(escapeAngle) * MONSTER_STUCK_ESCAPE_RADIUS;
+              pathState.routeSeed = 0;
+              pathState.path = null;
+              pathState.lastGoalX = Infinity;
+              pathState.lastGoalZ = Infinity;
               pathState.stuckTimer = 0;
-              pathState.timeSinceReplan = MONSTER_REPLAN_INTERVAL;
             }
           } else {
             pathState.stuckTimer = 0;
@@ -402,29 +381,38 @@ function registerBoxSteering(
           pathState.lastSampleZ = monsterZ;
         }
 
-        if (pathState.path === null || pathState.timeSinceReplan >= MONSTER_REPLAN_INTERVAL) {
-          const monsterFloorY = Position.y[eid] - PERSON_COLLIDER.halfHeight;
-          const biasScale = clamp(
-            (distToTarget - MONSTER_GOAL_BIAS_FADE_END) / (MONSTER_GOAL_BIAS_FADE_START - MONSTER_GOAL_BIAS_FADE_END),
-            0, 1,
-          );
-          pathState.path = findPath(navmesh, monsterX, monsterZ, goalX + pathState.goalBiasX * biasScale, goalZ + pathState.goalBiasZ * biasScale, monsterFloorY);
+        const monsterFloorY = Position.y[eid] - PERSON_COLLIDER.halfHeight;
+        const playerMoved = Math.hypot(goalX - pathState.lastGoalX, goalZ - pathState.lastGoalZ) > MONSTER_REPLAN_PLAYER_MOVE;
+
+        if (playerMoved) {
+          // Only roll for a detour when picking a fresh path, not on intermediate
+          // player-tracking replans, so the monster commits to its chosen route.
+          if (pathState.path === null) {
+            pathState.routeSeed = rng(0, 1) < MONSTER_DETOUR_CHANCE ? rng(0.5, 20) : 0;
+          }
+          pathState.path = findPath(navmesh, monsterX, monsterZ, goalX, goalZ, monsterFloorY, pathState.routeSeed);
           pathState.waypointIndex = 0;
-          pathState.timeSinceReplan = 0;
+          pathState.lastGoalX = goalX;
+          pathState.lastGoalZ = goalZ;
         }
 
         const path = pathState.path;
         if (path !== null && path.length > 0 && pathState.waypointIndex < path.length) {
-          // Advance past waypoints already reached.
+          // Advance past waypoints already reached. Don't skip a jump waypoint until the
+          // monster has climbed to that height — a replan from nearby can otherwise skip
+          // the jump in the same tick, leaving the monster targeting an unreachable level.
           while (pathState.waypointIndex < path.length) {
             const wp = path[pathState.waypointIndex]!;
             if (Math.hypot(wp.x - monsterX, wp.z - monsterZ) >= MONSTER_WAYPOINT_REACH) break;
+            if (wp.requiresJump && monsterFloorY < wp.y - MONSTER_JUMP_HEIGHT_TOLERANCE) break;
             pathState.waypointIndex++;
           }
 
-          // Path exhausted — force replan on next tick.
+          // Path exhausted — null it and reset the goal so the next replan picks a fresh route.
           if (pathState.waypointIndex >= path.length) {
-            pathState.timeSinceReplan = MONSTER_REPLAN_INTERVAL;
+            pathState.path = null;
+            pathState.lastGoalX = Infinity;
+            pathState.lastGoalZ = Infinity;
           }
 
           if (pathState.waypointIndex < path.length) {
@@ -562,7 +550,7 @@ function spawnEdgeMonster(
 function setupGame(
   engine: CoreWorldBox,
   ownership: OwnershipCallbacks,
-): { playerEid: number; ownedEids: number[]; onRemoteEntityHit: (eid: number) => void } {
+): { playerEid: number; ownedEids: number[]; onRemoteEntityHit: (eid: number) => void; spawnMonsters: (count: number) => void } {
   createFloor(engine.world, FLOOR_POSITION);
   spawnTerrain(engine.world);
 
@@ -576,9 +564,8 @@ function setupGame(
   const baseSpeeds = new Map<number, number>();
   const pathStates = new Map<number, MonsterPathState>();
   const boxEids = spawnAmbientPeople(engine.world, floorEids, baseSpeeds);
-  // Stagger initial replans so 30 monsters don't all run A* on the same tick.
-  for (let i = 0; i < boxEids.length; i++) {
-    pathStates.set(boxEids[i]!, createMonsterPathState(i * (MONSTER_REPLAN_INTERVAL / boxEids.length)));
+  for (const eid of boxEids) {
+    pathStates.set(eid, createMonsterPathState());
   }
   let nextMonsterIndex = boxEids.length;
 
@@ -589,6 +576,7 @@ function setupGame(
     pathStates.delete(monsterEid);
     ownership.signalEntityDestroyed(monsterEid);
     destroyEntity(world, monsterEid);
+    awardXP(world, primeEid, 5);
 
     const newEid = spawnEdgeMonster(world, floorEids, `Doom${nextMonsterIndex++}`, baseSpeeds);
     boxEids.push(newEid);
@@ -624,11 +612,8 @@ function setupGame(
         ? {
             waypointIndex: pathState.waypointIndex,
             totalWaypoints: pathState.path?.length ?? 0,
-            timeSinceReplan: pathState.timeSinceReplan,
+            routeSeed: pathState.routeSeed,
             jumpCooldown: pathState.jumpCooldown,
-            goalBias: { x: pathState.goalBiasX, z: pathState.goalBiasZ },
-            timeSinceJitter: pathState.timeSinceJitter,
-            jitterInterval: pathState.jitterInterval,
             stuckTimer: pathState.stuckTimer,
             stuckSampleTimer: pathState.stuckSampleTimer,
             path: pathState.path,
@@ -653,10 +638,20 @@ function setupGame(
     cleanupBoxSteering = registerBoxSteering(activeWorld, boxEids, baseSpeeds, primeEid, navmesh, pathStates);
   });
 
+  const spawnMonsters = (count: number) => {
+    for (let i = 0; i < count; i++) {
+      const newEid = spawnEdgeMonster(engine.world, floorEids, `Doom${nextMonsterIndex++}`, baseSpeeds);
+      boxEids.push(newEid);
+      pathStates.set(newEid, createMonsterPathState());
+      ownership.addOwnedEntity(newEid);
+    }
+  };
+
   return {
     playerEid: primeEid,
     ownedEids: [primeEid, ...boxEids],
     onRemoteEntityHit: (eid: number) => onMonsterHit(engine.world, eid),
+    spawnMonsters,
   };
 }
 

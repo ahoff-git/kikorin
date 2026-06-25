@@ -73,12 +73,20 @@ class MinHeap {
 
 // ── A* ──────────────────────────────────────────────────────────────────────
 
-function heuristic(navmesh: NavMesh, a: number, b: number): number {
+// Max heuristic inflation when a non-zero routeSeed is used.
+// Routes found with a seed are within (1 + DETOUR_EPSILON) of optimal.
+const DETOUR_EPSILON = 0.4
+
+function heuristic(navmesh: NavMesh, a: number, b: number, routeSeed: number): number {
   const na = navmesh.nodes[a]!
   const nb = navmesh.nodes[b]!
   const dx = na.x - nb.x
   const dz = na.z - nb.z
-  return Math.sqrt(dx * dx + dz * dz)
+  const base = Math.sqrt(dx * dx + dz * dz)
+  if (routeSeed === 0) return base
+  // Per-node deterministic noise driven by routeSeed — different seeds make A* favour
+  // different branches, producing routes within DETOUR_EPSILON of optimal.
+  return base * (1 + Math.abs(Math.sin(a * routeSeed)) * DETOUR_EPSILON)
 }
 
 /**
@@ -100,6 +108,7 @@ export function findPath(
   goalX: number,
   goalZ: number,
   startY?: number,
+  routeSeed = 0,
 ): Waypoint[] | null {
   const startIdx = startY !== undefined
     ? (navmesh.nearestWalkableAtHeight(startX, startZ, startY) ?? navmesh.nearestWalkable(startX, startZ))
@@ -117,7 +126,7 @@ export function findPath(
 
   const heap = new MinHeap(512)
   gCost[startIdx] = 0
-  heap.push(heuristic(navmesh, startIdx, goalIdx), startIdx)
+  heap.push(heuristic(navmesh, startIdx, goalIdx, routeSeed), startIdx)
 
   while (heap.length > 0) {
     const current = heap.popVal()
@@ -135,7 +144,7 @@ export function findPath(
         gCost[toIndex] = g
         parent[toIndex] = current
         edgeFlags[toIndex] = (requiresJump ? 1 : 0) | (isLedgeDrop ? 2 : 0)
-        heap.push(g + heuristic(navmesh, toIndex, goalIdx), toIndex)
+        heap.push(g + heuristic(navmesh, toIndex, goalIdx, routeSeed), toIndex)
       }
     }
   }

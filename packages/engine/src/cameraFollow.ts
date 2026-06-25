@@ -22,6 +22,12 @@ const CAMERA_WALL_SEPARATION = 0.3;
 // Speed (world-units per second) at which the camera zooms back out after a wall clears.
 // The camera always snaps in instantly; it only springs back slowly.
 const CAMERA_RESTORE_SPEED = 6.0;
+// When a wall blocks the desired camera position, pitch the camera upward in these
+// increments to find a clear line of sight before falling back to distance reduction.
+const PITCH_ADJUST_STEP = Math.PI / 24; // ~7.5 degrees per step
+const MAX_PITCH_STEPS = 6;              // up to ~45 degrees of upward pitch adjustment
+// Speed (radians per second) at which an adjusted pitch springs back to the desired pitch.
+const PITCH_RESTORE_SPEED = 2.0;
 // How high above the entity's position the camera looks, in world units.
 // Keeps the player character framed above their feet rather than staring at the ground.
 const LOOK_AT_HEIGHT_OFFSET = 0.75;
@@ -43,6 +49,9 @@ const cameraState: {
   // Current rendered camera distance. Snaps in when a wall blocks the view;
   // springs back toward followDistance at CAMERA_RESTORE_SPEED when the path clears.
   actualCameraDistance: number;
+  // Current rendered pitch. Snaps up when a wall blocks the view and pitch adjustment
+  // finds a clear angle; springs back toward followPitch at PITCH_RESTORE_SPEED.
+  actualFollowPitch: number;
   followYaw: number;
   followPitch: number;
   lastTargetYaw: number;
@@ -54,6 +63,7 @@ const cameraState: {
   followOffset: { ...DEFAULT_FOLLOW_OFFSET },
   followDistance: 1,
   actualCameraDistance: DEFAULT_FOLLOW_DISTANCE,
+  actualFollowPitch: DEFAULT_FOLLOW_PITCH,
   followYaw: 0,
   followPitch: 0,
   lastTargetYaw: Number.NaN,
@@ -135,13 +145,21 @@ function clampCameraHeightToFloor(
   world: CoreWorld,
   desiredPosition: Vec3,
   currentCameraPosition: Vec3,
+  entityY: number,
 ): boolean {
   const { Collider, Floor, Position, Rotation } = world.components;
   const floorEids = query(world, [Floor, Position, Rotation, Collider]);
   if (floorEids.length === 0) return false;
 
-  // Ignore floors above the current camera height so the camera does not jump to ceilings.
-  const maxFloorTop = Math.max(currentCameraPosition.y, desiredPosition.y) + CAMERA_GROUND_CLEARANCE;
+  // Ignore floors above the entity — those are overhead walkways or ceilings.
+  // When the camera comes from above (currentCameraPosition.y > desiredPosition.y),
+  // the original ceiling would be pulled into the query window, pushing the camera
+  // back on top of the walkway. Cap at entityY + LOOK_AT_HEIGHT_OFFSET so only
+  // surfaces at or below the entity's head level can clamp the camera.
+  const maxFloorTop = Math.min(
+    Math.max(currentCameraPosition.y, desiredPosition.y) + CAMERA_GROUND_CLEARANCE,
+    entityY + LOOK_AT_HEIGHT_OFFSET,
+  );
   const floorTop = findHighestFloorTopAtPosition(
     world,
     floorEids,
@@ -181,6 +199,7 @@ export function setCameraFollowTarget(
   assignVec3(cameraState.followOffset, opts.offset);
   syncFollowOrbitFromOffset();
   cameraState.actualCameraDistance = cameraState.followDistance;
+  cameraState.actualFollowPitch = cameraState.followPitch;
   logCameraDebug("set follow target", {
     targetEid: cameraState.targetEid,
     followOffset: {
@@ -234,6 +253,7 @@ export function resetCameraFollowOrbitBehindTarget() {
   cameraState.followPitch = DEFAULT_FOLLOW_PITCH;
   cameraState.followDistance = DEFAULT_FOLLOW_DISTANCE;
   cameraState.actualCameraDistance = DEFAULT_FOLLOW_DISTANCE;
+  cameraState.actualFollowPitch = DEFAULT_FOLLOW_PITCH;
   syncFollowOffsetFromOrbit();
 }
 
@@ -318,11 +338,13 @@ export function cameraFollowSystem(world: CoreWorld) {
       cameraState.lastTargetYaw = Number.NaN;
     }
 
-    const { Floor, Player } = world.components;
-    const { followOffset, followDistance } = cameraState;
+    const { Player } = world.components;
+    const { followOffset, followDistance, followYaw, followPitch } = cameraState;
 
     // Cast from the look-at point (player body centre) so walls that clip between
     // the camera and the player's head are detected, not just their feet.
+    // Floors are NOT excluded here: walls share the Floor component (floor:true static
+    // geometry), so excluding Floor would make walls invisible to the ray cast.
     const lookAtOrigin = { x: tx, y: ty + LOOK_AT_HEIGHT_OFFSET, z: tz };
     const desiredCameraFull = {
       x: tx + followOffset.x,
@@ -330,40 +352,73 @@ export function cameraFollowSystem(world: CoreWorld) {
       z: tz + followOffset.z,
     };
 
-    const wallHit = castRayFromTo(world, lookAtOrigin, desiredCameraFull, {
-      filterPredicate: (targetEid) =>
-        !Floor[targetEid] &&
-        !isProjectileType(world, targetEid) &&
-        !hasComponent(world, targetEid, Player),
-    });
+    const occlusionFilter = {
+      filterPredicate: (occluderEid: number) =>
+        !isProjectileType(world, occluderEid) &&
+        !hasComponent(world, occluderEid, Player),
+    };
 
-    // toi is normalized to [0,1] over the look-at-to-camera ray.  Convert to a
-    // maximum scale factor for followOffset, backing off by CAMERA_WALL_SEPARATION.
-    const occlusionRayLen = Math.hypot(
-      followOffset.x,
-      followOffset.y - LOOK_AT_HEIGHT_OFFSET,
-      followOffset.z,
-    );
-    const maxT = wallHit && wallHit.toi < 1
-      ? Math.max(0, wallHit.toi - CAMERA_WALL_SEPARATION / occlusionRayLen)
-      : 1;
-    const maxDistance = maxT * followDistance;
+    const wallHit = castRayFromTo(world, lookAtOrigin, desiredCameraFull, occlusionFilter);
+    const targetBlocked = wallHit !== null && wallHit.toi < 1;
 
-    // Snap in immediately when blocked; spring back smoothly when the path clears.
-    if (cameraState.actualCameraDistance > maxDistance) {
-      cameraState.actualCameraDistance = maxDistance;
-    } else {
+    if (!targetBlocked) {
+      // Desired position is clear — spring actual values back toward desired.
+      if (cameraState.actualFollowPitch > followPitch) {
+        cameraState.actualFollowPitch = Math.max(
+          followPitch,
+          cameraState.actualFollowPitch - PITCH_RESTORE_SPEED * world.time.delta,
+        );
+      } else if (cameraState.actualFollowPitch < followPitch) {
+        cameraState.actualFollowPitch = Math.min(
+          followPitch,
+          cameraState.actualFollowPitch + PITCH_RESTORE_SPEED * world.time.delta,
+        );
+      }
       cameraState.actualCameraDistance = Math.min(
         followDistance,
         cameraState.actualCameraDistance + CAMERA_RESTORE_SPEED * world.time.delta,
       );
+    } else {
+      // Desired position is blocked — try pitching up to find a clear line of sight.
+      let clearedByPitch = false;
+      for (let step = 1; step <= MAX_PITCH_STEPS; step++) {
+        const testPitch = followPitch + PITCH_ADJUST_STEP * step;
+        if (testPitch >= MAX_FOLLOW_PITCH) break;
+        const testHoriz = Math.cos(testPitch) * followDistance;
+        const testHit = castRayFromTo(world, lookAtOrigin, {
+          x: tx + Math.sin(followYaw) * testHoriz,
+          y: ty + Math.sin(testPitch) * followDistance,
+          z: tz + Math.cos(followYaw) * testHoriz,
+        }, occlusionFilter);
+        if (!testHit || testHit.toi >= 1) {
+          cameraState.actualFollowPitch = testPitch;
+          cameraState.actualCameraDistance = followDistance;
+          clearedByPitch = true;
+          break;
+        }
+      }
+
+      if (!clearedByPitch) {
+        // Pitch adjustment exhausted — fall back to reducing distance at user's intended pitch.
+        cameraState.actualFollowPitch = followPitch;
+        const occlusionRayLen = Math.hypot(
+          followOffset.x,
+          followOffset.y - LOOK_AT_HEIGHT_OFFSET,
+          followOffset.z,
+        );
+        const maxT = Math.max(0, wallHit.toi - CAMERA_WALL_SEPARATION / occlusionRayLen);
+        const maxDistance = maxT * followDistance;
+        if (cameraState.actualCameraDistance > maxDistance) {
+          cameraState.actualCameraDistance = maxDistance;
+        }
+      }
     }
 
-    // Scale the follow offset proportionally to the current camera distance.
-    const t = followDistance > 0 ? cameraState.actualCameraDistance / followDistance : 0;
-    desiredCameraX = tx + followOffset.x * t;
-    desiredCameraY = ty + followOffset.y * t;
-    desiredCameraZ = tz + followOffset.z * t;
+    // Compute final camera position from actual pitch and distance.
+    const finalHoriz = Math.cos(cameraState.actualFollowPitch) * cameraState.actualCameraDistance;
+    desiredCameraX = tx + Math.sin(followYaw) * finalHoriz;
+    desiredCameraY = ty + Math.sin(cameraState.actualFollowPitch) * cameraState.actualCameraDistance;
+    desiredCameraZ = tz + Math.cos(followYaw) * finalHoriz;
   } else {
     const p = cameraState.stationaryPosition;
     desiredCameraX = p.x;
@@ -384,6 +439,7 @@ export function cameraFollowSystem(world: CoreWorld) {
     world,
     desiredCameraPosition,
     currentCameraPosition,
+    ty,
   );
   desiredCameraX = desiredCameraPosition.x;
   desiredCameraY = desiredCameraPosition.y;
@@ -435,6 +491,7 @@ export function cameraFollowSystem(world: CoreWorld) {
               actualDistance: cameraState.actualCameraDistance,
               yaw: cameraState.followYaw,
               pitch: cameraState.followPitch,
+              actualPitch: cameraState.actualFollowPitch,
               orbitControlActive: cameraState.orbitControlActive,
             }
           : null,

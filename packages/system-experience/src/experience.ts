@@ -1,16 +1,16 @@
-import { query } from "bitecs"
 import type { CoreWorld } from "@kikorin/ecs"
 import { markFlaginatorComponentChanged } from "@kikorin/system-flaginator"
 
-export function experienceSystem(world: CoreWorld) {
-    const { Player } = world.components
-
-    for (const eid of query(world, [Player])) {
-        Player[eid].experience += world.time.delta / 1000
-        if (Player[eid].experience >= 100) {
-            Player[eid].level++
-            Player[eid].experience = 0
-        }
-        markFlaginatorComponentChanged(world, "Player", eid)
+export function awardXP(world: CoreWorld, eid: number, amount: number) {
+    const player = world.components.Player[eid]
+    if (!player) return
+    player.experience += amount
+    if (player.experience >= 100) {
+        player.level++
+        player.experience = 0
     }
+    markFlaginatorComponentChanged(world, "Player", eid)
 }
+
+// Kept for engine system registration; passive XP is no longer awarded.
+export function experienceSystem(_world: CoreWorld) {}

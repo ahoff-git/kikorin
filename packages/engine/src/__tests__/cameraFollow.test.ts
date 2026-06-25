@@ -172,12 +172,12 @@ describe('cameraFollowSystem', () => {
       expect(filter(wallEid)).toBe(true)
     })
 
-    it('excludes Floor entities from occluding the camera', () => {
+    it('allows Floor entities to occlude the camera (walls share the Floor component)', () => {
       const filter = getCameraFilterPredicate()
       const floorEid = addEntity(world)
       addComponent(world, floorEid, world.components.Floor)
       world.components.Floor[floorEid] = 1
-      expect(filter(floorEid)).toBe(false)
+      expect(filter(floorEid)).toBe(true)
     })
 
     it('excludes Person entities (those with Player component) from occluding the camera', () => {

@@ -159,6 +159,7 @@ export default function Home() {
   const [playerEid, setPlayerEid] = useState<number | null>(null);
   const [ownedEids, setOwnedEids] = useState<readonly number[]>([]);
   const uiState = useWorldUiState();
+  const spawnMonstersRef = useRef<((count: number) => void) | null>(null);
   const { localPeerId, connectedPeers, chatMessages, connect, sendChatMessage, addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity, setHitHandler } = useNetworking(
     engine,
     playerEid,
@@ -168,7 +169,8 @@ export default function Home() {
   useEffect(() => {
     if (!engine) return;
 
-    const { playerEid: eid, ownedEids: owned, onRemoteEntityHit } = setupGame(engine, { addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity });
+    const { playerEid: eid, ownedEids: owned, onRemoteEntityHit, spawnMonsters } = setupGame(engine, { addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity });
+    spawnMonstersRef.current = spawnMonsters;
     setHitHandler(onRemoteEntityHit);
     setPlayerEid(eid);
     setOwnedEids(owned);
@@ -193,6 +195,7 @@ export default function Home() {
     );
 
     return () => {
+      spawnMonstersRef.current = null;
       setHitHandler(null);
       cameraDragController.disconnect();
       canvas.style.cursor = "default";
@@ -200,6 +203,10 @@ export default function Home() {
       setOwnedEids([]);
     };
   }, [engine]);
+
+  function handleSpawnMonsters() {
+    spawnMonstersRef.current?.(10);
+  }
 
   function handleBoostForward(event: ReactMouseEvent<HTMLButtonElement>) {
     engine?.world.controls.enqueue({
@@ -215,7 +222,7 @@ export default function Home() {
 
   return (
     <PageLayout
-      header={<Header onBoostForward={handleBoostForward} />}
+      header={<Header onBoostForward={handleBoostForward} onSpawnMonsters={handleSpawnMonsters} />}
       left={<LeftNav />}
       right={
         <RightPanel
@@ -491,14 +498,19 @@ function CanvasViewport({
 
 function Header({
   onBoostForward,
+  onSpawnMonsters,
 }: {
   onBoostForward: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onSpawnMonsters: () => void;
 }) {
   return (
     <div style={headerStyle}>
       <span>{CONTROL_INSTRUCTIONS}</span>
       <button type="button" onMouseDown={(e) => e.preventDefault()} onClick={onBoostForward}>
         React Boost Forward
+      </button>
+      <button type="button" onClick={onSpawnMonsters}>
+        Spawn 10 Monsters
       </button>
     </div>
   );

@@ -159,7 +159,9 @@ export class NavMesh {
           const node = this.nodes[idx]!
           if (!node.walkable) continue
           if (Math.abs(node.y - targetY) > heightTol) continue
-          const distSq = dc * dc + dr * dr
+          const wdx = node.x - worldX
+          const wdz = node.z - worldZ
+          const distSq = wdx * wdx + wdz * wdz
           if (distSq < bestDistSq) {
             bestDistSq = distSq
             bestIdx = idx

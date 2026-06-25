@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { addEntity, addComponent, createWorld } from 'bitecs'
 import { createFlaginator } from '@kikorin/system-flaginator'
-import { experienceSystem } from '../experience'
+import { awardXP } from '../experience'
 import type { CoreWorld } from '@kikorin/ecs'
 
 const MAX_ENTITIES = 100
@@ -44,7 +44,7 @@ function makeTestWorld(): CoreWorld {
   return createWorld(config) as unknown as CoreWorld
 }
 
-describe('experienceSystem', () => {
+describe('awardXP', () => {
   let world: CoreWorld
 
   beforeEach(() => {
@@ -58,52 +58,33 @@ describe('experienceSystem', () => {
     return eid
   }
 
-  it('accumulates experience proportional to time.delta', () => {
+  it('adds XP to the player', () => {
     const eid = spawnPlayer(0)
-    world.time.delta = 1000 // 1 second → +1 XP
-    experienceSystem(world)
-    expect(world.components.Player[eid]!.experience).toBeCloseTo(1)
+    awardXP(world, eid, 5)
+    expect(world.components.Player[eid]!.experience).toBe(5)
   })
 
   it('increments level when experience reaches 100', () => {
     const eid = spawnPlayer(99, 1)
-    world.time.delta = 2000 // +2 XP → total 101 → level up
-    experienceSystem(world)
+    awardXP(world, eid, 5)
     expect(world.components.Player[eid]!.level).toBe(2)
   })
 
   it('resets experience to 0 after leveling up', () => {
     const eid = spawnPlayer(99, 1)
-    world.time.delta = 2000 // +2 XP → 101 → level up → resets to 0
-    experienceSystem(world)
+    awardXP(world, eid, 5)
     expect(world.components.Player[eid]!.experience).toBe(0)
   })
 
-  it('does not throw when no player entities exist', () => {
-    world.time.delta = 1000
-    expect(() => experienceSystem(world)).not.toThrow()
+  it('does nothing when entity has no Player component', () => {
+    const eid = addEntity(world)
+    expect(() => awardXP(world, eid, 5)).not.toThrow()
   })
 
-  it('only processes entities with the Player component', () => {
-    const playerEid = spawnPlayer(0)
-    const otherEid = addEntity(world)
-    // otherEid has no Player component
-
-    world.time.delta = 1000
-    experienceSystem(world)
-
-    expect(world.components.Player[playerEid]!.experience).toBeGreaterThan(0)
-    expect(world.components.Player[otherEid]).toBeUndefined()
-  })
-
-  it('processes multiple player entities independently', () => {
-    const eid1 = spawnPlayer(10, 1)
-    const eid2 = spawnPlayer(50, 2)
-
-    world.time.delta = 500 // +0.5 XP each
-    experienceSystem(world)
-
-    expect(world.components.Player[eid1]!.experience).toBeCloseTo(10.5)
-    expect(world.components.Player[eid2]!.experience).toBeCloseTo(50.5)
+  it('accumulates XP across multiple kills', () => {
+    const eid = spawnPlayer(0)
+    awardXP(world, eid, 5)
+    awardXP(world, eid, 5)
+    expect(world.components.Player[eid]!.experience).toBe(10)
   })
 })
