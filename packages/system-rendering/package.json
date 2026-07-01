@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@kikorin/ecs": "workspace:*",
+    "@kikorin/adapter": "workspace:*",
     "@kikorin/util": "workspace:*",
     "three": "^0.182.0"
   },

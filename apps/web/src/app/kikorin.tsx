@@ -1,307 +1,206 @@
+import { hudChannel } from "@kikorin/adapter";
+import type { WorkerEngineProxy } from "../workers/WorkerEngineProxy";
+import { eventBus } from "@kikorin/events";
 import {
-  castEntityCollider,
-  CoreFlags,
-  ControlSources,
-  destroyEntity,
-  evaluateFlaginatorFlag,
-  getCollisionBounceDelta,
-  getContactBounceDelta,
-  getTouchingEntities,
-  getEntityForward,
-  getYawFromXZDirection,
-  hasEntityComponents,
-  hasNetFlag,
-  isProjectileType,
-  KeyboardControls,
-  markFlaginatorComponentChanged,
-  NET,
-  PointerControls,
-  queryEntities,
-  rotateLocalVectorByEntityRotation,
-  rotateLocalVectorByYaw,
-  setEntityPosition,
-  setEntityRotation,
-  setEntityVelocity,
-  spawnEntity,
-  type CoreWorld,
-  type CoreWorldBox,
-  type Player,
-  type Position,
-  type Rotation,
-  type Vec3,
-  type Velocity,
-} from "@kikorin/engine";
-import { castRayFromTo, findHighestFloorTopAtPosition } from "@kikorin/system-physics";
-import { awardXP } from "@kikorin/system-experience";
-import { NavMesh, findPath, type Waypoint } from "@kikorin/system-pathfinding";
-import { clamp, rng } from "@kikorin/util";
+  upsertObjectByEid,
+  applyToObjectByEid,
+  removeObjectByEid,
+  setCameraPosition,
+  lookCameraAt,
+} from "@kikorin/system-rendering";
 import {
   BoxGeometry,
   EdgesGeometry,
+  Group,
   LineBasicMaterial,
   LineSegments,
   Mesh,
   MeshLambertMaterial,
+  MeshBasicMaterial,
+  Raycaster,
   SphereGeometry,
+  Vector3,
+  type Object3D,
 } from "three";
-import { PlayerReactControls } from "./kikorinControls";
-import { eventBus } from "@kikorin/events";
 
-const PERSON_COLLIDER = {
-  halfWidth: 0.5,
-  halfHeight: 0.5,
-  halfDepth: 0.5,
-};
-const PERSON_GEOMETRY = new BoxGeometry(
-  PERSON_COLLIDER.halfWidth * 2,
-  PERSON_COLLIDER.halfHeight * 2,
-  PERSON_COLLIDER.halfDepth * 2,
-);
-const PERSON_EDGE_GEOMETRY = new EdgesGeometry(PERSON_GEOMETRY);
-const PERSON_BODY_COLOR = 0x66ccff;
-const PERSON_FRONT_COLOR = 0xffe082;
-const PERSON_TOUCH_COLOR = 0xff6b3d;
-const PERSON_TOUCH_FRONT_COLOR = 0xffc46b;
-const PERSON_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x16324f });
-const PROJECTILE_RADIUS = 0.12;
-const PROJECTILE_SCALE = {
-  x: 0.82,
-  y: 0.82,
-  z: 1.35,
-};
-const PROJECTILE_COLLIDER = {
-  halfWidth: PROJECTILE_RADIUS * PROJECTILE_SCALE.x,
-  halfHeight: PROJECTILE_RADIUS * PROJECTILE_SCALE.y,
-  halfDepth: PROJECTILE_RADIUS * PROJECTILE_SCALE.z,
-};
-const PROJECTILE_GEOMETRY = new SphereGeometry(PROJECTILE_RADIUS, 14, 10);
-const PROJECTILE_BODY_COLOR = 0xf97316;
-const PROJECTILE_TOUCH_COLOR = 0xea580c;
-const PROJECTILE_BASE_MATERIAL = new MeshLambertMaterial({
-  color: PROJECTILE_BODY_COLOR,
-});
-const PROJECTILE_TOUCH_MATERIAL = new MeshLambertMaterial({
-  color: PROJECTILE_TOUCH_COLOR,
-});
-const FLOOR_COLLIDER = {
-  halfWidth: 240,
-  halfHeight: 1,
-  halfDepth: 240,
-};
-const FLOOR_TOP_Y = 0;
-const FLOOR_GEOMETRY = new BoxGeometry(
-  FLOOR_COLLIDER.halfWidth * 2,
-  FLOOR_COLLIDER.halfHeight * 2,
-  FLOOR_COLLIDER.halfDepth * 2,
-);
-const FLOOR_EDGE_GEOMETRY = new EdgesGeometry(FLOOR_GEOMETRY);
-const FLOOR_BASE_MATERIAL = new MeshLambertMaterial({ color: 0x445342 });
-const FLOOR_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x243022 });
-const FLOOR_POSITION = {
-  x: 0,
-  y: FLOOR_TOP_Y - FLOOR_COLLIDER.halfHeight,
-  z: 0,
-};
-const WALL_BASE_MATERIAL = new MeshLambertMaterial({ color: 0xb0a090 });
-const WALL_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x5a4a3a });
-const RAMP_BASE_MATERIAL = new MeshLambertMaterial({ color: 0x6a7f55 });
-const RAMP_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x3a4f35 });
-const STEP_BASE_MATERIAL = new MeshLambertMaterial({ color: 0x8a9a7a });
-const STEP_EDGE_MATERIAL = new LineBasicMaterial({ color: 0x4a5a3a });
-const PLAYER_ACCELERATION = 30;
-const PLAYER_MAX_SPEED = 18;
-const PLAYER_DRAG_PER_SECOND = 4;
-const PLAYER_JUMP_SPEED = 8;
-const PLAYER_FORWARD_BOOST = 10;
-const PLAYER_SPRINT_ACCELERATION_MULTIPLIER = 1.8;
-const PLAYER_SPRINT_MAX_SPEED_MULTIPLIER = 1.6;
-const PLAYER_SPRINT_STAMINA_MAX = 1.0;
-const PLAYER_SPRINT_DRAIN_PER_SECOND = 0.35;
-const PLAYER_SPRINT_REGEN_PER_SECOND = 0.2;
-const PLAYER_SPRINT_KEYS = [KeyboardControls.ShiftLeft];
-const PLAYER_FORWARD_KEYS = [
-  KeyboardControls.KeyW,
-  KeyboardControls.ArrowUp,
-];
-const PLAYER_BACKWARD_KEYS = [
-  KeyboardControls.KeyS,
-  KeyboardControls.ArrowDown,
-];
-const PLAYER_STRAFE_LEFT_KEYS = [KeyboardControls.KeyQ];
-const PLAYER_STRAFE_RIGHT_KEYS = [KeyboardControls.KeyE];
-const PLAYER_LOOK_LEFT_KEYS = [
-  KeyboardControls.KeyA,
-  KeyboardControls.ArrowLeft,
-];
-const PLAYER_LOOK_RIGHT_KEYS = [
-  KeyboardControls.KeyD,
-  KeyboardControls.ArrowRight,
-];
-const PLAYER_PITCH_UP_KEYS = [KeyboardControls.KeyI];
-const PLAYER_PITCH_DOWN_KEYS = [KeyboardControls.KeyK];
-const PLAYER_PITCH_SPEED = 1.5;
-const MOUSE_PITCH_SENSITIVITY = 0.003;
-const MOUSE_YAW_SENSITIVITY = 0.003;
-const PLAYER_YAW_SPEED = 1.5;
-const PLAYER_MAX_PITCH = Math.PI * 0.45;
-const PROJECTILE_SPEED = 42;
-const PROJECTILE_TTL_TICKS = 84;
-const PROJECTILE_FORWARD_SPAWN_OFFSET =
-  PERSON_COLLIDER.halfDepth + PROJECTILE_COLLIDER.halfDepth + 0.24;
-const PROJECTILE_SPAWN_HEIGHT = PERSON_COLLIDER.halfHeight * 0.35;
-const PROJECTILE_BOUNCE_REPEAT_COOLDOWN_TICKS = 6;
-const PROJECTILE_SWEEP_REWIND_TOI = 0.002;
-const PROJECTILE_BOUNCE_SEPARATION_DISTANCE = 0.04;
-const PROJECTILE_FALLBACK_BOUNCE_RESTITUTION = 0.8;
-const CROSSHAIR_MAX_DIST = 120;
-const AMBIENT_PERSON_COUNT = 30;
-const BOX_MIN_SPEED = 2;
-const BOX_MAX_SPEED = 5;
-const BOX_MAX_STEER_RADIANS_PER_SECOND = 1.5;
-// At max misalignment (180°), speed drops to this fraction and turn rate scales up by (1 + this).
-const BOX_STEER_SPEED_MIN_FRACTION = 0.35;
-const BOX_STEER_TURN_BOOST = 1.5;
-// Monsters repel each other when closer than this distance (monsters are 1 unit wide).
-const MONSTER_SEPARATION_RADIUS = 2.5;
-const MONSTER_SEPARATION_STRENGTH = 0;
-// Monsters probe ahead for walls and steer away before hitting them.
-const WALL_AVOIDANCE_LOOKAHEAD = 4.0;
-const WALL_AVOIDANCE_STRENGTH = 4.0;
-// Path-following: advance to next waypoint once within this horizontal distance.
-const MONSTER_WAYPOINT_REACH = 1.8;
+// NET_LOCAL flag: entity is simulated locally, included in render patches every tick
+const NET_LOCAL = 0x01;
 
-// Upward velocity applied to step up a staircase.
-const MONSTER_JUMP_SPEED = 9.0;
-// Horizontal proximity to a jump waypoint at which the impulse fires.
+const WALK_SPEED = 15;
+const TURN_SPEED = 1.8; // radians / second
+const JUMP_VEL = 12;
+
+// Camera orbit — spherical coords around the player
+const CAM_DISTANCE = 9.5;
+const DEFAULT_CAM_PITCH = Math.atan2(5, 8); // ≈ 0.56 rad, matches old fixed 8/5 offset
+const CAM_PITCH_MIN = 0.15;
+const CAM_PITCH_MAX = Math.PI * 0.45;
+const CAM_YAW_SENSITIVITY = 0.0025;
+const CAM_PITCH_SENSITIVITY = 0.00125;
+const CAM_LOOK_HEIGHT_OFFSET = 0.75;
+const AIM_PITCH_MIN = -0.4; // ~23° below horizontal
+const AIM_PITCH_MAX = +0.6; // ~34° above horizontal
+const CAM_RESTORE_SPEED = 6.0;    // world-units/sec camera springs back after wall clears
+const CAM_WALL_SEPARATION = 0.3;  // gap kept between camera face and wall
+
+const PROJ_SPEED = 40;
+const PROJ_MAX_FRAMES = 600; // ~10 s at 60 fps
+const PROJ_HIT_RADIUS = 1.2;
+const PROJ_HIT_RADIUS_SQ = PROJ_HIT_RADIUS * PROJ_HIT_RADIUS;
+const AIM_FAR = 50; // fallback crosshair distance when no terrain or enemy in path
+
+// Pre-allocated for per-frame aim raycasting — avoids GC churn in the hot path.
+const aimRaycaster = new Raycaster();
+const aimOriginVec = new Vector3();
+const aimDirVec = new Vector3();
+
+// Monster AI
+const MONSTER_WALK_SPEED = 2.5;
+const MONSTER_JUMP_SPEED = 13.0;
 const MONSTER_JUMP_TRIGGER_DIST = 2.5;
-// Seconds before a monster can jump again (avoids repeated impulses in mid-air).
 const MONSTER_JUMP_COOLDOWN = 0.9;
-// How close to a jump-waypoint's floor Y the monster must be before that waypoint counts
-// as cleared. Mirrors navmesh.ts JUMP_HEIGHT_THRESHOLD — same value that marks an edge as
-// needing a jump is used to confirm the monster has actually climbed it.
 const MONSTER_JUMP_HEIGHT_TOLERANCE = 0.5;
-// Probability that a monster picks a detour route instead of the optimal one.
-const MONSTER_DETOUR_CHANCE = 0.4;
-// How far the player must move from the last planned goal before a monster replans.
-// Keeping this high prevents constant micro-corrections that cause wiggling.
+const MONSTER_WAYPOINT_REACH = 1.8;
 const MONSTER_REPLAN_PLAYER_MOVE = 5;
-// Stuck detection: sample interval, movement threshold, and escape threshold.
 const MONSTER_STUCK_SAMPLE_INTERVAL = 0.8;
 const MONSTER_STUCK_MOVE_THRESHOLD = 0.5;
 const MONSTER_STUCK_ESCAPE_AFTER = 1.6;
-const PRIME_SPAWN_POSITION = { x: 0, y: 12, z: 0 };
-const PRIME_PLAYER_NAME = "DoomPrime";
+const MONSTER_SEPARATION_RADIUS = 2.0; // soft separation bubble radius (world units)
 
-function createPersonFaceMaterials(bodyColor: number, frontColor: number) {
-  return [
-    ...Array.from({ length: 5 }, () => {
-      return new MeshLambertMaterial({ color: bodyColor });
-    }),
-    // BoxGeometry groups are +X, -X, +Y, -Y, +Z, -Z. This project treats -Z as forward.
-    new MeshLambertMaterial({ color: frontColor }),
-  ];
+// ---- Three.js mesh factories ----
+
+function makeEdgedBox(hw: number, hh: number, hd: number, color: number, edgeColor: number): Object3D {
+  const geo = new BoxGeometry(hw * 2, hh * 2, hd * 2);
+  const mesh = new Mesh(geo, new MeshLambertMaterial({ color }));
+  mesh.receiveShadow = true;
+  mesh.castShadow = true;
+  const line = new LineSegments(new EdgesGeometry(geo), new LineBasicMaterial({ color: edgeColor }));
+  line.renderOrder = 1;
+  line.scale.setScalar(1.0005);
+  mesh.add(line);
+  return mesh;
 }
 
-const PERSON_BASE_MATERIALS = createPersonFaceMaterials(
-  PERSON_BODY_COLOR,
-  PERSON_FRONT_COLOR,
-);
-const PERSON_TOUCH_MATERIALS = createPersonFaceMaterials(
-  PERSON_TOUCH_COLOR,
-  PERSON_TOUCH_FRONT_COLOR,
-);
-type World = CoreWorld;
+function makeFloorMesh(hw: number, hh: number, hd: number): Object3D {
+  return makeEdgedBox(hw, hh, hd, 0x445342, 0x243022);
+}
 
-type OwnershipCallbacks = {
-  addOwnedEntity: (eid: number) => void;
-  removeOwnedEntity: (eid: number) => void;
-  signalEntityDestroyed: (eid: number) => void;
-  signalHitOnRemoteEntity: (localMirrorEid: number) => void;
-};
+function makePlatformMesh(hw: number, hh: number, hd: number): Object3D {
+  return makeEdgedBox(hw, hh, hd, 0x8a9a7a, 0x4a5a3a);
+}
 
-type FloorEids = ArrayLike<number>;
+function makeWallMesh(hw: number, hh: number, hd: number): Object3D {
+  return makeEdgedBox(hw, hh, hd, 0xb0a090, 0x5a4a3a);
+}
+
+function makePersonMesh(bodyColor: number, frontColor: number): Object3D {
+  const group = new Group();
+  const geo = new BoxGeometry(0.8, 1.8, 0.8);
+  const bodyMat = new MeshLambertMaterial({ color: bodyColor });
+  const frontMat = new MeshLambertMaterial({ color: frontColor });
+  // BoxGeometry groups: +X=0, -X=1, +Y=2, -Y=3, +Z=4 (front), -Z=5
+  // "front" is the +Z face because forward direction is (sin(yaw), 0, cos(yaw))
+  // and mesh.rotation.y = yaw rotates local +Z to face that world direction.
+  const body = new Mesh(geo, [bodyMat, bodyMat, bodyMat, bodyMat, frontMat, bodyMat]);
+  body.castShadow = true;
+  group.add(body);
+  return group;
+}
+
+// Shared across all bullet instances — one GPU upload, many Mesh references.
+const PROJ_GEO = new SphereGeometry(0.12, 10, 8);
+const PROJ_MAT = new MeshBasicMaterial({ color: 0xf97316 });
+
+function makeProjectileMesh(): Object3D {
+  const mesh = new Mesh(PROJ_GEO, PROJ_MAT);
+  mesh.scale.set(0.82, 0.82, 1.35);
+  return mesh;
+}
+
+// ---- Static terrain layout ----
+
+type TerrainKind = "floor" | "step" | "wall";
+type TerrainBlock = { x: number; y: number; z: number; hw: number; hh: number; hd: number; kind?: TerrainKind };
+
+// Multi-zone map ported from the old TypeScript engine version.
+// Ramps are approximated as solid stacked steps (physics engine only supports AABB colliders).
+// Layout zones: central courtyard → east wing (y=4) → west wing (y=4) → north bridge →
+//               north keep → keep stairs → upper keep (y=8) → south terrace (y=3).
+const TERRAIN: TerrainBlock[] = [
+  // ── MAIN FLOOR ───────────────────────────────────────────────────────────
+  { x: 0, y: -1, z: -5, hw: 60, hh: 1, hd: 75, kind: "floor" },
+
+  // ── EAST WING — ramp steps going east (x=10→22, y=0→4, z=12 centre) ────
+  // Solid stacked blocks so each step's top surface is at y=1,2,3,4.
+  { x: 11.5, y: 0.5, z: 12, hw: 1.5, hh: 0.5, hd: 5 },
+  { x: 14.5, y: 1.0, z: 12, hw: 1.5, hh: 1.0, hd: 5 },
+  { x: 17.5, y: 1.5, z: 12, hw: 1.5, hh: 1.5, hd: 5 },
+  { x: 20.5, y: 2.0, z: 12, hw: 1.5, hh: 2.0, hd: 5 },
+  // Large east platform (top at y=4, extends z=-28→16)
+  { x: 31,   y: 3.7, z: -6, hw: 9,   hh: 0.3, hd: 22 },
+  // Narrow walkway east off the platform
+  { x: 42,   y: 3.7, z: 0,  hw: 2,   hh: 0.3, hd: 3  },
+  // Small balcony overlook
+  { x: 47,   y: 3.7, z: 0,  hw: 3,   hh: 0.3, hd: 4  },
+
+  // ── WEST WING — staircase going west, solid blocks ────────────────────
+  { x: -12, y: 0.5, z: 5, hw: 1.5, hh: 0.5, hd: 2.5 },
+  { x: -15, y: 1.0, z: 5, hw: 1.5, hh: 1.0, hd: 2.5 },
+  { x: -18, y: 1.5, z: 5, hw: 1.5, hh: 1.5, hd: 2.5 },
+  { x: -21, y: 2.0, z: 5, hw: 1.5, hh: 2.0, hd: 2.5 },
+  // Large west platform (top at y=4, mirrors east)
+  { x: -31, y: 3.7, z: -6, hw: 9, hh: 0.3, hd: 22 },
+
+  // ── NORTH BRIDGE (y=4) — connects east and west wings ────────────────
+  { x: 0, y: 3.7, z: -26, hw: 22, hh: 0.3, hd: 5 },
+
+  // ── NORTH KEEP (y=4) ─────────────────────────────────────────────────
+  { x: 0, y: 3.7, z: -37, hw: 8, hh: 0.3, hd: 6 },
+  // Keep stairs from y=4 to y=8 (each step 1 unit higher, spaced 3 units apart in z)
+  { x: 0, y: 4.5, z: -44, hw: 4, hh: 0.5, hd: 1.5 },
+  { x: 0, y: 5.5, z: -47, hw: 4, hh: 0.5, hd: 1.5 },
+  { x: 0, y: 6.5, z: -50, hw: 4, hh: 0.5, hd: 1.5 },
+  { x: 0, y: 7.5, z: -53, hw: 4, hh: 0.5, hd: 1.5 },
+
+  // ── UPPER KEEP (top at y=8) ───────────────────────────────────────────
+  { x: 0, y: 7.7, z: -58, hw: 5, hh: 0.3, hd: 4 },
+  // Far parapet wall
+  { x: 0, y: 9.5, z: -62, hw: 5, hh: 1.5, hd: 0.4, kind: "wall" },
+
+  // ── SOUTH TERRACE — ramp steps going north (z=30→22, y=0→3) ──────────
+  { x: 0, y: 0.5, z: 28.5, hw: 8, hh: 0.5, hd: 1.5 },
+  { x: 0, y: 1.0, z: 25.5, hw: 8, hh: 1.0, hd: 1.5 },
+  { x: 0, y: 1.5, z: 22.5, hw: 8, hh: 1.5, hd: 1.5 },
+  // Terrace platform (top at y=3)
+  { x: 0, y: 2.7, z: 17, hw: 12, hh: 0.3, hd: 5 },
+
+  // ── WALLS & PARAPETS ─────────────────────────────────────────────────
+  // Courtyard cover near spawn
+  { x: -5, y: 1.5, z: -7,  hw: 0.5, hh: 1.5, hd: 3,  kind: "wall" },
+  { x:  5, y: 1.5, z: -7,  hw: 0.5, hh: 1.5, hd: 3,  kind: "wall" },
+  // East platform east parapet
+  { x:  40, y: 4.8, z: -6, hw: 0.3, hh: 0.8, hd: 22, kind: "wall" },
+  // West platform west parapet
+  { x: -40, y: 4.8, z: -6, hw: 0.3, hh: 0.8, hd: 22, kind: "wall" },
+  // North bridge north parapets (split at centre to leave an opening)
+  { x: -11, y: 4.8, z: -31, hw: 11, hh: 0.8, hd: 0.4, kind: "wall" },
+  { x:  11, y: 4.8, z: -31, hw: 11, hh: 0.8, hd: 0.4, kind: "wall" },
+];
+
+// ---- Monster pathfinding ----
+
 type MonsterPathState = {
-  path: Waypoint[] | null;
+  path: Array<{ x: number; y: number; z: number; requiresJump: boolean; isLedgeDrop: boolean }> | null;
   waypointIndex: number;
   lastGoalX: number;
   lastGoalZ: number;
   jumpCooldown: number;
-  routeSeed: number;
   stuckTimer: number;
   lastSampleX: number;
   lastSampleZ: number;
   stuckSampleTimer: number;
+  pendingPath: boolean;
 };
-type ProjectileState = {
-  remainingTicks: number;
-  bounceCooldownsByTarget: Map<number, number>;
-};
-type ProjectileRegistry = Map<number, ProjectileState>;
-
-function createPersonRenderMesh() {
-  const mesh = new Mesh(PERSON_GEOMETRY, PERSON_BASE_MATERIALS);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  const outline = new LineSegments(PERSON_EDGE_GEOMETRY, PERSON_EDGE_MATERIAL);
-  outline.renderOrder = 1;
-  outline.scale.setScalar(1.001);
-  mesh.userData.baseMaterial = PERSON_BASE_MATERIALS;
-  mesh.userData.touchMaterial = PERSON_TOUCH_MATERIALS;
-  mesh.add(outline);
-  return mesh;
-}
-
-function createFloorRenderMesh() {
-  const mesh = new Mesh(FLOOR_GEOMETRY, FLOOR_BASE_MATERIAL);
-  mesh.receiveShadow = true;
-  const outline = new LineSegments(FLOOR_EDGE_GEOMETRY, FLOOR_EDGE_MATERIAL);
-  outline.renderOrder = 1;
-  outline.scale.setScalar(1.0005);
-  mesh.add(outline);
-  return mesh;
-}
-
-function createWallRenderMesh(halfWidth: number, halfHeight: number, halfDepth: number) {
-  const geometry = new BoxGeometry(halfWidth * 2, halfHeight * 2, halfDepth * 2);
-  const edgeGeometry = new EdgesGeometry(geometry);
-  const mesh = new Mesh(geometry, WALL_BASE_MATERIAL);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  const outline = new LineSegments(edgeGeometry, WALL_EDGE_MATERIAL);
-  outline.renderOrder = 1;
-  outline.scale.setScalar(1.0005);
-  mesh.add(outline);
-  return mesh;
-}
-
-function createWall(
-  world: World,
-  position: Position,
-  halfWidth: number,
-  halfHeight: number,
-  halfDepth: number,
-) {
-  return spawnEntity(world, {
-    floor: true,
-    position,
-    collider: { halfWidth, halfHeight, halfDepth },
-    renderMesh: () => createWallRenderMesh(halfWidth, halfHeight, halfDepth),
-  });
-}
-
-
-function createProjectileRenderMesh() {
-  const mesh = new Mesh(PROJECTILE_GEOMETRY, PROJECTILE_BASE_MATERIAL);
-  mesh.castShadow = true;
-  mesh.scale.set(
-    PROJECTILE_SCALE.x,
-    PROJECTILE_SCALE.y,
-    PROJECTILE_SCALE.z,
-  );
-  mesh.userData.baseMaterial = PROJECTILE_BASE_MATERIAL;
-  mesh.userData.touchMaterial = PROJECTILE_TOUCH_MATERIAL;
-  return mesh;
-}
 
 function createMonsterPathState(): MonsterPathState {
   return {
@@ -310,1376 +209,572 @@ function createMonsterPathState(): MonsterPathState {
     lastGoalX: Infinity,
     lastGoalZ: Infinity,
     jumpCooldown: 0,
-    routeSeed: 0,
     stuckTimer: 0,
     lastSampleX: Infinity,
     lastSampleZ: Infinity,
-    stuckSampleTimer: rng(0, MONSTER_STUCK_SAMPLE_INTERVAL),
+    stuckSampleTimer: Math.random() * MONSTER_STUCK_SAMPLE_INTERVAL,
+    pendingPath: false,
   };
 }
 
-function registerBoxSteering(
-  world: CoreWorld,
-  boxEids: number[],
-  baseSpeeds: Map<number, number>,
-  primeEid: number,
-  navmesh: NavMesh,
-  pathStates: Map<number, MonsterPathState>,
-): () => void {
-  return world.controls.onTick((activeWorld, tick) => {
-    if (tick.deltaSeconds === 0) return;
-    if (!hasEntityComponents(activeWorld, primeEid, ["Position"])) return;
+// ---- Ownership / networking callback shape ----
 
-    const { Position, Velocity, Collider, Floor, Gravity } = activeWorld.components;
-    const targetX = Position.x[primeEid];
-    const targetZ = Position.z[primeEid];
-    // Predict where the player will be shortly — monsters cut off movement instead of trailing.
-    const goalX = targetX + Velocity.x[primeEid] * 0.4;
-    const goalZ = targetZ + Velocity.z[primeEid] * 0.4;
-    const maxSteer = BOX_MAX_STEER_RADIANS_PER_SECOND * tick.deltaSeconds;
+type OwnershipCallbacks = {
+  addOwnedEntity: (eid: number) => void;
+  removeOwnedEntity: (eid: number) => void;
+  signalEntityDestroyed: (eid: number) => void;
+  signalHitOnRemoteEntity: (localMirrorEid: number) => void;
+};
 
-    for (const eid of boxEids) {
-      if (!hasEntityComponents(activeWorld, eid, ["Position", "Velocity"])) continue;
+export type SetupGameResult = {
+  playerEid: number;
+  ownedEids: number[];
+  onRemoteEntityHit: (eid: number) => void;
+  spawnMonsters: (count: number) => Promise<void>;
+  /** Called every frame by useEngine after the tick command and before renderFrame. */
+  onFrame: () => void;
+  /** Pass middle-button drag deltas to orbit the camera. */
+  onCameraDrag: (deltaX: number, deltaY: number) => void;
+  /** Reset the camera to behind the player. */
+  onCameraReset: () => void;
+  cleanup: () => void;
+};
 
-      const currentSpeed = Math.hypot(Velocity.x[eid], Velocity.z[eid]);
-      if (currentSpeed === 0) continue;
+/**
+ * Spawns terrain, player, and wires keyboard + mouse controls.
+ * Returns onFrame (injected into useEngine's RAF loop) and a cleanup function.
+ * Async because entity spawning crosses the worker boundary.
+ */
+export async function setupGame(
+  engine: WorkerEngineProxy,
+  ownership: OwnershipCallbacks,
+  canvas?: HTMLCanvasElement,
+): Promise<SetupGameResult> {
+  const ownedEids: number[] = [];
 
-      const monsterX = Position.x[eid];
-      const monsterZ = Position.z[eid];
-      const dx = targetX - monsterX;
-      const dz = targetZ - monsterZ;
-      const distToTarget = Math.hypot(dx, dz);
-      if (distToTarget === 0) continue;
+  // --- Terrain (parallel spawn — all requests sent at once, resolved as acks arrive) ---
+  // Terrain meshes are also used for camera wall-separation raycasting.
+  const terrainMeshes: Object3D[] = [];
+  await Promise.all(TERRAIN.map(async (b) => {
+    const eid = await engine.spawn_floor_entity(b.x, b.y, b.z, b.hw, b.hh, b.hd);
+    const meshFn = b.kind === "floor" ? makeFloorMesh
+                 : b.kind === "wall"  ? makeWallMesh
+                 : makePlatformMesh;
+    // Static entities never emit render patches — position them directly in Three.js.
+    const obj = upsertObjectByEid(eid, () => meshFn(b.hw, b.hh, b.hd));
+    obj.position.set(b.x, b.y, b.z);
+    terrainMeshes.push(obj);
+  }));
 
-      // Desired direction from A* waypoints inside the navmesh, direct pursuit outside.
-      let desiredX: number;
-      let desiredZ: number;
+  // Build navmesh from Rapier floor geometry — must happen after all floor entities spawned.
+  await engine.build_navmesh();
 
-      const pathState = pathStates.get(eid);
-      if (pathState !== undefined && navmesh.inBounds(monsterX, monsterZ)) {
-        pathState.jumpCooldown = Math.max(0, pathState.jumpCooldown - tick.deltaSeconds);
+  // --- Player ---
+  const playerEid = await engine.spawn_box_entity(0, 5, 0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+  upsertObjectByEid(playerEid, () => makePersonMesh(0x4488cc, 0xffe082));
+  ownership.addOwnedEntity(playerEid);
+  ownedEids.push(playerEid);
 
-        // Stuck detection: if the monster barely moves over several samples, force a fresh
-        // path using the direct (optimal) route to break free.
-        pathState.stuckSampleTimer += tick.deltaSeconds;
-        if (pathState.stuckSampleTimer >= MONSTER_STUCK_SAMPLE_INTERVAL) {
-          pathState.stuckSampleTimer = 0;
-          const displacement = Math.hypot(monsterX - pathState.lastSampleX, monsterZ - pathState.lastSampleZ);
-          if (displacement < MONSTER_STUCK_MOVE_THRESHOLD) {
-            pathState.stuckTimer += MONSTER_STUCK_SAMPLE_INTERVAL;
-            if (pathState.stuckTimer >= MONSTER_STUCK_ESCAPE_AFTER) {
-              pathState.routeSeed = 0;
+  // --- Monsters list (populated by spawnMonsters) ---
+  const monsterEids: number[] = [];
+  const monsterPathStates = new Map<number, MonsterPathState>();
+  // Grounded state per entity — populated from semantic patches for all NET_LOCAL entities.
+  const groundedByEid = new Map<number, boolean>();
+
+  // --- Projectiles ---
+  type Projectile = { eid: number; frames: number };
+  const projectiles: Projectile[] = [];
+
+  // --- Input state ---
+  const heldKeys = new Set<string>();
+  let yaw = 0; // radians — player facing direction
+  let jumpRequested = false;
+  let prevSpaceHeld = false;
+  let jumpsUsed = 0; // double jump counter; reset to 0 on landing
+
+  // --- Camera orbit state ---
+  let camYaw = Math.PI;       // start behind player
+  let camPitch = DEFAULT_CAM_PITCH;
+  let camOrbitActive = false; // true once user has manually orbited
+  let aimPitch = 0;           // vertical aim angle in pointer-lock, radians (0 = horizontal)
+  let lastFrameTime = performance.now();
+  // Camera wall-separation: actual distance springs toward CAM_DISTANCE when clear.
+  let camFollowDist = CAM_DISTANCE;
+  const camRaycaster = new Raycaster();
+  // Skip geometry within the player's body radius — walls the player is touching
+  // are at ~0.4 units from the look-at origin. Without this, physics jitter causes
+  // the ray to alternate hit/miss at near-zero distance, snapping the camera on every frame.
+  camRaycaster.near = 0.5;
+  const camLookAtVec = new Vector3();
+  const camRayDirVec = new Vector3();
+
+  // --- Grounded state (updated from semantic patches for all NET_LOCAL entities) ---
+  // groundedByEid tracks monsters; player landing resets jumpsUsed for double jump.
+  const unsubHud = hudChannel.subscribe(() => {
+    const patches = hudChannel.getSnapshot();
+    for (const p of patches) {
+      if (p.grounded !== undefined) {
+        const wasGrounded = groundedByEid.get(p.entity) ?? false;
+        groundedByEid.set(p.entity, p.grounded);
+        if (p.entity === playerEid && p.grounded && !wasGrounded) {
+          jumpsUsed = 0;
+        }
+      }
+    }
+  });
+
+  function onKeyDown(e: KeyboardEvent) { heldKeys.add(e.code); }
+  function onKeyUp(e: KeyboardEvent) { heldKeys.delete(e.code); }
+  window.addEventListener("keydown", onKeyDown);
+  window.addEventListener("keyup", onKeyUp);
+
+  // Prevent the context menu from appearing while the game is running so right-click
+  // cannot trigger the browser's pointer-lock exit path.
+  function onContextMenu(e: MouseEvent) { e.preventDefault(); }
+  document.addEventListener("contextmenu", onContextMenu);
+
+  // --- Shoot on left click; lock pointer when clicking the canvas ---
+  function onMouseDown(e: MouseEvent) {
+    if (e.button !== 0) {
+      e.preventDefault(); // block right-click context menu before browser processes it
+      return;
+    }
+    if (canvas && e.target === canvas && document.pointerLockElement !== canvas) {
+      void canvas.requestPointerLock();
+    }
+
+    const sinY = Math.sin(yaw);
+    const cosY = Math.cos(yaw);
+    let spawnX = 0, spawnY = 0, spawnZ = 0;
+    applyToObjectByEid(playerEid, (obj) => {
+      spawnX = obj.position.x + sinY * 1.1;
+      spawnY = obj.position.y + 0.4;
+      spawnZ = obj.position.z + cosY * 1.1;
+    });
+
+    const aimCos = Math.cos(aimPitch);
+    const aimSin = Math.sin(aimPitch);
+    void engine.spawn_bullet(
+      spawnX, spawnY, spawnZ,
+      sinY * aimCos * PROJ_SPEED,
+      aimSin * PROJ_SPEED,
+      cosY * aimCos * PROJ_SPEED,
+    ).then((eid) => {
+      const obj = upsertObjectByEid(eid, makeProjectileMesh);
+      obj.position.set(spawnX, spawnY, spawnZ);
+      projectiles.push({ eid, frames: 0 });
+    });
+  }
+  window.addEventListener("mousedown", onMouseDown);
+
+  // --- Camera orbit callbacks ---
+  function onCameraDrag(deltaX: number, deltaY: number) {
+    camYaw -= deltaX * CAM_YAW_SENSITIVITY;
+    camPitch = Math.max(CAM_PITCH_MIN, Math.min(CAM_PITCH_MAX, camPitch - deltaY * CAM_PITCH_SENSITIVITY));
+    camOrbitActive = true;
+  }
+
+  function onCameraReset() {
+    camYaw = yaw + Math.PI;
+    camPitch = DEFAULT_CAM_PITCH;
+    camOrbitActive = false;
+  }
+
+  // Route pointer-lock mouse movement to yaw + aim pitch (not camera orbit pitch).
+  // Middle-drag orbit controls camPitch (camera height). Mouse-look controls aimPitch
+  // (vertical aim angle) so bullets and the crosshair both respond to vertical input.
+  function onMouseMove(e: MouseEvent) {
+    if (!canvas || document.pointerLockElement !== canvas) return;
+    camYaw -= e.movementX * CAM_YAW_SENSITIVITY;
+    aimPitch = Math.max(AIM_PITCH_MIN, Math.min(AIM_PITCH_MAX, aimPitch - e.movementY * CAM_PITCH_SENSITIVITY));
+  }
+  document.addEventListener("mousemove", onMouseMove);
+
+  // Resume auto-trailing when the pointer lock is released (Escape).
+  function onPointerLockChange() {
+    if (canvas && document.pointerLockElement !== canvas) {
+      camOrbitActive = false;
+      aimPitch = 0;
+    }
+  }
+  document.addEventListener("pointerlockchange", onPointerLockChange);
+
+  // --- Per-frame game logic ---
+  function onFrame() {
+    const now = performance.now();
+    const dt = Math.min((now - lastFrameTime) / 1000, 0.1);
+    lastFrameTime = now;
+    // In pointer lock, yaw tracks the camera so mouse look steers the player.
+    // Without pointer lock, A/D and arrow keys turn the player.
+    const inPointerLock = Boolean(canvas && document.pointerLockElement === canvas);
+    if (inPointerLock) {
+      yaw = camYaw - Math.PI;
+    } else {
+      const turnDir =
+        (heldKeys.has("ArrowRight") || heldKeys.has("KeyD") ? 1 : 0) -
+        (heldKeys.has("ArrowLeft")  || heldKeys.has("KeyA") ? 1 : 0);
+      yaw += turnDir * TURN_SPEED * dt;
+    }
+
+    const sinY = Math.sin(yaw);
+    const cosY = Math.cos(yaw);
+
+    // W/S / arrows: forward/back.
+    // Strafe: Q/E always; A/D also strafe in pointer-lock (FPS mode) since mouse handles turning.
+    const fwd =
+      (heldKeys.has("KeyW") || heldKeys.has("ArrowUp")   ? 1 : 0) -
+      (heldKeys.has("KeyS") || heldKeys.has("ArrowDown")  ? 1 : 0);
+    const strafe = inPointerLock
+      ? (heldKeys.has("KeyA") || heldKeys.has("KeyQ") ? 1 : 0) - (heldKeys.has("KeyD") || heldKeys.has("KeyE") ? 1 : 0)
+      : (heldKeys.has("KeyQ") ? 1 : 0) - (heldKeys.has("KeyE") ? 1 : 0);
+
+    let vx = fwd * sinY + strafe * cosY;
+    let vz = fwd * cosY - strafe * sinY;
+
+    // Normalise diagonal movement
+    const hlen = Math.sqrt(vx * vx + vz * vz);
+    if (hlen > 1) { vx /= hlen; vz /= hlen; }
+    vx *= WALK_SPEED;
+    vz *= WALK_SPEED;
+
+    // Jump — rising edge; allows one extra mid-air jump (double jump)
+    const spaceHeld = heldKeys.has("Space");
+    if (spaceHeld && !prevSpaceHeld && jumpsUsed < 2) {
+      jumpRequested = true;
+      jumpsUsed++;
+    }
+    prevSpaceHeld = spaceHeld;
+
+    // vy=0 preserves current Y so gravity accumulates; non-zero overrides for jump
+    const vy = jumpRequested ? JUMP_VEL : 0;
+    jumpRequested = false;
+
+    engine.set_entity_velocity(playerEid, vx, vy, vz);
+
+    // --- Projectile lifetime and hit detection ---
+    // Bullet position comes from render patches (applyToObjectByEid).
+    // Engine integrates ballistic trajectory; TypeScript owns lifetime and hit detection.
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+      const proj = projectiles[i];
+      proj.frames++;
+
+      if (proj.frames > PROJ_MAX_FRAMES) {
+        engine.destroy_entity(proj.eid);
+        removeObjectByEid(proj.eid);
+        projectiles.splice(i, 1);
+        continue;
+      }
+
+      let projDead = false;
+      applyToObjectByEid(proj.eid, (pObj) => {
+        if (pObj.position.y < -20) { projDead = true; return; }
+
+        for (let j = monsterEids.length - 1; j >= 0; j--) {
+          if (projDead) break;
+          applyToObjectByEid(monsterEids[j], (mObj) => {
+            const dx = pObj.position.x - mObj.position.x;
+            const dy = pObj.position.y - mObj.position.y;
+            const dz = pObj.position.z - mObj.position.z;
+            if (dx * dx + dy * dy + dz * dz < PROJ_HIT_RADIUS_SQ) {
+              engine.destroy_entity(monsterEids[j]!);
+              removeObjectByEid(monsterEids[j]!, { dispose: true });
+              monsterPathStates.delete(monsterEids[j]!);
+              monsterEids.splice(j, 1);
+              projDead = true;
+              // Spawn a replacement at a random map-edge position to keep the horde alive.
+              const angle = Math.random() * Math.PI * 2;
+              const radius = 30 + Math.random() * 10;
+              const rx = Math.cos(angle) * radius;
+              const rz = Math.sin(angle) * radius;
+              void engine.spawn_box_entity(rx, 10, rz, 0.4, 0.9, 0.4, 50, NET_LOCAL).then((newEid) => {
+                const newObj = upsertObjectByEid(newEid, () => makePersonMesh(0xcc4444, 0xff8800));
+                newObj.position.set(rx, 10, rz);
+                monsterEids.push(newEid);
+                monsterPathStates.set(newEid, createMonsterPathState());
+                ownedEids.push(newEid);
+                ownership.addOwnedEntity(newEid);
+              });
+            }
+          });
+        }
+      });
+
+      if (projDead) {
+        engine.destroy_entity(proj.eid);
+        removeObjectByEid(proj.eid);
+        projectiles.splice(i, 1);
+      }
+    }
+
+    // --- Monster AI: A* pathfinding toward the player ---
+    applyToObjectByEid(playerEid, (playerObj) => {
+      const goalX = playerObj.position.x;
+      const goalZ = playerObj.position.z;
+
+      for (const mEid of monsterEids) {
+        const pathState = monsterPathStates.get(mEid);
+        if (!pathState) continue;
+
+        applyToObjectByEid(mEid, (mObj) => {
+          const mx = mObj.position.x;
+          const my = mObj.position.y;
+          const mz = mObj.position.z;
+          const dx = goalX - mx;
+          const dz = goalZ - mz;
+          const dist = Math.hypot(dx, dz);
+
+          if (dist < 0.001) return;
+
+          // Tick down jump cooldown
+          pathState.jumpCooldown = Math.max(0, pathState.jumpCooldown - dt);
+
+          // Stuck detection: sample displacement every STUCK_SAMPLE_INTERVAL seconds
+          pathState.stuckSampleTimer += dt;
+          if (pathState.stuckSampleTimer >= MONSTER_STUCK_SAMPLE_INTERVAL) {
+            pathState.stuckSampleTimer = 0;
+            const moved = Math.hypot(mx - pathState.lastSampleX, mz - pathState.lastSampleZ);
+            if (moved < MONSTER_STUCK_MOVE_THRESHOLD) {
+              pathState.stuckTimer += MONSTER_STUCK_SAMPLE_INTERVAL;
+              if (pathState.stuckTimer >= MONSTER_STUCK_ESCAPE_AFTER) {
+                pathState.path = null;
+                pathState.lastGoalX = Infinity;
+                pathState.lastGoalZ = Infinity;
+                pathState.stuckTimer = 0;
+              }
+            } else {
+              pathState.stuckTimer = 0;
+            }
+            pathState.lastSampleX = mx;
+            pathState.lastSampleZ = mz;
+          }
+
+          // Replan when the player moves significantly from the last planned goal.
+          // find_path is async (crosses to the worker); mark goal immediately to prevent
+          // redundant replans while the response is in flight.
+          const playerMoved =
+            Math.hypot(goalX - pathState.lastGoalX, goalZ - pathState.lastGoalZ) >
+            MONSTER_REPLAN_PLAYER_MOVE;
+          if (playerMoved && !pathState.pendingPath) {
+            pathState.lastGoalX = goalX;
+            pathState.lastGoalZ = goalZ;
+            pathState.pendingPath = true;
+            const monsterFloorY = my - 0.9;
+            void engine.find_path(mx, monsterFloorY, mz, goalX, goalZ, true).then(path => {
+              const ps = monsterPathStates.get(mEid);
+              if (ps) {
+                ps.path = path;
+                ps.waypointIndex = 0;
+                ps.pendingPath = false;
+              }
+            });
+          }
+
+          // Soft separation: push away from player and nearby monsters so they
+          // can squish past each other rather than hard-blocking movement.
+          let sepX = 0, sepZ = 0;
+          if (dist < MONSTER_SEPARATION_RADIUS && dist > 0.001) {
+            const f = 1.0 - dist / MONSTER_SEPARATION_RADIUS;
+            sepX -= (dx / dist) * f;
+            sepZ -= (dz / dist) * f;
+          }
+          for (const otherEid of monsterEids) {
+            if (otherEid === mEid) continue;
+            applyToObjectByEid(otherEid, (oObj) => {
+              const odx = oObj.position.x - mx;
+              const odz = oObj.position.z - mz;
+              const od = Math.hypot(odx, odz);
+              if (od < MONSTER_SEPARATION_RADIUS && od > 0.001) {
+                const f = 1.0 - od / MONSTER_SEPARATION_RADIUS;
+                sepX -= (odx / od) * f;
+                sepZ -= (odz / od) * f;
+              }
+            });
+          }
+
+          let desiredX: number;
+          let desiredZ: number;
+
+          const path = pathState.path;
+          if (path !== null && path.length > 0 && pathState.waypointIndex < path.length) {
+            // Advance past waypoints already reached (skip jump waypoint until climbed)
+            while (pathState.waypointIndex < path.length) {
+              const wp = path[pathState.waypointIndex]!;
+              if (Math.hypot(wp.x - mx, wp.z - mz) >= MONSTER_WAYPOINT_REACH) break;
+              if (wp.requiresJump && my - 0.9 < wp.y - MONSTER_JUMP_HEIGHT_TOLERANCE) break;
+              pathState.waypointIndex++;
+            }
+
+            if (pathState.waypointIndex >= path.length) {
               pathState.path = null;
               pathState.lastGoalX = Infinity;
               pathState.lastGoalZ = Infinity;
-              pathState.stuckTimer = 0;
+            }
+
+            if (pathState.waypointIndex < path.length) {
+              const wp = path[pathState.waypointIndex]!;
+              const wpDX = wp.x - mx;
+              const wpDZ = wp.z - mz;
+              const wpDist = Math.hypot(wpDX, wpDZ);
+              desiredX = wpDist > 0 ? wpDX / wpDist : dx / dist;
+              desiredZ = wpDist > 0 ? wpDZ / wpDist : dz / dist;
+
+              // Fire jump impulse when close to a step-up waypoint and grounded
+              const monsterGrounded = groundedByEid.get(mEid) ?? false;
+              if (
+                wp.requiresJump &&
+                pathState.jumpCooldown <= 0 &&
+                monsterGrounded &&
+                wpDist < MONSTER_JUMP_TRIGGER_DIST
+              ) {
+                mObj.rotation.y = Math.atan2(desiredX, desiredZ);
+                engine.set_entity_velocity(
+                  mEid,
+                  (desiredX + sepX) * MONSTER_WALK_SPEED,
+                  MONSTER_JUMP_SPEED,
+                  (desiredZ + sepZ) * MONSTER_WALK_SPEED,
+                );
+                pathState.jumpCooldown = MONSTER_JUMP_COOLDOWN;
+                return;
+              }
+            } else {
+              desiredX = dx / dist;
+              desiredZ = dz / dist;
             }
           } else {
-            pathState.stuckTimer = 0;
-          }
-          pathState.lastSampleX = monsterX;
-          pathState.lastSampleZ = monsterZ;
-        }
-
-        const monsterFloorY = Position.y[eid] - PERSON_COLLIDER.halfHeight;
-        const playerMoved = Math.hypot(goalX - pathState.lastGoalX, goalZ - pathState.lastGoalZ) > MONSTER_REPLAN_PLAYER_MOVE;
-
-        if (playerMoved) {
-          // Only roll for a detour when picking a fresh path, not on intermediate
-          // player-tracking replans, so the monster commits to its chosen route.
-          if (pathState.path === null) {
-            pathState.routeSeed = rng(0, 1) < MONSTER_DETOUR_CHANCE ? rng(0.5, 20) : 0;
-          }
-          pathState.path = findPath(navmesh, monsterX, monsterZ, goalX, goalZ, monsterFloorY, pathState.routeSeed);
-          pathState.waypointIndex = 0;
-          pathState.lastGoalX = goalX;
-          pathState.lastGoalZ = goalZ;
-        }
-
-        const path = pathState.path;
-        if (path !== null && path.length > 0 && pathState.waypointIndex < path.length) {
-          // Advance past waypoints already reached. Don't skip a jump waypoint until the
-          // monster has climbed to that height — a replan from nearby can otherwise skip
-          // the jump in the same tick, leaving the monster targeting an unreachable level.
-          while (pathState.waypointIndex < path.length) {
-            const wp = path[pathState.waypointIndex]!;
-            if (Math.hypot(wp.x - monsterX, wp.z - monsterZ) >= MONSTER_WAYPOINT_REACH) break;
-            if (wp.requiresJump && monsterFloorY < wp.y - MONSTER_JUMP_HEIGHT_TOLERANCE) break;
-            pathState.waypointIndex++;
+            // No path — fall back to direct pursuit
+            desiredX = dx / dist;
+            desiredZ = dz / dist;
           }
 
-          // Path exhausted — null it and reset the goal so the next replan picks a fresh route.
-          if (pathState.waypointIndex >= path.length) {
-            pathState.path = null;
-            pathState.lastGoalX = Infinity;
-            pathState.lastGoalZ = Infinity;
-          }
-
-          if (pathState.waypointIndex < path.length) {
-            const wp = path[pathState.waypointIndex]!;
-            const wpDX = wp.x - monsterX;
-            const wpDZ = wp.z - monsterZ;
-            const wpHorizDist = Math.hypot(wpDX, wpDZ);
-
-            desiredX = wpHorizDist > 0 ? wpDX / wpHorizDist : dx / distToTarget;
-            desiredZ = wpHorizDist > 0 ? wpDZ / wpHorizDist : dz / distToTarget;
-
-            // Fire jump impulse when approaching a step-up waypoint while grounded.
-            if (
-              wp.requiresJump &&
-              pathState.jumpCooldown <= 0 &&
-              Gravity.Grounded[eid] === 1 &&
-              wpHorizDist < MONSTER_JUMP_TRIGGER_DIST
-            ) {
-              setEntityVelocity(activeWorld, eid, {
-                x: Velocity.x[eid],
-                y: MONSTER_JUMP_SPEED,
-                z: Velocity.z[eid],
-              });
-              pathState.jumpCooldown = MONSTER_JUMP_COOLDOWN;
-            }
-          } else {
-            desiredX = dx / distToTarget;
-            desiredZ = dz / distToTarget;
-          }
-        } else {
-          desiredX = dx / distToTarget;
-          desiredZ = dz / distToTarget;
-        }
-      } else {
-        desiredX = dx / distToTarget;
-        desiredZ = dz / distToTarget;
-      }
-      for (const otherId of boxEids) {
-        if (otherId === eid) continue;
-        const odx = Position.x[eid] - Position.x[otherId];
-        const odz = Position.z[eid] - Position.z[otherId];
-        const dist = Math.hypot(odx, odz);
-        if (dist === 0 || dist >= MONSTER_SEPARATION_RADIUS) continue;
-        const strength = MONSTER_SEPARATION_STRENGTH * (1 - dist / MONSTER_SEPARATION_RADIUS);
-        desiredX += (odx / dist) * strength;
-        desiredZ += (odz / dist) * strength;
-      }
-
-      // Wall avoidance: probe ahead in the desired direction; push away from any wall found.
-      const desiredLen = Math.hypot(desiredX, desiredZ);
-      if (desiredLen > 0) {
-        const probeX = (desiredX / desiredLen) * WALL_AVOIDANCE_LOOKAHEAD;
-        const probeZ = (desiredZ / desiredLen) * WALL_AVOIDANCE_LOOKAHEAD;
-        const monsterPos = { x: Position.x[eid], y: Position.y[eid], z: Position.z[eid] };
-        const wallHit = castEntityCollider(activeWorld, eid, monsterPos, { x: probeX, y: 0, z: probeZ }, {
-          filterPredicate: (targetEid) =>
-            !Floor[targetEid] &&
-            !Collider.Sensor[targetEid] &&
-            !hasEntityComponents(activeWorld, targetEid, ["Player"]) &&
-            !isProjectileType(activeWorld, targetEid),
+          mObj.rotation.y = Math.atan2(desiredX, desiredZ);
+          engine.set_entity_velocity(mEid, (desiredX + sepX) * MONSTER_WALK_SPEED, 0, (desiredZ + sepZ) * MONSTER_WALK_SPEED);
         });
-        if (wallHit) {
-          const strength = WALL_AVOIDANCE_STRENGTH * (1 - wallHit.toi);
-          desiredX += wallHit.normal1.x * strength;
-          desiredZ += wallHit.normal1.z * strength;
-        }
+      }
+    });
+
+    // --- Camera orbit follow ---
+    applyToObjectByEid(playerEid, (obj) => {
+      const px = obj.position.x;
+      const py = obj.position.y;
+      const pz = obj.position.z;
+
+      obj.rotation.y = yaw;
+
+      // Raycast along the aim direction so the crosshair lands on the first
+      // surface or enemy a bullet would actually reach. aimDirVec is unit-length:
+      // ||(sinY·aimCos, aimSin, cosY·aimCos)||² = aimCos²+aimSin² = 1.
+      const aimCos = Math.cos(aimPitch);
+      const aimSin = Math.sin(aimPitch);
+      aimOriginVec.set(px + sinY * 1.1, py + 0.4, pz + cosY * 1.1);
+      aimDirVec.set(sinY * aimCos, aimSin, cosY * aimCos);
+      aimRaycaster.set(aimOriginVec, aimDirVec);
+
+      let aimDist = AIM_FAR;
+
+      // recursive=false skips LineSegments edge-highlight children — their line-proximity
+      // threshold causes false hits on nearby edges and was the source of the snapping.
+      const terrainHits = aimRaycaster.intersectObjects(terrainMeshes, false);
+      if (terrainHits.length > 0) {
+        aimDist = terrainHits[0].distance;
       }
 
-      const currentAngle = Math.atan2(Velocity.x[eid], Velocity.z[eid]);
-      const targetAngle = Math.atan2(desiredX, desiredZ);
-      let angleDiff = targetAngle - currentAngle;
-      if (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
-      else if (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+      for (const mEid of monsterEids) {
+        applyToObjectByEid(mEid, (mObj) => {
+          const dx = mObj.position.x - aimOriginVec.x;
+          const dy = mObj.position.y - aimOriginVec.y;
+          const dz = mObj.position.z - aimOriginVec.z;
+          const t = dx * aimDirVec.x + dy * aimDirVec.y + dz * aimDirVec.z;
+          if (t <= 0 || t >= aimDist) return;
+          const cx = aimOriginVec.x + aimDirVec.x * t - mObj.position.x;
+          const cy = aimOriginVec.y + aimDirVec.y * t - mObj.position.y;
+          const cz = aimOriginVec.z + aimDirVec.z * t - mObj.position.z;
+          if (cx * cx + cy * cy + cz * cz < PROJ_HIT_RADIUS_SQ) {
+            aimDist = t;
+          }
+        });
+      }
 
-      // Scale turn rate up and speed down proportionally to misalignment angle.
-      // A monster facing away slows to BOX_STEER_SPEED_MIN_FRACTION and turns tighter.
-      // baseSpeed is the monster's intended full speed; targetSpeed recovers toward it as
-      // the monster re-aligns, so slow-down from turning doesn't compound across ticks.
-      const angleFraction = Math.abs(angleDiff) / Math.PI; // 0 = on-target, 1 = fully reversed
-      const boostedMaxSteer = maxSteer * (1 + angleFraction * BOX_STEER_TURN_BOOST);
-      const steer = clamp(angleDiff, -boostedMaxSteer, boostedMaxSteer);
-      const baseSpeed = baseSpeeds.get(eid) ?? currentSpeed;
-      const targetSpeed = baseSpeed * (1 - angleFraction * (1 - BOX_STEER_SPEED_MIN_FRACTION));
-
-      if (steer === 0 && Math.abs(currentSpeed - targetSpeed) < 0.01) continue;
-
-      const newAngle = currentAngle + steer;
-      setEntityVelocity(activeWorld, eid, {
-        x: Math.sin(newAngle) * targetSpeed,
-        y: Velocity.y[eid],
-        z: Math.cos(newAngle) * targetSpeed,
+      // Always project at AIM_FAR — fixed distance means the screen position depends
+      // only on aim direction (yaw/pitch), not on what's in the path. Using the terrain
+      // hit distance causes parallax drift as distance changes through the offset camera.
+      eventBus.emit("ui:crosshairAimPoint", {
+        wx: aimOriginVec.x + aimDirVec.x * AIM_FAR,
+        wy: aimOriginVec.y + aimDirVec.y * AIM_FAR,
+        wz: aimOriginVec.z + aimDirVec.z * AIM_FAR,
       });
-    }
-  });
-}
 
-function spawnEdgeMonster(
-  world: World,
-  floorEids: FloorEids,
-  name: string,
-  baseSpeeds: Map<number, number>,
-): number {
-  const EDGE_INSET = 8;
-  const maxX = FLOOR_COLLIDER.halfWidth - EDGE_INSET;
-  const maxZ = FLOOR_COLLIDER.halfDepth - EDGE_INSET;
-
-  // Pick one of four edges: 0=North, 1=South, 2=East, 3=West
-  const side = Math.floor(rng(0, 3.99));
-  const x = side < 2 ? rng(-maxX, maxX) : side === 2 ? maxX : -maxX;
-  const z = side >= 2 ? rng(-maxZ, maxZ) : side === 0 ? -maxZ : maxZ;
-
-  const position = { x, y: FLOOR_TOP_Y + 4, z };
-  const dx = -x;
-  const dz = -z;
-  const len = Math.hypot(dx, dz);
-  const speed = rng(BOX_MIN_SPEED, BOX_MAX_SPEED, 1);
-  const velocity = len > 0
-    ? { x: (dx / len) * speed, y: 0, z: (dz / len) * speed }
-    : { x: 0, y: 0, z: -speed };
-
-  const eid = createPerson(
-    world,
-    position,
-    velocity,
-    { pitch: 0, yaw: getYawFromXZDirection(velocity.x, velocity.z), roll: 0 },
-    true,
-    100,
-    { level: 0, experience: 0, name },
-    floorEids,
-  );
-  baseSpeeds.set(eid, speed);
-  return eid;
-}
-
-function setupGame(
-  engine: CoreWorldBox,
-  ownership: OwnershipCallbacks,
-): { playerEid: number; ownedEids: number[]; onRemoteEntityHit: (eid: number) => void; spawnMonsters: (count: number) => void } {
-  createFloor(engine.world, FLOOR_POSITION);
-  spawnTerrain(engine.world);
-
-  const floorEids = queryFloorEids(engine.world);
-  // Build the navmesh once after terrain is spawned. Monsters inside its bounds
-  // use A* to navigate ramps, stairs, and ledges; outside they fall back to direct pursuit.
-  const navmesh = new NavMesh(engine.world, floorEids);
-  let primeEid = createPrimePlayer(engine.world, floorEids);
-  engine.setCameraFollowTarget(primeEid);
-
-  const baseSpeeds = new Map<number, number>();
-  const pathStates = new Map<number, MonsterPathState>();
-  const boxEids = spawnAmbientPeople(engine.world, floorEids, baseSpeeds);
-  for (const eid of boxEids) {
-    pathStates.set(eid, createMonsterPathState());
-  }
-  let nextMonsterIndex = boxEids.length;
-
-  const onMonsterHit = (world: CoreWorld, monsterEid: number) => {
-    const idx = boxEids.indexOf(monsterEid);
-    if (idx !== -1) boxEids.splice(idx, 1);
-    baseSpeeds.delete(monsterEid);
-    pathStates.delete(monsterEid);
-    ownership.signalEntityDestroyed(monsterEid);
-    destroyEntity(world, monsterEid);
-    awardXP(world, primeEid, 5);
-
-    const newEid = spawnEdgeMonster(world, floorEids, `Doom${nextMonsterIndex++}`, baseSpeeds);
-    boxEids.push(newEid);
-    pathStates.set(newEid, createMonsterPathState());
-    ownership.addOwnedEntity(newEid);
-  };
-
-  const onDebugMonsterHit = (world: CoreWorld, monsterEid: number) => {
-    const { Position, Velocity, Rotation, Health, Player } = world.components;
-    const pathState = pathStates.get(monsterEid);
-    const baseSpeed = baseSpeeds.get(monsterEid);
-    console.log("[DEBUG MONSTER]", {
-      eid: monsterEid,
-      name: Player[monsterEid]?.name,
-      health: Health[monsterEid],
-      baseSpeed,
-      position: {
-        x: Position.x[monsterEid],
-        y: Position.y[monsterEid],
-        z: Position.z[monsterEid],
-      },
-      velocity: {
-        x: Velocity.x[monsterEid],
-        y: Velocity.y[monsterEid],
-        z: Velocity.z[monsterEid],
-      },
-      rotation: {
-        pitch: Rotation.pitch[monsterEid],
-        yaw: Rotation.yaw[monsterEid],
-        roll: Rotation.roll[monsterEid],
-      },
-      pathState: pathState
-        ? {
-            waypointIndex: pathState.waypointIndex,
-            totalWaypoints: pathState.path?.length ?? 0,
-            routeSeed: pathState.routeSeed,
-            jumpCooldown: pathState.jumpCooldown,
-            stuckTimer: pathState.stuckTimer,
-            stuckSampleTimer: pathState.stuckSampleTimer,
-            path: pathState.path,
-          }
-        : null,
-    });
-  };
-
-  let cleanupPrimeControls = registerPrimeControls(engine.world, primeEid, ownership, onMonsterHit, onDebugMonsterHit);
-  let cleanupBoxSteering = registerBoxSteering(engine.world, boxEids, baseSpeeds, primeEid, navmesh, pathStates);
-
-  engine.world.controls.onTick((activeWorld) => {
-    if (hasEntityComponents(activeWorld, primeEid, ["Player"])) return;
-
-    cleanupPrimeControls();
-    cleanupBoxSteering();
-
-    primeEid = createPrimePlayer(activeWorld, floorEids);
-    engine.setCameraFollowTarget(primeEid);
-    ownership.addOwnedEntity(primeEid);
-    cleanupPrimeControls = registerPrimeControls(activeWorld, primeEid, ownership, onMonsterHit, onDebugMonsterHit);
-    cleanupBoxSteering = registerBoxSteering(activeWorld, boxEids, baseSpeeds, primeEid, navmesh, pathStates);
-  });
-
-  const spawnMonsters = (count: number) => {
-    for (let i = 0; i < count; i++) {
-      const newEid = spawnEdgeMonster(engine.world, floorEids, `Doom${nextMonsterIndex++}`, baseSpeeds);
-      boxEids.push(newEid);
-      pathStates.set(newEid, createMonsterPathState());
-      ownership.addOwnedEntity(newEid);
-    }
-  };
-
-  return {
-    playerEid: primeEid,
-    ownedEids: [primeEid, ...boxEids],
-    onRemoteEntityHit: (eid: number) => onMonsterHit(engine.world, eid),
-    spawnMonsters,
-  };
-}
-
-function queryFloorEids(world: World): FloorEids {
-  return queryEntities(world, ["Floor", "Position", "Rotation", "Collider"]);
-}
-
-function createPrimePlayer(world: CoreWorld, floorEids: FloorEids) {
-  return createPerson(
-    world,
-    PRIME_SPAWN_POSITION,
-    { x: 0, y: 0, z: 0 },
-    { pitch: 0, yaw: 0, roll: 0 },
-    false,
-    100,
-    { level: 0, experience: 0, name: PRIME_PLAYER_NAME },
-    floorEids,
-  );
-}
-
-function spawnAmbientPeople(
-  world: CoreWorld,
-  floorEids: FloorEids,
-  baseSpeeds: Map<number, number>,
-  count = AMBIENT_PERSON_COUNT,
-): number[] {
-  const spawnRangeX = FLOOR_COLLIDER.halfWidth - 4;
-  const spawnRangeZ = FLOOR_COLLIDER.halfDepth - 4;
-  const eids: number[] = [];
-
-  for (let i = 0; i < count; i += 1) {
-    const position = {
-      x: rng(-spawnRangeX, spawnRangeX),
-      y: rng(FLOOR_TOP_Y + 4, FLOOR_TOP_Y + 60),
-      z: rng(-spawnRangeZ, spawnRangeZ),
-    };
-
-    const dx = PRIME_SPAWN_POSITION.x - position.x;
-    const dz = PRIME_SPAWN_POSITION.z - position.z;
-    const len = Math.hypot(dx, dz);
-    const speed = rng(BOX_MIN_SPEED, BOX_MAX_SPEED, 1);
-    const velocity = len > 0
-      ? { x: (dx / len) * speed, y: 0, z: (dz / len) * speed }
-      : { x: 0, y: 0, z: -speed };
-
-    const eid = createPerson(
-      world,
-      position,
-      velocity,
-      {
-        pitch: 0,
-        yaw: getYawFromXZDirection(velocity.x, velocity.z),
-        roll: 0,
-      },
-      true,
-      100,
-      {
-        level: 0,
-        experience: 0,
-        name: `Doom${i}`,
-      },
-      floorEids,
-    );
-    baseSpeeds.set(eid, speed);
-    eids.push(eid);
-  }
-
-  return eids;
-}
-
-function registerPrimeControls(
-  world: CoreWorld,
-  eid: number,
-  ownership: OwnershipCallbacks,
-  onMonsterHit: (world: CoreWorld, monsterEid: number) => void,
-  onDebugMonsterHit: (world: CoreWorld, monsterEid: number) => void,
-): () => void {
-  const projectiles: ProjectileRegistry = new Map();
-  const debugProjectiles = new Set<number>();
-
-  const isControllingPrime = (activeWorld: CoreWorld) => {
-    return (
-      hasEntityComponents(activeWorld, eid, [
-        "Player",
-        "Velocity",
-        "Rotation",
-        "Gravity",
-      ]) && activeWorld.components.Player[eid]?.name === PRIME_PLAYER_NAME
-    );
-  };
-
-  const jump = (activeWorld: CoreWorld) => {
-    if (!isControllingPrime(activeWorld)) return;
-
-    const { Gravity, Velocity } = activeWorld.components;
-    const isGrounded = evaluateFlaginatorFlag(activeWorld, CoreFlags.OnGround, eid);
-    if (!isGrounded && airJumpsUsed >= 1) return;
-
-    Velocity.y[eid] = clamp(
-      PLAYER_JUMP_SPEED,
-      -PLAYER_MAX_SPEED,
-      PLAYER_MAX_SPEED,
-    );
-    Gravity.Grounded[eid] = 0;
-    if (!isGrounded) airJumpsUsed++;
-    markFlaginatorComponentChanged(activeWorld, "Velocity", eid);
-    markFlaginatorComponentChanged(activeWorld, "Gravity", eid);
-  };
-
-  const fireProjectile = (activeWorld: CoreWorld, debug = false) => {
-    if (
-      !hasEntityComponents(activeWorld, eid, [
-        "Position",
-        "Rotation",
-        "Velocity",
-      ])
-    ) {
-      return;
-    }
-
-    const { Position, Rotation } = activeWorld.components;
-    const forward = getEntityForward(activeWorld, eid);
-    const spawnPosition = clampSpawnPositionToFloor(
-      activeWorld,
-      {
-        x:
-          Position.x[eid] + forward.x * PROJECTILE_FORWARD_SPAWN_OFFSET,
-        y:
-          Position.y[eid] +
-          PROJECTILE_SPAWN_HEIGHT +
-          forward.y * PROJECTILE_FORWARD_SPAWN_OFFSET,
-        z:
-          Position.z[eid] + forward.z * PROJECTILE_FORWARD_SPAWN_OFFSET,
-      },
-      PROJECTILE_COLLIDER.halfHeight,
-    );
-    const projectileEid = spawnEntity(activeWorld, {
-      position: spawnPosition,
-      velocity: {
-        x: forward.x * PROJECTILE_SPEED,
-        y: forward.y * PROJECTILE_SPEED,
-        z: forward.z * PROJECTILE_SPEED,
-      },
-      rotation: {
-        pitch: Rotation.pitch[eid],
-        yaw: Rotation.yaw[eid],
-        roll: 0,
-      },
-      // PROJECTILE marks entity type (bullet mesh on remote, life/death signaling).
-      // addOwnedEntity below adds OWNED|SHARED so state is broadcast to peers.
-      netFlags: NET.PROJECTILE,
-      collider: PROJECTILE_COLLIDER,
-      renderMesh: createProjectileRenderMesh,
-    });
-
-    projectiles.set(projectileEid, {
-      remainingTicks: PROJECTILE_TTL_TICKS,
-      bounceCooldownsByTarget: new Map(),
-    });
-    if (debug) debugProjectiles.add(projectileEid);
-    ownership.addOwnedEntity(projectileEid);
-  };
-
-  const updateProjectiles = (
-    activeWorld: CoreWorld,
-    deltaSeconds: number,
-  ) => {
-    const { Position, Velocity } = activeWorld.components;
-    // Only monsters (non-prime players) should be hit by projectiles.
-    const isMonsterPlayer = (t: number) =>
-      hasEntityComponents(activeWorld, t, ["Player"]) &&
-      activeWorld.components.Player[t]?.name !== PRIME_PLAYER_NAME;
-
-    for (const [projectileEid, projectile] of projectiles) {
-      if (
-        !hasEntityComponents(activeWorld, projectileEid, [
-          "Position",
-          "Rotation",
-          "Velocity",
-          "Collider",
-        ])
-      ) {
-        ownership.signalEntityDestroyed(projectileEid);
-        debugProjectiles.delete(projectileEid);
-        projectiles.delete(projectileEid);
-        continue;
+      if (!camOrbitActive) {
+        // Trail player yaw when not manually orbiting; smooth to avoid snapping on sharp turns
+        const targetYaw = yaw + Math.PI;
+        const delta = Math.atan2(Math.sin(targetYaw - camYaw), Math.cos(targetYaw - camYaw));
+        camYaw += delta * 0.12;
       }
 
-      updateProjectileBounceCooldowns(projectile);
-      projectile.remainingTicks -= 1;
-      if (projectile.remainingTicks <= 0) {
-        ownership.signalEntityDestroyed(projectileEid);
-        destroyEntity(activeWorld, projectileEid);
-        debugProjectiles.delete(projectileEid);
-        projectiles.delete(projectileEid);
-        continue;
-      }
+      const horizDist = Math.cos(camPitch) * CAM_DISTANCE;
+      const followX = Math.sin(camYaw) * horizDist;
+      const followY = Math.sin(camPitch) * CAM_DISTANCE;
+      const followZ = Math.cos(camYaw) * horizDist;
 
-      const currentPosition = {
-        x: Position.x[projectileEid],
-        y: Position.y[projectileEid],
-        z: Position.z[projectileEid],
-      };
-      const currentVelocity = {
-        x: Velocity.x[projectileEid],
-        y: Velocity.y[projectileEid],
-        z: Velocity.z[projectileEid],
-      };
-      const isFreshBounceTarget = (targetEid: number) => {
-        return (
-          targetEid !== eid &&
-          !isProjectileType(activeWorld, targetEid) &&
-          (projectile.bounceCooldownsByTarget.get(targetEid) ?? 0) === 0
-        );
-      };
-
-      // Overlap bounce: projectile is already inside something (tunneled last tick).
-      // Compute the bounce fresh per-target using the actual contact normal so
-      // stale accumulated suggestions from already-bounced surfaces don't corrupt
-      // corner hits.
-      const freshOverlapTargets = getTouchingEntities(activeWorld, projectileEid)
-        .filter(isFreshBounceTarget);
-
-      if (freshOverlapTargets.length > 0) {
-        const hitOwnedMonster = freshOverlapTargets.find(t =>
-          isMonsterPlayer(t) && hasNetFlag(activeWorld, t, NET.OWNED)
-        );
-        if (hitOwnedMonster !== undefined) {
-          if (debugProjectiles.has(projectileEid)) {
-            onDebugMonsterHit(activeWorld, hitOwnedMonster);
-          } else {
-            onMonsterHit(activeWorld, hitOwnedMonster);
-          }
-          debugProjectiles.delete(projectileEid);
-          ownership.signalEntityDestroyed(projectileEid);
-          destroyEntity(activeWorld, projectileEid);
-          projectiles.delete(projectileEid);
-          continue;
-        }
-
-        const hitRemoteMonster = freshOverlapTargets.find(t =>
-          isMonsterPlayer(t) && !hasNetFlag(activeWorld, t, NET.OWNED)
-        );
-        if (hitRemoteMonster !== undefined) {
-          if (debugProjectiles.has(projectileEid)) {
-            onDebugMonsterHit(activeWorld, hitRemoteMonster);
-          } else {
-            ownership.signalHitOnRemoteEntity(hitRemoteMonster);
-          }
-          debugProjectiles.delete(projectileEid);
-          ownership.signalEntityDestroyed(projectileEid);
-          destroyEntity(activeWorld, projectileEid);
-          projectiles.delete(projectileEid);
-          continue;
-        }
-
-        let bouncedVelocity = currentVelocity;
-        let didBounce = false;
-
-        for (let i = 0; i < freshOverlapTargets.length; i += 1) {
-          const bounceDelta = getContactBounceDelta(
-            activeWorld,
-            projectileEid,
-            freshOverlapTargets[i]!,
-          );
-          if (!bounceDelta) continue;
-          bouncedVelocity = addVectors(bouncedVelocity, bounceDelta);
-          didBounce = true;
-        }
-
-        if (didBounce) {
-          const separatedPosition = getProjectileSeparatedPosition(
-            currentPosition,
-            bouncedVelocity,
-          );
-          setEntityPosition(activeWorld, projectileEid, separatedPosition);
-          setEntityVelocity(activeWorld, projectileEid, bouncedVelocity);
-          faceEntityAlongVelocity(activeWorld, projectileEid, bouncedVelocity);
-
-          for (let i = 0; i < freshOverlapTargets.length; i += 1) {
-            projectile.bounceCooldownsByTarget.set(
-              freshOverlapTargets[i]!,
-              PROJECTILE_BOUNCE_REPEAT_COOLDOWN_TICKS,
-            );
-          }
-
-          continue;
-        }
-      }
-
-      if (deltaSeconds <= 0) {
-        continue;
-      }
-
-      const movementDelta = scaleVector(currentVelocity, deltaSeconds);
-      if (
-        movementDelta.x === 0 &&
-        movementDelta.y === 0 &&
-        movementDelta.z === 0
-      ) {
-        continue;
-      }
-
-      const sweptHit = castEntityCollider(
-        activeWorld,
-        projectileEid,
-        currentPosition,
-        movementDelta,
-        {
-          filterPredicate: isFreshBounceTarget,
-        },
-      );
-      if (sweptHit && isMonsterPlayer(sweptHit.colliderEid)) {
-        if (debugProjectiles.has(projectileEid)) {
-          onDebugMonsterHit(activeWorld, sweptHit.colliderEid);
-        } else if (hasNetFlag(activeWorld, sweptHit.colliderEid, NET.OWNED)) {
-          onMonsterHit(activeWorld, sweptHit.colliderEid);
+      // Cast a ray from the look-at point toward the desired camera position.
+      // Snap camera in immediately when terrain blocks the path; spring back when clear.
+      const rayX = followX;
+      const rayY = followY - CAM_LOOK_HEIGHT_OFFSET;
+      const rayZ = followZ;
+      const rayLen = Math.sqrt(rayX * rayX + rayY * rayY + rayZ * rayZ);
+      if (rayLen > 0) {
+        camLookAtVec.set(px, py + CAM_LOOK_HEIGHT_OFFSET, pz);
+        camRayDirVec.set(rayX / rayLen, rayY / rayLen, rayZ / rayLen);
+        camRaycaster.set(camLookAtVec, camRayDirVec);
+        const hits = camRaycaster.intersectObjects(terrainMeshes, true);
+        const maxCamDist =
+          hits.length > 0 && hits[0].distance < rayLen
+            ? Math.max(0, ((hits[0].distance - CAM_WALL_SEPARATION) / rayLen) * CAM_DISTANCE)
+            : CAM_DISTANCE;
+        if (camFollowDist > maxCamDist) {
+          camFollowDist = maxCamDist;
         } else {
-          ownership.signalHitOnRemoteEntity(sweptHit.colliderEid);
+          camFollowDist = Math.min(CAM_DISTANCE, camFollowDist + CAM_RESTORE_SPEED * dt);
         }
-        debugProjectiles.delete(projectileEid);
-        ownership.signalEntityDestroyed(projectileEid);
-        destroyEntity(activeWorld, projectileEid);
-        projectiles.delete(projectileEid);
-        continue;
       }
 
-      if (!sweptHit) {
-        setEntityPosition(activeWorld, projectileEid, {
-          x: currentPosition.x + movementDelta.x,
-          y: currentPosition.y + movementDelta.y,
-          z: currentPosition.z + movementDelta.z,
-        });
-        continue;
-      }
-
-      const resolvedBounce = resolveProjectileSweepBounce(
-        activeWorld,
-        projectileEid,
-        sweptHit.colliderEid,
-        currentVelocity,
-        {
-          x: sweptHit.normal1.x,
-          y: sweptHit.normal1.y,
-          z: sweptHit.normal1.z,
-        },
-      );
-      const correctedToi = clamp(
-        sweptHit.toi - PROJECTILE_SWEEP_REWIND_TOI,
-        0,
-        1,
-      );
-      const impactPosition = {
-        x: currentPosition.x + movementDelta.x * correctedToi,
-        y: currentPosition.y + movementDelta.y * correctedToi,
-        z: currentPosition.z + movementDelta.z * correctedToi,
-      };
-      if (!resolvedBounce) {
-        setEntityPosition(activeWorld, projectileEid, impactPosition);
-        continue;
-      }
-
-      const bouncedVelocity = addVectors(
-        currentVelocity,
-        resolvedBounce.bounceDelta,
-      );
-      const correctedPosition = getProjectileSeparatedPosition(
-        impactPosition,
-        bouncedVelocity,
-      );
-      setEntityPosition(activeWorld, projectileEid, correctedPosition);
-      setEntityVelocity(activeWorld, projectileEid, bouncedVelocity);
-      faceEntityAlongVelocity(activeWorld, projectileEid, bouncedVelocity);
-
-      projectile.bounceCooldownsByTarget.set(
-        sweptHit.colliderEid,
-        PROJECTILE_BOUNCE_REPEAT_COOLDOWN_TICKS,
-      );
-    }
-  };
-
-  const unsubProjectiles = world.controls.onTick((activeWorld, tick) => {
-    updateProjectiles(activeWorld, tick.deltaSeconds);
-  });
-
-  let sprintStamina = PLAYER_SPRINT_STAMINA_MAX;
-  let lastEmittedSprintStamina = sprintStamina;
-  let airJumpsUsed = 0;
-  let wasGrounded = true;
-  let pendingMousePitchDelta = 0;
-  let pendingMouseYawDelta = 0;
-
-  const unsubMousePitch = world.controls.on(
-    { source: ControlSources.Pointer, controlId: PointerControls.Move, phase: "change" },
-    (_activeWorld, event) => {
-      if (typeof document === "undefined" || !document.pointerLockElement) return;
-      const payload = event.payload as { movementX: number; movementY: number };
-      pendingMousePitchDelta += payload.movementY;
-      pendingMouseYawDelta -= payload.movementX;
-    },
-  );
-
-  const unsubMovement = world.controls.onTick((activeWorld, tick, controls) => {
-    if (!isControllingPrime(activeWorld)) return;
-
-    const isGrounded = activeWorld.components.Gravity.Grounded[eid] === 1;
-    if (isGrounded && !wasGrounded) airJumpsUsed = 0;
-    wasGrounded = isGrounded;
-
-    const dt = tick.deltaSeconds;
-    if (dt === 0) return;
-
-    const isSprinting =
-      controls.isActive(KeyboardControls.ShiftLeft, ControlSources.Keyboard) &&
-      sprintStamina > 0;
-
-    if (isSprinting) {
-      sprintStamina = Math.max(0, sprintStamina - PLAYER_SPRINT_DRAIN_PER_SECOND * dt);
-    } else {
-      sprintStamina = Math.min(
-        PLAYER_SPRINT_STAMINA_MAX,
-        sprintStamina + PLAYER_SPRINT_REGEN_PER_SECOND * dt,
-      );
-    }
-
-    if (Math.abs(sprintStamina - lastEmittedSprintStamina) > 0.005) {
-      eventBus.emit("ui:sprintStaminaUpdate", { stamina: sprintStamina });
-      lastEmittedSprintStamina = sprintStamina;
-    }
-
-    const sprintAccel = isSprinting
-      ? PLAYER_ACCELERATION * PLAYER_SPRINT_ACCELERATION_MULTIPLIER
-      : PLAYER_ACCELERATION;
-    const sprintMaxSpeed = isSprinting
-      ? PLAYER_MAX_SPEED * PLAYER_SPRINT_MAX_SPEED_MULTIPLIER
-      : PLAYER_MAX_SPEED;
-
-    const drag = Math.max(0, 1 - PLAYER_DRAG_PER_SECOND * dt);
-    const { Velocity, Rotation } = activeWorld.components;
-    const previousVelocityX = Velocity.x[eid];
-    const previousVelocityY = Velocity.y[eid];
-    const previousVelocityZ = Velocity.z[eid];
-    Velocity.x[eid] *= drag;
-    Velocity.z[eid] *= drag;
-
-    const isRightClickHeld = controls.isActive(PointerControls.Secondary, ControlSources.Pointer);
-    const adStrafeAxis = isRightClickHeld
-      ? controls.getAxis(PLAYER_LOOK_LEFT_KEYS, PLAYER_LOOK_RIGHT_KEYS, ControlSources.Keyboard)
-      : 0;
-    const localAcceleration = {
-      x:
-        (controls.getAxis(
-          PLAYER_STRAFE_LEFT_KEYS,
-          PLAYER_STRAFE_RIGHT_KEYS,
-          ControlSources.Keyboard,
-        ) + adStrafeAxis) * sprintAccel,
-      y: 0,
-      z:
-        controls.getAxis(
-          PLAYER_FORWARD_KEYS,
-          PLAYER_BACKWARD_KEYS,
-          ControlSources.Keyboard,
-        ) * sprintAccel,
-    };
-    const pitchAxis = controls.getAxis(
-      PLAYER_PITCH_DOWN_KEYS,
-      PLAYER_PITCH_UP_KEYS,
-      ControlSources.Keyboard,
-    );
-    const yawAxis = isRightClickHeld
-      ? 0
-      : controls.getAxis(
-          PLAYER_LOOK_RIGHT_KEYS,
-          PLAYER_LOOK_LEFT_KEYS,
-          ControlSources.Keyboard,
-        );
-    const worldAcceleration = rotateLocalVectorByYaw(
-      activeWorld,
-      eid,
-      localAcceleration,
-    );
-
-    Velocity.x[eid] = clamp(
-      Velocity.x[eid] + worldAcceleration.x * dt,
-      -sprintMaxSpeed,
-      sprintMaxSpeed,
-    );
-    Velocity.y[eid] = clamp(
-      Velocity.y[eid] + worldAcceleration.y * dt,
-      -PLAYER_MAX_SPEED,
-      PLAYER_MAX_SPEED,
-    );
-    Velocity.z[eid] = clamp(
-      Velocity.z[eid] + worldAcceleration.z * dt,
-      -sprintMaxSpeed,
-      sprintMaxSpeed,
-    );
-
-    if (
-      Velocity.x[eid] !== previousVelocityX ||
-      Velocity.y[eid] !== previousVelocityY ||
-      Velocity.z[eid] !== previousVelocityZ
-    ) {
-      markFlaginatorComponentChanged(activeWorld, "Velocity", eid);
-    }
-
-    const mousePitchDelta = pendingMousePitchDelta;
-    pendingMousePitchDelta = 0;
-    const mouseYawDelta = pendingMouseYawDelta;
-    pendingMouseYawDelta = 0;
-
-    if (pitchAxis === 0 && yawAxis === 0 && mousePitchDelta === 0 && mouseYawDelta === 0) return;
-
-    const nextRotation: Partial<Rotation> = {};
-    if (pitchAxis !== 0 || mousePitchDelta !== 0) {
-      nextRotation.pitch = clamp(
-        Rotation.pitch[eid] +
-          pitchAxis * PLAYER_PITCH_SPEED * dt -
-          mousePitchDelta * MOUSE_PITCH_SENSITIVITY,
-        -PLAYER_MAX_PITCH,
-        PLAYER_MAX_PITCH,
-      );
-    }
-    if (yawAxis !== 0 || mouseYawDelta !== 0) {
-      nextRotation.yaw = Rotation.yaw[eid] + yawAxis * PLAYER_YAW_SPEED * dt + mouseYawDelta * MOUSE_YAW_SENSITIVITY;
-    }
-    setEntityRotation(activeWorld, eid, nextRotation);
-  });
-
-  const unsubJump = world.controls.on(
-    {
-      source: ControlSources.Keyboard,
-      controlId: KeyboardControls.Space,
-      phase: "start",
-    },
-    (activeWorld) => {
-      jump(activeWorld);
-    },
-  );
-
-  const unsubBoost = world.controls.on(
-    {
-      source: ControlSources.React,
-      controlId: PlayerReactControls.BoostForward,
-      phase: "trigger",
-    },
-    (activeWorld) => {
-      if (!isControllingPrime(activeWorld)) return;
-
-      const { Velocity } = activeWorld.components;
-      const forward = rotateLocalVectorByYaw(activeWorld, eid, { x: 0, y: 0, z: -1 });
-      Velocity.x[eid] = clamp(
-        Velocity.x[eid] + forward.x * PLAYER_FORWARD_BOOST,
-        -PLAYER_MAX_SPEED,
-        PLAYER_MAX_SPEED,
-      );
-      Velocity.z[eid] = clamp(
-        Velocity.z[eid] + forward.z * PLAYER_FORWARD_BOOST,
-        -PLAYER_MAX_SPEED,
-        PLAYER_MAX_SPEED,
-      );
-      markFlaginatorComponentChanged(activeWorld, "Velocity", eid);
-    },
-  );
-
-  const unsubFire = world.controls.on(
-    {
-      source: ControlSources.Pointer,
-      controlId: PointerControls.Primary,
-      phase: "trigger",
-    },
-    (activeWorld) => {
-      if (!isControllingPrime(activeWorld)) return;
-      fireProjectile(activeWorld);
-    },
-  );
-
-  const unsubDebugFire = world.controls.on(
-    {
-      source: ControlSources.Keyboard,
-      controlId: "Digit1",
-      phase: "start",
-    },
-    (activeWorld) => {
-      if (!isControllingPrime(activeWorld)) return;
-      fireProjectile(activeWorld, true);
-    },
-  );
-
-  const unsubCrosshair = world.controls.onTick((activeWorld) => {
-    if (!isControllingPrime(activeWorld)) return;
-    const { Position } = activeWorld.components;
-    const forward = getEntityForward(activeWorld, eid);
-    const spawnOrigin = clampSpawnPositionToFloor(
-      activeWorld,
-      {
-        x: Position.x[eid]! + forward.x * PROJECTILE_FORWARD_SPAWN_OFFSET,
-        y: Position.y[eid]! + PROJECTILE_SPAWN_HEIGHT + forward.y * PROJECTILE_FORWARD_SPAWN_OFFSET,
-        z: Position.z[eid]! + forward.z * PROJECTILE_FORWARD_SPAWN_OFFSET,
-      },
-      PROJECTILE_COLLIDER.halfHeight,
-    );
-    const ox = spawnOrigin.x;
-    const oy = spawnOrigin.y;
-    const oz = spawnOrigin.z;
-    const ex = ox + forward.x * CROSSHAIR_MAX_DIST;
-    const ey = oy + forward.y * CROSSHAIR_MAX_DIST;
-    const ez = oz + forward.z * CROSSHAIR_MAX_DIST;
-    const hit = castRayFromTo(
-      activeWorld,
-      { x: ox, y: oy, z: oz },
-      { x: ex, y: ey, z: ez },
-      { filterPredicate: (otherEid) => otherEid !== eid && !isProjectileType(activeWorld, otherEid) },
-    );
-    eventBus.emit("ui:crosshairAimPoint", {
-      wx: ex, wy: ey, wz: ez,
-      hasHit: hit !== null,
-      hitWx: hit ? ox + (ex - ox) * hit.toi : ex,
-      hitWy: hit ? oy + (ey - oy) * hit.toi : ey,
-      hitWz: hit ? oz + (ez - oz) * hit.toi : ez,
+      const t = CAM_DISTANCE > 0 ? camFollowDist / CAM_DISTANCE : 0;
+      setCameraPosition(px + followX * t, py + followY * t, pz + followZ * t);
+      lookCameraAt(px, py + CAM_LOOK_HEIGHT_OFFSET, pz);
     });
-  });
-
-  return () => {
-    unsubProjectiles();
-    unsubMovement();
-    unsubMousePitch();
-    unsubJump();
-    unsubBoost();
-    unsubFire();
-    unsubDebugFire();
-    unsubCrosshair();
-  };
-}
-
-function clampSpawnPositionToFloor(
-  world: World,
-  position: Position,
-  halfHeight: number,
-  floorEids: FloorEids = queryFloorEids(world),
-) {
-  // Only consider floors at or below the spawn Y so platforms above the player
-  // don't push the spawn position up through raised geometry.
-  const floorTop = findHighestFloorTopAtPosition(
-    world,
-    floorEids,
-    position.x,
-    position.z,
-    position.y,
-  );
-  if (floorTop === null) {
-    return position;
   }
 
-  return {
-    x: position.x,
-    y: Math.max(position.y, floorTop + halfHeight),
-    z: position.z,
-  };
-}
-
-function normalizeVector(vector: Velocity): Velocity {
-  const normalizedVector = normalizeVectorOrNull(vector);
-  if (normalizedVector) {
-    return normalizedVector;
-  }
-
-  return { x: 0, y: 0, z: -1 };
-}
-
-function normalizeVectorOrNull(vector: Velocity): Velocity | null {
-  const length = Math.hypot(vector.x, vector.y, vector.z);
-  if (length === 0) {
-    return null;
-  }
-
-  return {
-    x: vector.x / length,
-    y: vector.y / length,
-    z: vector.z / length,
-  };
-}
-
-function scaleVector(vector: Velocity, scalar: number): Velocity {
-  return {
-    x: vector.x * scalar,
-    y: vector.y * scalar,
-    z: vector.z * scalar,
-  };
-}
-
-function addVectors(a: Velocity, b: Vec3): Velocity {
-  return {
-    x: a.x + b.x,
-    y: a.y + b.y,
-    z: a.z + b.z,
-  };
-}
-
-function invertVector(vector: Vec3): Velocity {
-  return {
-    x: -vector.x,
-    y: -vector.y,
-    z: -vector.z,
-  };
-}
-
-function dotVectors(a: Vec3, b: Vec3): number {
-  return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
-function getFallbackProjectileBounceDelta(
-  velocity: Velocity,
-  normal: Velocity,
-): Velocity | null {
-  const closingSpeed = dotVectors(velocity, normal);
-  if (closingSpeed <= 0) {
-    return null;
-  }
-
-  return {
-    x:
-      -normal.x *
-      closingSpeed *
-      (1 + PROJECTILE_FALLBACK_BOUNCE_RESTITUTION),
-    y:
-      -normal.y *
-      closingSpeed *
-      (1 + PROJECTILE_FALLBACK_BOUNCE_RESTITUTION),
-    z:
-      -normal.z *
-      closingSpeed *
-      (1 + PROJECTILE_FALLBACK_BOUNCE_RESTITUTION),
-  };
-}
-
-function resolveProjectileSweepBounce(
-  world: CoreWorld,
-  projectileEid: number,
-  colliderEid: number,
-  velocity: Velocity,
-  sweepNormal: Vec3,
-) {
-  const candidateNormals = [
-    normalizeVectorOrNull(sweepNormal),
-    normalizeVectorOrNull(
-      rotateLocalVectorByEntityRotation(world, projectileEid, sweepNormal),
-    ),
-  ].filter((candidate): candidate is Velocity => candidate !== null);
-
-  for (let i = 0; i < candidateNormals.length; i += 1) {
-    const normal = candidateNormals[i]!;
-    const bounceDelta = getCollisionBounceDelta(
-      world,
-      projectileEid,
-      colliderEid,
-      normal,
+  // --- Spawn monsters ---
+  async function spawnMonsters(count: number): Promise<void> {
+    await Promise.all(
+      Array.from({ length: count }, async (_, i) => {
+        const angle = (i / count) * Math.PI * 2;
+        const radius = 10 + (i % 3) * 4;
+        const x = Math.cos(angle) * radius;
+        const z = Math.sin(angle) * radius;
+        const eid = await engine.spawn_box_entity(x, 5, z, 0.4, 0.9, 0.4, 50, NET_LOCAL);
+        const mObj = upsertObjectByEid(eid, () => makePersonMesh(0xcc4444, 0xff8800));
+        mObj.position.set(x, 5, z);
+        monsterEids.push(eid);
+        monsterPathStates.set(eid, createMonsterPathState());
+        ownedEids.push(eid);
+        ownership.addOwnedEntity(eid);
+      }),
     );
-    if (bounceDelta) {
-      return { bounceDelta, impactNormal: normal };
-    }
-
-    const invertedNormal = invertVector(normal);
-    const invertedBounceDelta = getCollisionBounceDelta(
-      world,
-      projectileEid,
-      colliderEid,
-      invertedNormal,
-    );
-    if (invertedBounceDelta) {
-      return { bounceDelta: invertedBounceDelta, impactNormal: invertedNormal };
-    }
   }
 
-  for (let i = 0; i < candidateNormals.length; i += 1) {
-    const normal = candidateNormals[i]!;
-    const fallbackBounceDelta = getFallbackProjectileBounceDelta(
-      velocity,
-      normal,
-    );
-    if (fallbackBounceDelta) {
-      return { bounceDelta: fallbackBounceDelta, impactNormal: normal };
-    }
+  function onRemoteEntityHit(_eid: number) {}
 
-    const invertedNormal = invertVector(normal);
-    const invertedFallbackBounceDelta = getFallbackProjectileBounceDelta(
-      velocity,
-      invertedNormal,
-    );
-    if (invertedFallbackBounceDelta) {
-      return {
-        bounceDelta: invertedFallbackBounceDelta,
-        impactNormal: invertedNormal,
-      };
-    }
+  function cleanup() {
+    window.removeEventListener("keydown", onKeyDown);
+    window.removeEventListener("keyup", onKeyUp);
+    window.removeEventListener("mousedown", onMouseDown);
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("pointerlockchange", onPointerLockChange);
+    document.removeEventListener("contextmenu", onContextMenu);
+    if (canvas && document.pointerLockElement === canvas) document.exitPointerLock();
+    unsubHud();
+    // Three.js objects and engine entities are cleaned up by disposeRenderer() on unmount.
   }
 
-  return null;
+  return { playerEid, ownedEids, onRemoteEntityHit, spawnMonsters, onFrame, onCameraDrag, onCameraReset, cleanup };
 }
-
-function getProjectileSeparatedPosition(
-  position: Position,
-  bouncedVelocity: Velocity,
-): Position {
-  const separationDirection = normalizeVectorOrNull(bouncedVelocity);
-  if (!separationDirection) {
-    return position;
-  }
-
-  return {
-    x:
-      position.x +
-      separationDirection.x * PROJECTILE_BOUNCE_SEPARATION_DISTANCE,
-    y:
-      position.y +
-      separationDirection.y * PROJECTILE_BOUNCE_SEPARATION_DISTANCE,
-    z:
-      position.z +
-      separationDirection.z * PROJECTILE_BOUNCE_SEPARATION_DISTANCE,
-  };
-}
-
-function faceEntityAlongVelocity(
-  world: CoreWorld,
-  eid: number,
-  velocity: Velocity,
-) {
-  const normalizedVelocity = normalizeVectorOrNull(velocity);
-  if (!normalizedVelocity) {
-    return;
-  }
-
-  const horizontalSpeed = Math.hypot(
-    normalizedVelocity.x,
-    normalizedVelocity.z,
-  );
-  setEntityRotation(world, eid, {
-    pitch: Math.asin(clamp(normalizedVelocity.y, -1, 1)),
-    yaw:
-      horizontalSpeed > 0
-        ? getYawFromXZDirection(normalizedVelocity.x, normalizedVelocity.z)
-        : undefined,
-    roll: 0,
-  });
-}
-
-function updateProjectileBounceCooldowns(projectile: ProjectileState) {
-  for (const [targetEid, remainingTicks] of projectile.bounceCooldownsByTarget) {
-    if (remainingTicks <= 1) {
-      projectile.bounceCooldownsByTarget.delete(targetEid);
-      continue;
-    }
-
-    projectile.bounceCooldownsByTarget.set(targetEid, remainingTicks - 1);
-  }
-}
-
-function createPerson(
-  world: World,
-  position: Position,
-  velocity: Velocity,
-  rotation: Rotation,
-  faceVelocity: boolean,
-  health: number,
-  player: Player,
-  floorEids: FloorEids = queryFloorEids(world),
-) {
-  const spawnPosition = clampSpawnPositionToFloor(
-    world,
-    position,
-    PERSON_COLLIDER.halfHeight,
-    floorEids,
-  );
-
-  return spawnEntity(world, {
-    position: spawnPosition,
-    velocity,
-    rotation,
-    faceVelocity,
-    gravity: true,
-    health,
-    player,
-    collider: PERSON_COLLIDER,
-    renderMesh: createPersonRenderMesh,
-  });
-}
-
-function createFloor(world: World, position: Position) {
-  return spawnEntity(world, {
-    position,
-    floor: true,
-    collider: FLOOR_COLLIDER,
-    renderMesh: createFloorRenderMesh,
-  });
-}
-
-function createFloorSlab(
-  world: World,
-  position: Position,
-  halfWidth: number,
-  halfHeight: number,
-  halfDepth: number,
-  baseMaterial: MeshLambertMaterial,
-  edgeMaterial: LineBasicMaterial,
-  pitch = 0,
-  yaw = 0,
-) {
-  const geometry = new BoxGeometry(halfWidth * 2, halfHeight * 2, halfDepth * 2);
-  const edgeGeometry = new EdgesGeometry(geometry);
-  return spawnEntity(world, {
-    position,
-    rotation: { pitch, yaw, roll: 0 },
-    floor: true,
-    collider: { halfWidth, halfHeight, halfDepth },
-    renderMesh: () => {
-      const mesh = new Mesh(geometry, baseMaterial);
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      const outline = new LineSegments(edgeGeometry, edgeMaterial);
-      outline.renderOrder = 1;
-      outline.scale.setScalar(1.0005);
-      mesh.add(outline);
-      return mesh;
-    },
-  });
-}
-
-// Yaw values for ramps: determines which direction goes "up" (surface rises that way).
-// Derived from the closed-form surface equation: surfaceY = cy + hy/cos(p) - tan(p)*(sin(yaw)*(px-cx) + cos(yaw)*(pz-cz))
-const RAMP_YAW = { north: 0, south: Math.PI, east: -Math.PI / 2, west: Math.PI / 2 } as const
-
-// Spawn a ramp whose low end sits at FLOOR_TOP_Y and high end at FLOOR_TOP_Y+rise.
-// cx/cz is the horizontal center; run is the total horizontal distance; halfWidthPerp is width.
-function spawnRamp(
-  world: World,
-  cx: number,
-  cz: number,
-  run: number,
-  rise: number,
-  upward: keyof typeof RAMP_YAW,
-  halfWidthPerp: number,
-) {
-  const pitch = Math.atan2(rise, run)
-  const hzLocal = Math.hypot(rise, run) / 2
-  const cy = FLOOR_TOP_Y + rise / 2 - 0.4 / Math.cos(pitch)
-  createFloorSlab(world, { x: cx, y: cy, z: cz }, halfWidthPerp, 0.4, hzLocal,
-    RAMP_BASE_MATERIAL, RAMP_EDGE_MATERIAL, pitch, RAMP_YAW[upward])
-}
-
-// Spawn a flat walkable platform whose top surface is at topY.
-function spawnPlatform(
-  world: World,
-  cx: number,
-  topY: number,
-  cz: number,
-  halfWidth: number,
-  halfDepth: number,
-) {
-  const hh = 0.3
-  createFloorSlab(world, { x: cx, y: topY - hh, z: cz }, halfWidth, hh, halfDepth,
-    STEP_BASE_MATERIAL, STEP_EDGE_MATERIAL)
-}
-
-function spawnTerrain(world: World) {
-  // ── EAST WING (y=4) ───────────────────────────────────────────────────────
-  // Ramp: low at x=10 (ground), high at x=22 (y=4). run=12, rise=4, going east.
-  spawnRamp(world, 16, 2, 12, 4, 'east', 5)
-  // Large east platform. Extends far enough north to lap under the north bridge.
-  spawnPlatform(world, 31, 4, -6, 9, 22)
-  // Narrow walkway jutting east off the platform → small balcony overlook
-  spawnPlatform(world, 43, 4, 0, 1.5, 3)
-  spawnPlatform(world, 49, 4, 0, 3, 4)
-
-  // ── WEST WING (y=4) ───────────────────────────────────────────────────────
-  // Staircase going west — 4 steps of 1 unit each (max jump height ≈ 1.33 units).
-  // Each step is a solid block from ground to its top so visually they stack.
-  for (let i = 0; i < 4; i++) {
-    const stepTop = FLOOR_TOP_Y + (i + 1)
-    createFloorSlab(
-      world,
-      { x: -(12 + i * 3), y: stepTop / 2, z: 5 },
-      1.5, stepTop / 2, 2.5,
-      STEP_BASE_MATERIAL, STEP_EDGE_MATERIAL,
-    )
-  }
-  // Large west platform. Same footprint as the east platform, mirrored.
-  spawnPlatform(world, -31, 4, -6, 9, 22)
-
-  // ── NORTH BRIDGE (y=4) ────────────────────────────────────────────────────
-  // Wide walkway connecting both wings across the north end.
-  spawnPlatform(world, 0, 4, -26, 22, 5)
-
-  // ── NORTH KEEP (y=4) ──────────────────────────────────────────────────────
-  // Fortified area hanging off the north end of the bridge.
-  spawnPlatform(world, 0, 4, -37, 8, 6)
-  createWall(world, { x: 0, y: 5.5, z: -43 }, 8, 1.5, 0.4)
-
-  // Stairs from keep (y=4) up to upper keep (y=8). Each step 1 unit higher.
-  for (let i = 0; i < 4; i++) {
-    const stepTop = 4 + (i + 1)
-    createFloorSlab(
-      world,
-      { x: 0, y: stepTop - 0.5, z: -(44 + i * 3) },
-      4, 0.5, 1.5,
-      STEP_BASE_MATERIAL, STEP_EDGE_MATERIAL,
-    )
-  }
-
-  // ── UPPER KEEP (y=8) ──────────────────────────────────────────────────────
-  spawnPlatform(world, 0, 8, -58, 5, 4)
-  createWall(world, { x: 0, y: 9.5, z: -62 }, 5, 1.5, 0.4)
-
-  // ── SOUTH TERRACE (y=3) ───────────────────────────────────────────────────
-  // Ramp: low at z=30 (ground), high at z=22 (y=3). run=8, rise=3, going north.
-  spawnRamp(world, 0, 26, 8, 3, 'north', 8)
-  spawnPlatform(world, 0, 3, 17, 12, 5)
-
-  // ── WALLS & PARAPETS ──────────────────────────────────────────────────────
-  // Courtyard cover near spawn
-  createWall(world, { x: -5, y: 1.5, z: -7 }, 0.5, 1.5, 3)
-  createWall(world, { x:  5, y: 1.5, z: -7 }, 0.5, 1.5, 3)
-  // East platform east parapet
-  createWall(world, { x: 40, y: 4.8, z: -6 }, 0.3, 0.8, 22)
-  // West platform west parapet
-  createWall(world, { x: -40, y: 4.8, z: -6 }, 0.3, 0.8, 22)
-  // North bridge north parapets (split at centre to leave an opening)
-  createWall(world, { x: -11, y: 4.8, z: -31 }, 11, 0.8, 0.4)
-  createWall(world, { x:  11, y: 4.8, z: -31 }, 11, 0.8, 0.4)
-}
-
-export { setupGame };

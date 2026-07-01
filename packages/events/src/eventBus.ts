@@ -1,14 +1,19 @@
 import mitt from "mitt";
-import type { ControlState, CoreWorld, Position } from "@kikorin/ecs";
+
+// These types were previously imported from @kikorin/ecs (now removed).
+export type Player = { name: string; experience: number; level: number };
+export type Position = { x: number; y: number; z: number };
+export type Time = { avgDelta: number; ticksPerSecond: number };
+export type ControlState = { controlId: string; phase: string; source: string };
 
 export type EventBusEvents = {
-  "ui:playerUpdate": { player: CoreWorld["components"]["Player"][number] | null };
+  "ui:playerUpdate": { player: Player | null };
   "ui:playerPositionUpdate": { playerPosition: Position | null };
-  "ui:healthChange": { health: CoreWorld["components"]["Health"][number] };
-  "ui:timeMetricsUpdate": { timeMetrics: CoreWorld["time"] };
+  "ui:healthChange": { health: number };
+  "ui:timeMetricsUpdate": { timeMetrics: Time };
   "ui:controlsUpdate": { controlStates: ControlState[] };
   "ui:sprintStaminaUpdate": { stamina: number };
-  "ui:crosshairAimPoint": { wx: number; wy: number; wz: number; hasHit: boolean; hitWx: number; hitWy: number; hitWz: number };
+  "ui:crosshairAimPoint": { wx: number; wy: number; wz: number };
 };
 
 export const eventBus = mitt<EventBusEvents>();

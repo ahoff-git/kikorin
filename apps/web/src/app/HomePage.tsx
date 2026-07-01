@@ -2,29 +2,25 @@
 
 import type {
   CSSProperties,
-  MouseEvent as ReactMouseEvent,
   RefObject,
 } from "react";
 import { useEffect, useRef, useState } from "react";
 import {
-  ControlSources,
   type ControlState,
   type Player,
   type Position,
   type Time,
-  useKikorin,
   useKikorinEvent,
 } from "@kikorin/react";
 import { eventBus } from "@kikorin/events";
-import { getActiveCamera } from "@kikorin/engine";
+import { getActiveCamera } from "@kikorin/system-rendering";
 import { Vector3 } from "three";
 import { setupGame } from "./kikorin";
 import { useNetworking, type ChatMessage } from "./useNetworking";
-import { PlayerReactControls } from "./kikorinControls";
+import { useEngine } from "./useEngine";
 import { Box } from "@mui/material";
 import { PageLayout } from "./kikorinLayout";
 
-const CAMERA_DRAG_SENSITIVITY = 0.006;
 const MIDDLE_POINTER_BUTTON_MASK = 4;
 const CLICK_MAX_MOVEMENT_PX = 4;
 
@@ -155,74 +151,68 @@ type CameraDragController = {
 
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const engine = useKikorin(canvasRef);
+  const { engine, onFrameRef } = useEngine(canvasRef);
   const [playerEid, setPlayerEid] = useState<number | null>(null);
   const [ownedEids, setOwnedEids] = useState<readonly number[]>([]);
   const uiState = useWorldUiState();
-  const spawnMonstersRef = useRef<((count: number) => void) | null>(null);
+  const spawnMonstersRef = useRef<((count: number) => Promise<void>) | null>(null);
   const { localPeerId, connectedPeers, chatMessages, connect, sendChatMessage, addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity, setHitHandler } = useNetworking(
-    engine,
+    null,
     playerEid,
     ownedEids,
   );
 
+  // Wire scene setup to run once the WASM engine is ready.
   useEffect(() => {
     if (!engine) return;
 
-    const { playerEid: eid, ownedEids: owned, onRemoteEntityHit, spawnMonsters } = setupGame(engine, { addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity });
-    spawnMonstersRef.current = spawnMonsters;
-    setHitHandler(onRemoteEntityHit);
-    setPlayerEid(eid);
-    setOwnedEids(owned);
+    let gameCleanup: (() => void) | null = null;
+    let cameraDragController: ReturnType<typeof createCameraDragController> | null = null;
+    let unmounted = false;
 
-    const canvas = canvasRef.current!;
-    canvas.style.cursor = "default";
+    const canvas = canvasRef.current;
 
-    const cameraDragController = createCameraDragController(
-      canvas,
-      (deltaX, deltaY) => {
-        engine.adjustCameraFollowOrbit(
-          -deltaX * CAMERA_DRAG_SENSITIVITY,
-          -deltaY * CAMERA_DRAG_SENSITIVITY,
-        );
-      },
-      (active) => {
-        engine.setCameraFollowOrbitControlActive(active);
-      },
-      () => {
-        engine.resetCameraFollowOrbitBehindTarget();
-      },
-    );
+    setupGame(engine, { addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity }, canvas ?? undefined)
+      .then(({ playerEid: eid, ownedEids: owned, onRemoteEntityHit, spawnMonsters, onFrame, onCameraDrag, onCameraReset, cleanup }) => {
+        if (unmounted) { cleanup(); return; }
+
+        gameCleanup = cleanup;
+        onFrameRef.current = onFrame;
+        spawnMonstersRef.current = spawnMonsters;
+        setHitHandler(onRemoteEntityHit);
+        setPlayerEid(eid);
+        setOwnedEids(owned);
+
+        if (canvas) canvas.style.cursor = "default";
+
+        cameraDragController = canvas
+          ? createCameraDragController(canvas, onCameraDrag, undefined, onCameraReset)
+          : null;
+      })
+      .catch(console.error);
 
     return () => {
+      unmounted = true;
+      onFrameRef.current = null;
       spawnMonstersRef.current = null;
       setHitHandler(null);
-      cameraDragController.disconnect();
-      canvas.style.cursor = "default";
+      cameraDragController?.disconnect();
+      if (canvas) canvas.style.cursor = "default";
+      gameCleanup?.();
       setPlayerEid(null);
       setOwnedEids([]);
     };
+  // addOwnedEntity etc. are stable refs from useNetworking — safe to list.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [engine]);
 
   function handleSpawnMonsters() {
     spawnMonstersRef.current?.(10);
   }
 
-  function handleBoostForward(event: ReactMouseEvent<HTMLButtonElement>) {
-    engine?.world.controls.enqueue({
-      timestamp: event.timeStamp,
-      source: ControlSources.React,
-      controlId: PlayerReactControls.BoostForward,
-      phase: "trigger",
-      payload: {
-        kind: "button-click",
-      },
-    });
-  }
-
   return (
     <PageLayout
-      header={<Header onBoostForward={handleBoostForward} onSpawnMonsters={handleSpawnMonsters} />}
+      header={<Header onSpawnMonsters={handleSpawnMonsters} />}
       left={<LeftNav />}
       right={
         <RightPanel
@@ -415,13 +405,6 @@ const crosshairStyle: CSSProperties = {
 
 const scratchVec = new Vector3();
 
-type AimPointData = {
-  wx: number; wy: number; wz: number;
-  hitWx: number; hitWy: number; hitWz: number;
-  hasHit: boolean;
-  ready: boolean;
-};
-
 // Projects a world point to CSS screen coords; returns null if behind camera.
 function projectToScreen(wx: number, wy: number, wz: number, camera: ReturnType<typeof getActiveCamera>) {
   if (!camera) return null;
@@ -433,42 +416,36 @@ function projectToScreen(wx: number, wy: number, wz: number, camera: ReturnType<
   };
 }
 
-
 function CanvasViewport({
   canvasRef,
 }: {
   canvasRef: RefObject<HTMLCanvasElement | null>;
 }) {
-  const hitDotRef = useRef<SVGSVGElement>(null);
+  const crosshairRef = useRef<SVGSVGElement>(null);
 
   useEffect(() => {
-    const hitDot = hitDotRef.current;
-    if (!hitDot) return;
+    const crosshair = crosshairRef.current;
+    if (!crosshair) return;
 
-    const latest: AimPointData = { wx: 0, wy: 0, wz: 0, hitWx: 0, hitWy: 0, hitWz: 0, hasHit: false, ready: false };
+    let latestWx = 0, latestWy = 0, latestWz = 0, ready = false;
 
-    const onAimPoint = (data: Omit<AimPointData, "ready">) => {
-      Object.assign(latest, data, { ready: true });
+    const onAimPoint = ({ wx, wy, wz }: { wx: number; wy: number; wz: number }) => {
+      latestWx = wx; latestWy = wy; latestWz = wz;
+      ready = true;
     };
     eventBus.on("ui:crosshairAimPoint", onAimPoint);
 
     let rafId = 0;
     const tick = () => {
       rafId = requestAnimationFrame(tick);
-      if (!latest.ready) return;
-
-      if (latest.hasHit) {
-        const camera = getActiveCamera();
-        const hit = projectToScreen(latest.hitWx, latest.hitWy, latest.hitWz, camera);
-        if (hit) {
-          hitDot.style.left = hit.left;
-          hitDot.style.top = hit.top;
-          hitDot.style.visibility = "visible";
-        } else {
-          hitDot.style.visibility = "hidden";
-        }
+      if (!ready) return;
+      const pos = projectToScreen(latestWx, latestWy, latestWz, getActiveCamera());
+      if (pos) {
+        crosshair.style.left = pos.left;
+        crosshair.style.top = pos.top;
+        crosshair.style.visibility = "visible";
       } else {
-        hitDot.style.visibility = "hidden";
+        crosshair.style.visibility = "hidden";
       }
     };
     rafId = requestAnimationFrame(tick);
@@ -483,32 +460,31 @@ function CanvasViewport({
     <div style={canvasViewportStyle}>
       <canvas ref={canvasRef} style={canvasStyle} />
       <svg
-        ref={hitDotRef}
-        width="10"
-        height="10"
-        viewBox="-5 -5 10 10"
+        ref={crosshairRef}
+        width="24"
+        height="24"
+        viewBox="-12 -12 24 24"
         style={{ ...crosshairStyle, visibility: "hidden" }}
       >
-        <circle cx="0" cy="0" r="3.5" fill="black" />
-        <circle cx="0" cy="0" r="2.5" fill="white" />
+        <circle cx="0" cy="0" r="5" fill="none" stroke="black" strokeWidth="2.5" />
+        <line x1="-11" y1="0" x2="-7" y2="0" stroke="black" strokeWidth="2.5" />
+        <line x1="7" y1="0" x2="11" y2="0" stroke="black" strokeWidth="2.5" />
+        <line x1="0" y1="-11" x2="0" y2="-7" stroke="black" strokeWidth="2.5" />
+        <line x1="0" y1="7" x2="0" y2="11" stroke="black" strokeWidth="2.5" />
+        <circle cx="0" cy="0" r="5" fill="none" stroke="white" strokeWidth="1.5" />
+        <line x1="-11" y1="0" x2="-7" y2="0" stroke="white" strokeWidth="1.5" />
+        <line x1="7" y1="0" x2="11" y2="0" stroke="white" strokeWidth="1.5" />
+        <line x1="0" y1="-11" x2="0" y2="-7" stroke="white" strokeWidth="1.5" />
+        <line x1="0" y1="7" x2="0" y2="11" stroke="white" strokeWidth="1.5" />
       </svg>
     </div>
   );
 }
 
-function Header({
-  onBoostForward,
-  onSpawnMonsters,
-}: {
-  onBoostForward: (event: ReactMouseEvent<HTMLButtonElement>) => void;
-  onSpawnMonsters: () => void;
-}) {
+function Header({ onSpawnMonsters }: { onSpawnMonsters: () => void }) {
   return (
     <div style={headerStyle}>
       <span>{CONTROL_INSTRUCTIONS}</span>
-      <button type="button" onMouseDown={(e) => e.preventDefault()} onClick={onBoostForward}>
-        React Boost Forward
-      </button>
       <button type="button" onClick={onSpawnMonsters}>
         Spawn 10 Monsters
       </button>
@@ -554,7 +530,7 @@ function RightPanel({
 
   return (
     <div>
-      <div>DeltaT: {averageDelta}</div>
+      <div>Tick: {averageDelta}ms</div>
       <div>TPS: {ticksPerSecond}</div>
       <div>
         Player:

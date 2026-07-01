@@ -1,0 +1,9 @@
+[package]
+name = "physics"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ecs = { path = "../ecs" }
+# default-features = false disables simd-stable and parallel (both needed for WASM compat)
+rapier3d = { version = "0.22", default-features = false, features = ["dim3", "f32"] }

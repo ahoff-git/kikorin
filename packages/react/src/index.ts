@@ -14,18 +14,6 @@ export type {
   SpawnTriggerOptions,
 } from './spawn'
 
-// Re-export key engine types and constants so consumers only need one import
-export type {
-  CoreColliderConfig,
-  CoreEntityBlueprint,
-  CoreWorldBox,
-  Player,
-  Position,
-  Rotation,
-  Time,
-  Velocity,
-  ControlState,
-} from '@kikorin/engine'
-export { ControlSources, KeyboardControls, PointerControls } from '@kikorin/engine'
-
+// Re-export UI types from @kikorin/events (previously from the deleted @kikorin/engine)
+export type { Player, Position, Time, ControlState } from '@kikorin/events'
 export type { EventBusEvents } from '@kikorin/events'

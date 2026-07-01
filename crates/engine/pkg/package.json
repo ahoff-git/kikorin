@@ -1,0 +1,17 @@
+{
+  "name": "@kikorin/engine-wasm",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "engine_bg.wasm",
+    "engine.js",
+    "engine_bg.js",
+    "engine.d.ts"
+  ],
+  "main": "engine.js",
+  "types": "engine.d.ts",
+  "sideEffects": [
+    "./engine.js",
+    "./snippets/*"
+  ]
+}

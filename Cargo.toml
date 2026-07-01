@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "crates/ecs",
+    "crates/physics",
+    "crates/pathfinding",
+    "crates/netcode",
+    "crates/patch",
+    "crates/engine",
+]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"

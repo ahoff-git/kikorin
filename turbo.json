@@ -9,6 +9,15 @@
       "cache": false,
       "persistent": true
     },
+    "web#dev": {
+      "dependsOn": ["@kikorin/engine-source#dev"],
+      "cache": false,
+      "persistent": true
+    },
+    "@kikorin/engine-source#dev": {
+      "cache": false,
+      "outputs": ["pkg/**"]
+    },
     "test": {
       "dependsOn": ["^build"],
       "inputs": ["src/**", "package.json", "tsconfig.json", "vitest.config.ts"],

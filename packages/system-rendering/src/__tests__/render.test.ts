@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  renderSystem,
+  renderFrame,
   setupRenderer,
   disposeRenderer,
   upsertObjectByEid,
@@ -11,8 +11,8 @@ import {
 } from '../render'
 
 describe('system-rendering exports', () => {
-  it('exports renderSystem', () => {
-    expect(typeof renderSystem).toBe('function')
+  it('exports renderFrame', () => {
+    expect(typeof renderFrame).toBe('function')
   })
 
   it('exports setupRenderer', () => {

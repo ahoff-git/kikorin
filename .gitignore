@@ -27,6 +27,14 @@ pnpm-debug.log*
 # env files
 .env*
 
+# Rust
+/target
+**/pkg/
+!crates/engine/pkg/
+
+# WASM build artifact copied to public/ by wasm:build / wasm:dev
+apps/web/public/engine_bg.wasm
+
 # misc
 .DS_Store
 *.pem

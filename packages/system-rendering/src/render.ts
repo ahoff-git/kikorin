@@ -1,4 +1,3 @@
-import type { CoreWorld } from "@kikorin/ecs";
 import { log, logLevels } from "@kikorin/util";
 import {
   Color,
@@ -10,7 +9,7 @@ import {
   BufferGeometry,
   DirectionalLight,
   AmbientLight,
-  PCFSoftShadowMap,
+  PCFShadowMap,
   Vector3,
 } from "three";
 import { setActiveCamera, getActiveCamera } from "./renderCamera";
@@ -24,7 +23,9 @@ let rendererViewportHeight = 0;
 const _camDir = new Vector3();
 // Shadow frustum half-extent and derived texel size for snapping
 const SUN_FRUSTUM_HALF = 60;
-const SUN_TEXEL_SIZE = (SUN_FRUSTUM_HALF * 2) / 4096;
+const SHADOW_MAP_SIZE = 2048;
+const SHADOW_UPDATE_EVERY = 3;
+const SUN_TEXEL_SIZE = (SUN_FRUSTUM_HALF * 2) / SHADOW_MAP_SIZE;
 
 const objectsByEid = new Map<number, Object3D>();
 const poolsByKey = new Map<string, Object3D[]>();
@@ -33,6 +34,8 @@ const RENDER_DEBUG_FRAME_INTERVAL = 30;
 
 let renderFrameCount = 0;
 let lastRenderSkipReason: string | null = null;
+let lastSunCX = Infinity;
+let lastSunCZ = Infinity;
 
 function logRenderDebug(message: string, data?: Record<string, unknown>) {
   if (data) {
@@ -52,7 +55,7 @@ function clearRenderSkipReason() {
   lastRenderSkipReason = null;
 }
 
-export function renderSystem(world: CoreWorld) {
+export function renderFrame() {
   const cam = getActiveCamera();
   if (!renderer || !scene || !cam) {
     logRenderSkipOnce("renderer/scene/camera missing", {
@@ -80,27 +83,32 @@ export function renderSystem(world: CoreWorld) {
         y: cam.rotation.y,
         z: cam.rotation.z,
       },
-      worldTimeDelta: world.time.delta,
-      worldTimeElapsed: world.time.elapsed,
     });
   }
 
+  // Update shadow map: throttle to every Nth frame; force an update if the sun moved.
+  let needsShadowUpdate = renderFrameCount % SHADOW_UPDATE_EVERY === 0;
+
   if (sunLight) {
-    // Center the shadow frustum on where the camera looks (player's feet),
-    // not the camera body, which sits ~10 units behind the player.
     cam.getWorldDirection(_camDir);
     const groundT = _camDir.y < -0.001 ? -cam.position.y / _camDir.y : 12;
     const lookX = cam.position.x + _camDir.x * groundT;
     const lookZ = cam.position.z + _camDir.z * groundT;
 
-    // Texel-snap to prevent shadow edges from crawling as the camera moves.
     const cx = Math.round(lookX / SUN_TEXEL_SIZE) * SUN_TEXEL_SIZE;
     const cz = Math.round(lookZ / SUN_TEXEL_SIZE) * SUN_TEXEL_SIZE;
 
-    sunLight.target.position.set(cx, 0, cz);
-    sunLight.position.set(cx + 50, 100, cz + 30);
+    if (cx !== lastSunCX || cz !== lastSunCZ) {
+      lastSunCX = cx;
+      lastSunCZ = cz;
+      sunLight.target.position.set(cx, 0, cz);
+      sunLight.target.updateMatrixWorld();
+      sunLight.position.set(cx + 50, 100, cz + 30);
+      needsShadowUpdate = true;
+    }
   }
 
+  renderer.shadowMap.needsUpdate = needsShadowUpdate;
   renderer.render(scene, cam);
 }
 
@@ -145,6 +153,8 @@ function clearRenderState() {
   setActiveCamera(null);
   rendererViewportWidth = 0;
   rendererViewportHeight = 0;
+  lastSunCX = Infinity;
+  lastSunCZ = Infinity;
 
   renderer?.dispose();
   renderer = null;
@@ -208,9 +218,10 @@ export function setupRenderer(canvas: HTMLCanvasElement | null) {
     powerPreference: "high-performance",
   });
 
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = PCFSoftShadowMap;
+  renderer.shadowMap.type = PCFShadowMap;
+  renderer.shadowMap.autoUpdate = false;
   setRendererViewportSize(width, height);
 
   scene.background = new Color(0x87ceeb);
@@ -222,8 +233,8 @@ export function setupRenderer(canvas: HTMLCanvasElement | null) {
   sunLight.position.set(50, 100, 30);
   sunLight.castShadow = true;
   // 4096 map over a tight 50-unit frustum → ~82 texels/unit vs the previous ~11
-  sunLight.shadow.mapSize.width = 4096;
-  sunLight.shadow.mapSize.height = 4096;
+  sunLight.shadow.mapSize.width = SHADOW_MAP_SIZE;
+  sunLight.shadow.mapSize.height = SHADOW_MAP_SIZE;
   sunLight.shadow.camera.near = 0.5;
   sunLight.shadow.camera.far = 200;
   sunLight.shadow.camera.left = -SUN_FRUSTUM_HALF;

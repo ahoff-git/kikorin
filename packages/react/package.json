@@ -13,7 +13,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@kikorin/engine": "workspace:*",
     "@kikorin/events": "workspace:*"
   },
   "peerDependencies": {
