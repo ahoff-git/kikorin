@@ -157,7 +157,7 @@ export default function Home() {
   const uiState = useWorldUiState();
   const spawnMonstersRef = useRef<((count: number) => Promise<void>) | null>(null);
   const { localPeerId, connectedPeers, chatMessages, connect, sendChatMessage, addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity, setHitHandler } = useNetworking(
-    null,
+    engine,
     playerEid,
     ownedEids,
   );

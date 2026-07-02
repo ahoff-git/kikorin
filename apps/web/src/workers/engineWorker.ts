@@ -11,7 +11,7 @@
 // The wasm-bindgen bundler-target binary imports its JS bindings under the namespace
 // "./engine_bg.js", which matches the star-import we provide as the instantiation imports.
 
-import type { EngineHandle, PatchBundle, RenderPatch, SemanticPatch, NetPatch, MetricsPatch } from '@kikorin/adapter';
+import type { EngineHandle, PatchBundle, HitPatch, RenderPatch, SemanticPatch, NetPatch, MetricsPatch } from '@kikorin/adapter';
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore — no sub-path type declarations; Engine and __wbg_set_wasm are exported at runtime
@@ -40,14 +40,16 @@ async function loadWasm(origin: string): Promise<new () => EngineHandle> {
 const FLUSH_INTERVAL_MS = 16;
 
 type Req =
-  | { type: 'init';          id: number; signalingUrl?: string; sessionId?: string; origin: string }
-  | { type: 'set_velocity';  eid: number; vx: number; vy: number; vz: number }
-  | { type: 'destroy';       eid: number }
-  | { type: 'spawn_box';     id: number; x: number; y: number; z: number; hw: number; hh: number; hd: number; health: number; net_flags: number }
-  | { type: 'spawn_bullet';  id: number; x: number; y: number; z: number; vx: number; vy: number; vz: number }
-  | { type: 'spawn_floor';   id: number; x: number; y: number; z: number; hw: number; hh: number; hd: number }
-  | { type: 'build_navmesh'; id: number }
-  | { type: 'find_path';     id: number; sx: number; sy: number; sz: number; gx: number; gz: number; canJump: boolean };
+  | { type: 'init';                id: number; signalingUrl?: string; sessionId?: string; origin: string }
+  | { type: 'set_velocity';        eid: number; vx: number; vy: number; vz: number }
+  | { type: 'destroy';             eid: number }
+  | { type: 'spawn_box';           id: number; x: number; y: number; z: number; hw: number; hh: number; hd: number; health: number; net_flags: number }
+  | { type: 'spawn_bullet';        id: number; x: number; y: number; z: number; vx: number; vy: number; vz: number }
+  | { type: 'spawn_floor';         id: number; x: number; y: number; z: number; hw: number; hh: number; hd: number }
+  | { type: 'build_navmesh';       id: number }
+  | { type: 'find_path';           id: number; sx: number; sy: number; sz: number; gx: number; gz: number; canJump: boolean }
+  | { type: 'update_monster_goal'; gx: number; gz: number }
+  | { type: 'init_networking';     sessionId: string; signalingUrl: string };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const post = (data: unknown): void => (self as any).postMessage(data);
@@ -61,6 +63,7 @@ let engine: EngineHandle | null = null;
 const pendingRender = new Map<number, RenderPatch>();
 const pendingSemantic = new Map<number, SemanticPatch>();
 const pendingNet: NetPatch[] = [];
+const pendingHits: HitPatch[] = [];
 let latestMetrics: MetricsPatch = { tick_ms: 0, ecs_ms: 0, physics_ms: 0, net_ms: 0, patch_ms: 0 };
 let latestTick = 0;
 let dirty = false;
@@ -73,6 +76,8 @@ function accumulateBundle(bundle: PatchBundle | null): void {
     pendingSemantic.set(sp.entity, prev ? { ...prev, ...sp } : sp);
   }
   for (const np of bundle.net) pendingNet.push(np);
+  // Hits are events — never merged, always queued in arrival order.
+  for (const hp of bundle.hits) pendingHits.push(hp);
   latestMetrics = bundle.metrics;
   latestTick = bundle.tick;
   dirty = true;
@@ -86,6 +91,7 @@ function flush(): void {
     render: [...pendingRender.values()],
     semantic: [...pendingSemantic.values()],
     net: pendingNet.splice(0),
+    hits: pendingHits.splice(0),
     metrics: latestMetrics,
   };
   pendingRender.clear();
@@ -162,5 +168,11 @@ addEventListener('message', async (event: MessageEvent<Req>) => {
       post({ type: 'ack', id: msg.id, result: path });
       break;
     }
+    case 'update_monster_goal':
+      engine.update_monster_goal(msg.gx, msg.gz);
+      break;
+    case 'init_networking':
+      engine.init_networking?.(msg.sessionId, msg.signalingUrl);
+      break;
   }
 });

@@ -1,4 +1,4 @@
-import type { MetricsPatch, NetPatch, RenderPatch, SemanticPatch } from './types';
+import type { HitPatch, MetricsPatch, NetPatch, RenderPatch, SemanticPatch } from './types';
 import { Channel } from './channel';
 
 const EMPTY_METRICS: MetricsPatch = {
@@ -20,3 +20,6 @@ export const netChannel = new Channel<NetPatch[]>([]);
 
 /** Debug overlay and logging subscribe here for per-tick timing. */
 export const metricsChannel = new Channel<MetricsPatch>(EMPTY_METRICS);
+
+/** Game logic subscribes here for bullet–monster collision events from the engine. */
+export const hitsChannel = new Channel<HitPatch[]>([]);

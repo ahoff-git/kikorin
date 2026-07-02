@@ -12,6 +12,7 @@ import {
   hudChannel,
   netChannel,
   metricsChannel,
+  hitsChannel,
 } from "@kikorin/adapter";
 import type { PatchBundle } from "@kikorin/adapter";
 import { WorkerEngineProxy } from "../workers/WorkerEngineProxy";
@@ -72,6 +73,7 @@ export function useEngine(
         if (bundle.render.length > 0) renderChannel.emit(bundle.render);
         if (bundle.semantic.length > 0) hudChannel.emit(bundle.semantic);
         if (bundle.net.length > 0) netChannel.emit(bundle.net);
+        if (bundle.hits.length > 0) hitsChannel.emit(bundle.hits);
         metricsChannel.emit(bundle.metrics);
         emaTickMs = emaTickMs * 0.9 + bundle.metrics.tick_ms * 0.1;
         eventBus.emit('ui:timeMetricsUpdate', {

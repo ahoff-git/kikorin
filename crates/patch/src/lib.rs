@@ -9,7 +9,19 @@ pub struct PatchBundle {
     pub render: Vec<RenderPatch>,
     pub semantic: Vec<SemanticPatch>,
     pub net: Vec<NetPatch>,
+    pub hits: Vec<HitPatch>,
     pub metrics: MetricsPatch,
+}
+
+/// Bullet–target collision event. Emitted by the engine when a NET_BULLET entity
+/// overlaps a NET_MONSTER entity. TypeScript reads these to destroy entities and
+/// trigger game-level responses (respawn, score, etc.).
+/// `target_eid` is None when the bullet left the play area (y < -20) rather than
+/// hitting a monster.
+#[derive(Clone, Debug, Encode, Decode)]
+pub struct HitPatch {
+    pub bullet_eid: EntityId,
+    pub target_eid: Option<EntityId>,
 }
 
 #[derive(Clone, Debug, Encode, Decode)]
@@ -54,6 +66,7 @@ impl PatchGenerator {
         &self,
         world: &World,
         net: Vec<NetPatch>,
+        hits: Vec<HitPatch>,
         metrics: MetricsPatch,
     ) -> PatchBundle {
         let mut render = Vec::new();
@@ -80,7 +93,7 @@ impl PatchGenerator {
             }
         }
 
-        PatchBundle { tick: world.tick_count(), render, semantic, net, metrics }
+        PatchBundle { tick: world.tick_count(), render, semantic, net, hits, metrics }
     }
 
     pub fn serialize(bundle: &PatchBundle) -> Vec<u8> {
@@ -115,6 +128,7 @@ mod tests {
                 grounded: Some(true),
             }],
             net: vec![],
+            hits: vec![HitPatch { bullet_eid: 5, target_eid: Some(3) }],
             metrics: MetricsPatch {
                 tick_ms: 16.0,
                 ecs_ms: 2.0,
@@ -133,6 +147,9 @@ mod tests {
         assert!((decoded.render[0].x - 1.0).abs() < 1e-6);
         assert_eq!(decoded.semantic[0].health, Some(100));
         assert_eq!(decoded.semantic[0].grounded, Some(true));
+        assert_eq!(decoded.hits.len(), 1);
+        assert_eq!(decoded.hits[0].bullet_eid, 5);
+        assert_eq!(decoded.hits[0].target_eid, Some(3));
         assert!((decoded.metrics.tick_ms - 16.0).abs() < 1e-6);
     }
 
@@ -145,7 +162,7 @@ mod tests {
         world.mark_dirty(e, DirtyFlags::TRANSFORM);
 
         let gen = PatchGenerator::new();
-        let bundle = gen.generate(&world, vec![], MetricsPatch::default());
+        let bundle = gen.generate(&world, vec![], vec![], MetricsPatch::default());
 
         assert_eq!(bundle.render.len(), 1);
         assert!((bundle.render[0].x - 10.0).abs() < 1e-6);
@@ -161,7 +178,7 @@ mod tests {
         world.mark_dirty(e, DirtyFlags::HEALTH);
 
         let gen = PatchGenerator::new();
-        let bundle = gen.generate(&world, vec![], MetricsPatch::default());
+        let bundle = gen.generate(&world, vec![], vec![], MetricsPatch::default());
 
         assert!(bundle.render.is_empty());
         assert_eq!(bundle.semantic.len(), 1);

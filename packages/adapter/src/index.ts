@@ -2,6 +2,7 @@ export type {
   RenderPatch,
   SemanticPatch,
   NetPatch,
+  HitPatch,
   MetricsPatch,
   PatchBundle,
   EngineHandle,
@@ -16,6 +17,7 @@ export {
   hudChannel,
   netChannel,
   metricsChannel,
+  hitsChannel,
 } from './channels';
 
 export { startEngineLoop, processFrame, createInputSender } from './adapter';

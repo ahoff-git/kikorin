@@ -1,12 +1,17 @@
 "use client";
 
-// TODO: Networking was removed along with the TypeScript ECS engine packages.
-// PeerNet (from @kikorin/netcode) and CoreWorldBox (from @kikorin/engine) no longer exist.
-// Multiplayer entity sync needs to be ported to the Rust WASM engine (crates/engine).
+// Networking wired to the Rust WASM engine via WorkerEngineProxy.init_networking().
+// The local peer ID is a UUID generated on mount — it's the wasm-peers session ID this
+// client joins on startup. "Connect" reinitialises networking with a remote peer's session
+// ID, joining their room so the two clients can exchange delta patches.
+//
+// Requires NEXT_PUBLIC_SIGNALING_URL to be set; without it the ID still displays but
+// networking won't connect (buttons remain enabled to surface the missing config clearly).
 
 import { log, logLevels } from "@kikorin/util";
 import { netChannel } from "@kikorin/adapter";
 import { useCallback, useEffect, useState } from "react";
+import type { WorkerEngineProxy } from "../workers/WorkerEngineProxy";
 
 export type ChatMessage = {
   id: number;
@@ -27,14 +32,24 @@ export interface UseNetworkingReturn {
   setHitHandler: (handler: ((eid: number) => void) | null) => void;
 }
 
+const SIGNALING_URL = process.env.NEXT_PUBLIC_SIGNALING_URL ?? '';
+
 export function useNetworking(
-  _engine: unknown,
+  engine: WorkerEngineProxy | null,
   _playerEid: number | null,
   _ownedEids: readonly number[],
 ): UseNetworkingReturn {
+  const [localId] = useState<string>(() => crypto.randomUUID());
   const [connectedPeers, setConnectedPeers] = useState<string[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
 
+  // Auto-initialise networking once the engine is ready.
+  useEffect(() => {
+    if (!engine || !SIGNALING_URL) return;
+    engine.init_networking(localId, SIGNALING_URL);
+  }, [engine, localId]);
+
+  // Track peers reported by the Rust engine via net patches.
   useEffect(() => {
     const unsub = netChannel.subscribe(() => {
       const patches = netChannel.getSnapshot();
@@ -52,9 +67,18 @@ export function useNetworking(
     return unsub;
   }, []);
 
+  // Join another peer's wasm-peers session by reinitialising networking with their ID.
   const connect = useCallback((remotePeerId: string) => {
-    log(logLevels.debug, "[networking] connect stub called", ["network"], { remotePeerId });
-  }, []);
+    if (!engine) {
+      log(logLevels.debug, "[networking] connect: engine not ready", ["network"], { remotePeerId });
+      return;
+    }
+    if (!SIGNALING_URL) {
+      log(logLevels.debug, "[networking] connect: NEXT_PUBLIC_SIGNALING_URL not configured", ["network"], { remotePeerId });
+      return;
+    }
+    engine.init_networking(remotePeerId, SIGNALING_URL);
+  }, [engine]);
 
   const sendChatMessage = useCallback((_text: string) => {}, []);
   const addOwnedEntity = useCallback((_eid: number) => {}, []);
@@ -64,7 +88,7 @@ export function useNetworking(
   const setHitHandler = useCallback((_handler: ((eid: number) => void) | null) => {}, []);
 
   return {
-    localPeerId: null,
+    localPeerId: localId,
     connectedPeers,
     chatMessages,
     connect,

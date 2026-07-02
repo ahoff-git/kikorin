@@ -86,6 +86,16 @@ export class WorkerEngineProxy {
     return p;
   }
 
+  /** Update the monster pathfinding goal. Fire-and-forget; call once per frame. */
+  update_monster_goal(gx: number, gz: number): void {
+    this.worker.postMessage({ type: 'update_monster_goal', gx, gz });
+  }
+
+  /** Initialise (or reinitialise) WebRTC networking inside the worker. Fire-and-forget. */
+  init_networking(sessionId: string, signalingUrl: string): void {
+    this.worker.postMessage({ type: 'init_networking', sessionId, signalingUrl });
+  }
+
   terminate(): void {
     this.worker.terminate();
   }

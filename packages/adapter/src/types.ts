@@ -20,6 +20,12 @@ export interface NetPatch {
   entity: number;
 }
 
+export interface HitPatch {
+  bullet_eid: number;
+  /** null when the bullet left the play area rather than hitting a monster. */
+  target_eid: number | null;
+}
+
 export interface MetricsPatch {
   tick_ms: number;
   ecs_ms: number;
@@ -33,6 +39,7 @@ export interface PatchBundle {
   render: RenderPatch[];
   semantic: SemanticPatch[];
   net: NetPatch[];
+  hits: HitPatch[];
   metrics: MetricsPatch;
 }
 
@@ -65,6 +72,8 @@ export interface EngineHandle {
   spawn_bullet(x: number, y: number, z: number, vx: number, vy: number, vz: number): number;
   /** Set XZ velocity (movement) and optionally Y (one-frame jump impulse when non-zero). */
   set_entity_velocity(id: number, vx: number, vy: number, vz: number): void;
+  /** Update the position monsters path toward. Call once per frame before tick(). */
+  update_monster_goal(gx: number, gz: number): void;
   /** Build (or rebuild) the navmesh from current floor geometry. Call once after terrain is spawned. */
   build_navmesh(): void;
   /**

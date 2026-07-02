@@ -7,4 +7,3 @@ wasm.__wbindgen_start();
 export {
     Engine
 } from "./engine_bg.js";
-export { wasm as __wasm }
