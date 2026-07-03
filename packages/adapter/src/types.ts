@@ -27,11 +27,23 @@ export interface HitPatch {
 }
 
 export interface MetricsPatch {
+  /** Full Rust tick, including patch generation. */
   tick_ms: number;
-  ecs_ms: number;
+  /** Engine-owned systems: monster AI, separation, bullets, dirty marking. */
+  ai_ms: number;
   physics_ms: number;
+  /** A* search share of ai_ms. */
+  pathfinding_ms: number;
+  /** Inbound apply + outbound delta flush. */
   net_ms: number;
+  /** PatchBundle generation (dirty scan). */
   patch_ms: number;
+  /**
+   * WASM-boundary cost: JS-observed tick() call time minus Rust-internal tick_ms
+   * (i.e. the JsValue conversion + bindgen overhead). Absent on the raw WASM
+   * bundle; the engine worker fills it before each flush.
+   */
+  boundary_ms?: number;
 }
 
 export interface PatchBundle {
@@ -62,6 +74,50 @@ export type JsTerrainBlock = {
   kind: 'floor' | 'wall' | 'platform';
 };
 
+/** One static terrain block of a game-owned map, as passed to load_map. */
+export type TerrainBlockInput = Omit<JsTerrainBlock, 'eid'> & {
+  /**
+   * Whether NPCs may walk on this block's top surface (default true). Walls and
+   * decorative geometry must set false: they stay solid for physics, but the
+   * navmesh skips their tops — a node on an unreachable wall top makes every
+   * pathfinding request that snaps to it fail after exploring the whole mesh.
+   */
+  walkable?: boolean;
+};
+
+/**
+ * Monster AI tuning overrides. All fields optional; fields left out fall back to
+ * engine defaults (not to previously set values).
+ */
+export interface AiConfigInput {
+  walk_speed?: number;
+  jump_speed?: number;
+  jump_trigger_dist?: number;
+  jump_cooldown?: number;
+  jump_height_tolerance?: number;
+  waypoint_reach?: number;
+  replan_stale_dist?: number;
+  replan_cooldown?: number;
+  stuck_sample_interval?: number;
+  stuck_move_threshold?: number;
+  stuck_escape_after?: number;
+  separation_radius?: number;
+}
+
+/**
+ * Navmesh build tuning overrides (cell resolution + agent traversal capabilities).
+ * Same partial-object semantics as AiConfigInput. Mesh bounds are not configurable —
+ * the engine derives them from the loaded floor geometry.
+ */
+export interface NavConfigInput {
+  cell_size?: number;
+  max_step_up?: number;
+  jump_threshold?: number;
+  min_ledge_drop?: number;
+  max_ledge_drop?: number;
+  corner_drop_tolerance?: number;
+}
+
 /** Minimal interface the WASM Engine must satisfy. */
 export interface EngineHandle {
   /** Advance the simulation by dt_ms. Returns a PatchBundle JS object directly. */
@@ -72,11 +128,15 @@ export interface EngineHandle {
   spawn_entity(payload: Uint8Array): number;
   destroy_entity(id: number): void;
   /**
-   * Load the static map terrain. Spawns all floor entities and builds the navmesh
-   * in a single Rust call. Returns an array of blocks with their entity IDs and
-   * dimensions so TypeScript can create Three.js meshes.
+   * Load a game-owned map. Spawns a static terrain entity per block and builds the
+   * navmesh over the resulting geometry in a single Rust call. Returns the blocks
+   * with their entity IDs added so TypeScript can create Three.js meshes.
    */
-  load_map(): JsTerrainBlock[];
+  load_map(blocks: TerrainBlockInput[]): JsTerrainBlock[];
+  /** Override monster AI tuning (partial object; missing fields = engine defaults). */
+  set_ai_config(cfg: AiConfigInput): void;
+  /** Override navmesh build tuning; applies to the next load_map/build_navmesh. */
+  set_nav_config(cfg: NavConfigInput): void;
   /** Spawn a dynamic entity. net_flags=1 (NET_LOCAL) for locally-simulated entities. */
   spawn_box_entity(x: number, y: number, z: number, hw: number, hh: number, hd: number, health: number, net_flags: number): number;
   /**

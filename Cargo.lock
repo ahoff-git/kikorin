@@ -601,7 +601,6 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "ecs",
- "netcode",
 ]
 
 [[package]]

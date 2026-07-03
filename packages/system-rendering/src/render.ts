@@ -33,6 +33,9 @@ const DEFAULT_POOL_MAX = 256;
 const RENDER_DEBUG_FRAME_INTERVAL = 30;
 
 let renderFrameCount = 0;
+// Rendering-pipeline metric: EMA of renderFrame() duration (α = 0.1). Covers the
+// main-thread Three.js draw; the engine's MetricsPatch covers the Rust/worker side.
+let emaFrameMs = 0;
 let lastRenderSkipReason: string | null = null;
 let lastSunCX = Infinity;
 let lastSunCZ = Infinity;
@@ -55,6 +58,15 @@ function clearRenderSkipReason() {
   lastRenderSkipReason = null;
 }
 
+export interface RenderMetrics {
+  /** Exponential moving average of renderFrame() duration in milliseconds. */
+  frame_ms: number;
+}
+
+export function getRenderMetrics(): RenderMetrics {
+  return { frame_ms: emaFrameMs };
+}
+
 export function renderFrame() {
   const cam = getActiveCamera();
   if (!renderer || !scene || !cam) {
@@ -66,6 +78,7 @@ export function renderFrame() {
     return;
   }
 
+  const frameStart = performance.now();
   syncRendererViewportSize();
   clearRenderSkipReason();
   renderFrameCount += 1;
@@ -110,6 +123,9 @@ export function renderFrame() {
 
   renderer.shadowMap.needsUpdate = needsShadowUpdate;
   renderer.render(scene, cam);
+
+  const frameMs = performance.now() - frameStart;
+  emaFrameMs = emaFrameMs === 0 ? frameMs : emaFrameMs * 0.9 + frameMs * 0.1;
 }
 
 function disposeObject3D(root: Object3D) {

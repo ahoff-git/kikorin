@@ -1,5 +1,6 @@
 import { hudChannel, hitsChannel } from "@kikorin/adapter";
 import type { WorkerEngineProxy } from "../workers/WorkerEngineProxy";
+import { KIKORIN_MAP } from "./kikorinMap";
 import { eventBus } from "@kikorin/events";
 import {
   upsertObjectByEid,
@@ -137,8 +138,8 @@ export async function setupGame(
   const ownedEids: number[] = [];
 
   // --- Terrain ---
-  // Rust owns the map layout and navmesh; we only create Three.js meshes here.
-  const terrainLayout = await engine.load_map();
+  // The game owns the map data; Rust spawns the bodies and builds the navmesh.
+  const terrainLayout = await engine.load_map(KIKORIN_MAP);
   const terrainMeshes: Object3D[] = [];
   for (const b of terrainLayout) {
     const meshFn = b.kind === "floor" ? makeFloorMesh

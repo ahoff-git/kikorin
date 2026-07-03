@@ -6,7 +6,7 @@ Wraps Rapier3D for rigid-body simulation of ECS entities. The ECS world is the s
 ### Per-tick Flow
 `sync_from_world(&world)` → `step(dt_secs)` → `sync_to_world(&mut world)`.
 - **sync_from_world:** reads `collider`, `position`, `is_floor`, `velocity` for all entities. Entities with no active `ColliderConfig` are removed from the physics world. Floor entities become fixed bodies; everything else dynamic with rotation locked.
-- **sync_to_world:** writes updated `position` and `grounded` back and marks `DirtyFlags::TRANSFORM` on changed entities.
+- **sync_to_world:** writes `position` and `grounded` back for every non-fixed body and marks it `DirtyFlags::TRANSFORM` unconditionally each tick — even at rest, so resting dynamics emit TRANSFORM net patches at full tick rate (known over-dirtying tradeoff; a fix would compare translations before dirtying).
 
 Out-of-tick queries (`floor_height_at`, `cast_ray`, `cast_collider`) need the query pipeline populated; `step` rebuilds it each tick, but callers using these before the first step (e.g. navmesh construction) must call `prepare_queries()` first.
 
@@ -23,4 +23,4 @@ Dynamic colliders use `friction(0.0)` **and** `friction_combine_rule(Multiply)`.
 `ecs` (World, ColliderConfig, DirtyFlags), `rapier3d`, `parry3d`. This crate is the sole physics integration — no TS Rapier bindings remain.
 
 ### Verification
-`cargo test -p physics` — `sphere_resolves_floor_collision_within_3_ticks` (dynamic entity above a floor reports `grounded` within 3 ticks at 60 Hz).
+`cargo test -p physics` — 18 tests exercising real ECS + Rapier at 60 Hz: gravity fall/landing (monotonic descent gated on contact, since depenetration nudges y up post-impact) and mid-air grounded=false; wall side-contact never grounds; velocity split — XZ reapplied every sync (proven by pin-against-wall-then-resume, since with zero friction/damping free motion cannot distinguish one-shot from per-sync application), zero and sub-threshold (|vy| ≤ 0.01) Y preserving gravity accumulation, above-threshold Y overriding it, non-zero Y as a one-frame jump impulse; grounded-cache staleness (stale up to GROUNDED_STRIDE−1 ticks after the floor vanishes); `floor_height_at`, `cast_ray`, `cast_ray_with_normal`, `cast_collider` hit/miss and normals via `prepare_queries`; sensors neither block, contact, nor get dirtied; overlapping dynamics generate no contacts (collision-group filter); removal via inactive collider — queries miss, body freezes, `touching` stays stale until the next step; the dirtying contract (moving and resting dynamics dirty every tick, fixed never); and the `World::destroy_entity` Rapier-body leak, pinned as a known gap.

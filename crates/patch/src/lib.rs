@@ -1,6 +1,5 @@
 use bincode::{Decode, Encode};
 use ecs::{DirtyFlags, EntityId, World};
-use netcode::NetPatch;
 
 /// Serialized over the WASM boundary every tick.
 #[derive(Clone, Debug, Encode, Decode)]
@@ -11,6 +10,16 @@ pub struct PatchBundle {
     pub net: Vec<NetPatch>,
     pub hits: Vec<HitPatch>,
     pub metrics: MetricsPatch,
+}
+
+/// Peer-activity notification surfaced to the TypeScript layer. Deliberately thinner
+/// than netcode's wire-level patch type: the boundary only reports which entity was
+/// touched by which peer; wire detail (field updates, event kinds) stays inside
+/// `crates/netcode`, and the engine maps between the two.
+#[derive(Clone, Debug, Encode, Decode)]
+pub struct NetPatch {
+    pub peer_id: String,
+    pub entity: EntityId,
 }
 
 /// Bullet–target collision event. Emitted by the engine when a NET_BULLET entity
@@ -44,11 +53,13 @@ pub struct SemanticPatch {
 }
 
 /// Per-tick timing in milliseconds, always emitted — consumers may ignore.
+/// `pathfinding_ms` is the A* share of `ai_ms` (searches run inside the AI pass).
 #[derive(Clone, Debug, Default, Encode, Decode)]
 pub struct MetricsPatch {
     pub tick_ms: f32,
-    pub ecs_ms: f32,
+    pub ai_ms: f32,
     pub physics_ms: f32,
+    pub pathfinding_ms: f32,
     pub net_ms: f32,
     pub patch_ms: f32,
 }
@@ -131,8 +142,9 @@ mod tests {
             hits: vec![HitPatch { bullet_eid: 5, target_eid: Some(3) }],
             metrics: MetricsPatch {
                 tick_ms: 16.0,
-                ecs_ms: 2.0,
+                ai_ms: 2.0,
                 physics_ms: 8.0,
+                pathfinding_ms: 0.7,
                 net_ms: 1.0,
                 patch_ms: 0.5,
             },

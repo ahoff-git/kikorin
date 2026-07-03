@@ -6,7 +6,7 @@ Owns the Three.js scene/camera/renderer lifecycle and a per-entity `Object3D` re
 ### Inputs and Outputs
 - **In:** `renderChannel` snapshots (`RenderPatch[]` from `@kikorin/adapter`) — position/rotation per entity per tick.
 - **Out:** updated `Object3D` transforms; `renderer.render(scene, camera)` per `renderFrame()`.
-- **API surface:** `setupRenderer` / `disposeRenderer`; registry ops (`upsertObjectByEid`, `removeObjectByEid`, `applyToObjectByEid`, `setObjectTransformByEid`, `setObjectTouchingByEid`); `subscribeToRenderChannel`; `renderFrame`; camera helpers (`setCameraPosition`, `lookCameraAt`, `getActiveCamera`).
+- **API surface:** `setupRenderer` / `disposeRenderer`; registry ops (`upsertObjectByEid`, `removeObjectByEid`, `applyToObjectByEid`, `setObjectTransformByEid`, `setObjectTouchingByEid`); `subscribeToRenderChannel`; `renderFrame`; `getRenderMetrics` (EMA of `renderFrame` duration as `frame_ms` — the rendering-pipeline slice of the cross-layer metrics contract); camera helpers (`setCameraPosition`, `lookCameraAt`, `getActiveCamera`).
 
 ### Invariants
 - `subscribeToRenderChannel` runs after `setupRenderer`; call its returned unsubscribe on dispose.

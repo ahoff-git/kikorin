@@ -13,6 +13,8 @@ export class Engine {
     apply_input(payload: Uint8Array): void;
     /**
      * Build (or rebuild) the navmesh by scanning floor geometry via the physics world.
+     * Bounds are derived from the loaded floor entities (AABB padded by one cell), so
+     * maps of any size and location work without engine changes.
      */
     build_navmesh(): void;
     /**
@@ -36,11 +38,18 @@ export class Engine {
      */
     init_networking(session_id: string, signaling_url: string): void;
     /**
-     * Load the static map: spawns all terrain entities, builds the navmesh, and returns
-     * a JS array of `{ eid, x, y, z, hw, hh, hd, kind }` for mesh creation on the TS side.
+     * Load a map from a JS array of `{ x, y, z, hw, hh, hd, kind }` blocks: spawns a
+     * static terrain entity per block, builds the navmesh from the resulting floor
+     * geometry, and returns the same blocks with `eid` added for mesh creation on the
+     * TS side. The map data is owned by the game — the engine ships none.
      */
-    load_map(): any;
+    load_map(blocks: any): any;
     constructor();
+    /**
+     * Override monster AI tuning. Accepts a partial JS object; missing fields fall
+     * back to engine defaults (not to previously set values). Invalid input is ignored.
+     */
+    set_ai_config(cfg: any): void;
     /**
      * Set the velocity of an entity. XZ velocity is always applied.
      * Pass vy=0 to preserve gravity accumulation; non-zero vy applies a one-frame jump impulse.
@@ -50,6 +59,11 @@ export class Engine {
      * Set log verbosity: 0=off, 1=error, 2=warn, 3=info, 4=debug.
      */
     set_log_level(_level: number): void;
+    /**
+     * Override navmesh build tuning (same partial-object semantics as set_ai_config).
+     * Takes effect on the next load_map / build_navmesh call.
+     */
+    set_nav_config(cfg: any): void;
     /**
      * Spawn a dynamic entity (player, monster, box). Returns the entity ID.
      * `net_flags`: combine NET_LOCAL (0x01) and NET_MONSTER (0x04) for monster entities.

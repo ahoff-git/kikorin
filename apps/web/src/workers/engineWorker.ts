@@ -12,7 +12,7 @@
 // The wasm-bindgen bundler-target binary imports its JS bindings under the namespace
 // "./engine_bg.js", which matches the star-import we provide as the instantiation imports.
 
-import type { EngineHandle, PatchBundle, HitPatch, RenderPatch, SemanticPatch, NetPatch, MetricsPatch } from '@kikorin/adapter';
+import type { EngineHandle, PatchBundle, HitPatch, RenderPatch, SemanticPatch, NetPatch, MetricsPatch, TerrainBlockInput, AiConfigInput, NavConfigInput } from '@kikorin/adapter';
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore — no sub-path type declarations; Engine and __wbg_set_wasm are exported at runtime
@@ -48,9 +48,11 @@ type Req =
   | { type: 'destroy';             eid: number }
   | { type: 'spawn_box';           id: number; x: number; y: number; z: number; hw: number; hh: number; hd: number; health: number; net_flags: number }
   | { type: 'spawn_bullet';        id: number; x: number; y: number; z: number; vx: number; vy: number; vz: number }
-  | { type: 'load_map';            id: number }
+  | { type: 'load_map';            id: number; blocks: TerrainBlockInput[] }
   | { type: 'find_path';           id: number; sx: number; sy: number; sz: number; gx: number; gz: number; canJump: boolean }
   | { type: 'update_monster_goal'; gx: number; gz: number }
+  | { type: 'set_ai_config';       cfg: AiConfigInput }
+  | { type: 'set_nav_config';      cfg: NavConfigInput }
   | { type: 'init_networking';     sessionId: string; signalingUrl: string };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -66,11 +68,13 @@ const pendingRender = new Map<number, RenderPatch>();
 const pendingSemantic = new Map<number, SemanticPatch>();
 const pendingNet: NetPatch[] = [];
 const pendingHits: HitPatch[] = [];
-let latestMetrics: MetricsPatch = { tick_ms: 0, ecs_ms: 0, physics_ms: 0, net_ms: 0, patch_ms: 0 };
+let latestMetrics: MetricsPatch = {
+  tick_ms: 0, ai_ms: 0, physics_ms: 0, pathfinding_ms: 0, net_ms: 0, patch_ms: 0, boundary_ms: 0,
+};
 let latestTick = 0;
 let dirty = false;
 
-function accumulateBundle(bundle: PatchBundle | null): void {
+function accumulateBundle(bundle: PatchBundle | null, tickCallMs: number): void {
   if (!bundle) return;
   for (const rp of bundle.render) pendingRender.set(rp.entity, rp);
   for (const sp of bundle.semantic) {
@@ -81,7 +85,13 @@ function accumulateBundle(bundle: PatchBundle | null): void {
   // Hits are events: never merged, always queued in arrival order. serde-wasm-bindgen
   // serializes Rust Option::None as an absent property, so normalize expiry events.
   for (const hp of bundle.hits) pendingHits.push({ ...hp, target_eid: hp.target_eid ?? null });
-  latestMetrics = bundle.metrics;
+  // boundary_ms: what the tick() call cost as observed from JS beyond the Rust-internal
+  // tick_ms — i.e. the JsValue serialization + bindgen overhead of the WASM boundary.
+  // Clamped at 0 to absorb timer-resolution jitter between the two clocks.
+  latestMetrics = {
+    ...bundle.metrics,
+    boundary_ms: Math.max(0, tickCallMs - bundle.metrics.tick_ms),
+  };
   latestTick = bundle.tick;
   dirty = true;
 }
@@ -120,7 +130,9 @@ function simStep(): void {
 
   let steps = 0;
   while (simAccumulatorMs >= SIM_STEP_MS && steps < MAX_CATCHUP_STEPS) {
-    accumulateBundle(engine.tick(SIM_STEP_MS));
+    const callStart = performance.now();
+    const bundle = engine.tick(SIM_STEP_MS);
+    accumulateBundle(bundle, performance.now() - callStart);
     simAccumulatorMs -= SIM_STEP_MS;
     steps += 1;
   }
@@ -174,7 +186,7 @@ addEventListener('message', async (event: MessageEvent<Req>) => {
       break;
     }
     case 'load_map': {
-      const layout = engine.load_map();
+      const layout = engine.load_map(msg.blocks);
       post({ type: 'ack', id: msg.id, result: layout });
       break;
     }
@@ -185,6 +197,12 @@ addEventListener('message', async (event: MessageEvent<Req>) => {
     }
     case 'update_monster_goal':
       engine.update_monster_goal(msg.gx, msg.gz);
+      break;
+    case 'set_ai_config':
+      engine.set_ai_config(msg.cfg);
+      break;
+    case 'set_nav_config':
+      engine.set_nav_config(msg.cfg);
       break;
     case 'init_networking':
       engine.init_networking?.(msg.sessionId, msg.signalingUrl);

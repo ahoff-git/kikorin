@@ -9,6 +9,9 @@ export type {
   EngineClass,
   JsWaypoint,
   JsTerrainBlock,
+  TerrainBlockInput,
+  AiConfigInput,
+  NavConfigInput,
 } from './types';
 
 export { Channel } from './channel';

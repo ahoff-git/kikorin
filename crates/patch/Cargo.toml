@@ -5,5 +5,4 @@ edition = "2021"
 
 [dependencies]
 ecs = { path = "../ecs" }
-netcode = { path = "../netcode" }
 bincode = { version = "2", features = ["derive"] }

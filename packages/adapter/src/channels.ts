@@ -3,10 +3,12 @@ import { Channel } from './channel';
 
 const EMPTY_METRICS: MetricsPatch = {
   tick_ms: 0,
-  ecs_ms: 0,
+  ai_ms: 0,
   physics_ms: 0,
+  pathfinding_ms: 0,
   net_ms: 0,
   patch_ms: 0,
+  boundary_ms: 0,
 };
 
 /** Three.js / rendering layer subscribes here for per-entity transform updates. */

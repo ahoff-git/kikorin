@@ -4,7 +4,7 @@
 // remain synchronous from the caller's perspective.
 // The worker drives its own simulation loop — there is no tick() method here.
 
-import type { JsTerrainBlock, JsWaypoint, PatchBundle } from '@kikorin/adapter';
+import type { AiConfigInput, JsTerrainBlock, JsWaypoint, NavConfigInput, PatchBundle, TerrainBlockInput } from '@kikorin/adapter';
 
 type WorkerOut =
   | { type: 'patches'; bundle: PatchBundle | null }
@@ -68,10 +68,20 @@ export class WorkerEngineProxy {
     return p;
   }
 
-  load_map(): Promise<JsTerrainBlock[]> {
+  load_map(blocks: TerrainBlockInput[]): Promise<JsTerrainBlock[]> {
     const [id, p] = this.request<JsTerrainBlock[]>();
-    this.worker.postMessage({ type: 'load_map', id });
+    this.worker.postMessage({ type: 'load_map', id, blocks });
     return p;
+  }
+
+  /** Override monster AI tuning. Fire-and-forget; missing fields = engine defaults. */
+  set_ai_config(cfg: AiConfigInput): void {
+    this.worker.postMessage({ type: 'set_ai_config', cfg });
+  }
+
+  /** Override navmesh build tuning. Fire-and-forget; applies to the next load_map. */
+  set_nav_config(cfg: NavConfigInput): void {
+    this.worker.postMessage({ type: 'set_nav_config', cfg });
   }
 
   find_path(sx: number, sy: number, sz: number, gx: number, gz: number, canJump: boolean): Promise<JsWaypoint[] | null> {

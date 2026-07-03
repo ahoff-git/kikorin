@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { rng, clamp, randomItem, colorFrmRange, getContrastingColor } from '../random'
+import { currentLogLevel, logLevels } from '../logging'
 
 describe('rng', () => {
   it('returns a value within [low, high]', () => {
@@ -81,11 +82,15 @@ describe('randomItem', () => {
   })
 
   it('logs an error and returns undefined for an empty array', () => {
+    // Logging is off by default; opt into error level so the log reaches console.error.
+    const prevLevel = currentLogLevel.value
+    currentLogLevel.value = logLevels.error
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const result = randomItem([] as unknown[])
     expect(errorSpy).toHaveBeenCalled()
     expect(result).toBeUndefined()
     errorSpy.mockRestore()
+    currentLogLevel.value = prevLevel
   })
 })
 
