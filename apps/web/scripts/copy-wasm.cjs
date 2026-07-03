@@ -9,5 +9,8 @@ const path = require('node:path');
 const src = require.resolve('@kikorin/engine-wasm/engine_bg.wasm');
 const dest = path.join(__dirname, '..', 'public', 'engine_bg.wasm');
 
+// public/ holds nothing tracked (the wasm itself is gitignored), so fresh clones
+// don't have the directory at all — git never materializes empty dirs.
+fs.mkdirSync(path.dirname(dest), { recursive: true });
 fs.copyFileSync(src, dest);
 console.log(`copy-wasm: ${src} -> ${dest}`);
