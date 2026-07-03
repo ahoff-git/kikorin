@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "scripts": {
     "dev": "turbo dev --filter=web",
-    "wasm:build": "pnpm --filter @kikorin/engine-source build",
+    "wasm:build": "pnpm --filter @kikorin/engine-source build:wasm",
     "wasm:dev": "pnpm --filter @kikorin/engine-source dev",
     "build": "turbo build",
     "test": "turbo test",

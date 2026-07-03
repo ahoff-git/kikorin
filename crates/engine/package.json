@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "wasm-pack build --target bundler --out-name engine && node -e \"const fs=require('fs');const p=JSON.parse(fs.readFileSync('./pkg/package.json','utf8'));p.name='@kikorin/engine-wasm';fs.writeFileSync('./pkg/package.json',JSON.stringify(p,null,2));fs.writeFileSync('./pkg/.gitignore','');fs.copyFileSync('./pkg/engine_bg.wasm','../../apps/web/public/engine_bg.wasm')\"",
+    "build:wasm": "wasm-pack build --target bundler --out-name engine && node -e \"const fs=require('fs');const p=JSON.parse(fs.readFileSync('./pkg/package.json','utf8'));p.name='@kikorin/engine-wasm';fs.writeFileSync('./pkg/package.json',JSON.stringify(p,null,2));fs.writeFileSync('./pkg/.gitignore','');fs.copyFileSync('./pkg/engine_bg.wasm','../../apps/web/public/engine_bg.wasm')\"",
     "dev": "wasm-pack build --target bundler --dev --out-name engine && node -e \"const fs=require('fs');const p=JSON.parse(fs.readFileSync('./pkg/package.json','utf8'));p.name='@kikorin/engine-wasm';fs.writeFileSync('./pkg/package.json',JSON.stringify(p,null,2));fs.writeFileSync('./pkg/.gitignore','');fs.copyFileSync('./pkg/engine_bg.wasm','../../apps/web/public/engine_bg.wasm')\""
   }
 }

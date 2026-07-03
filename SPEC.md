@@ -88,7 +88,7 @@ Boundary hot path uses `serde-wasm-bindgen` (tick returns a JS object directly);
 - `cargo test --workspace` — unit tests per crate (ECS lifecycle + 10k-entity perf bound, physics contracts — gravity/grounded/velocity-split/queries/removal, A* pathing/route constraints, patch round-trip + emission rules, netcode delta round-trip, engine navmesh routing + derived bounds).
 - `pnpm test` — adapter channel delivery, rendering registry/subscription, util suites.
 - `pnpm typecheck` — zero errors, workspace-wide.
-- `pnpm wasm:build` — wasm-pack build (`--target bundler`), renames pkg to `@kikorin/engine-wasm`, copies the binary to `apps/web/public/engine_bg.wasm`.
+- `pnpm wasm:build` — wasm-pack build (`--target bundler`), renames pkg to `@kikorin/engine-wasm`, copies the binary to `apps/web/public/engine_bg.wasm`. This is the only command that requires the Rust toolchain: `crates/engine/pkg/` is committed, and the web build copies the binary from it into `public/` (`apps/web/scripts/copy-wasm.cjs`), so deploy environments (Vercel) build without Rust. After changing Rust code, run `pnpm wasm:build` and commit the regenerated `pkg/`.
 - Modularity check: `cargo tree -p patch --depth 1` and `cargo tree -p netcode --depth 1` show no sibling deps beyond `ecs`.
 
 ---
