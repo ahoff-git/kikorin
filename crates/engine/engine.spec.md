@@ -8,6 +8,16 @@ The ECS `World` is the single source of truth. Each tick, subsystems read and wr
 
 Rust owns all simulation: physics, pathfinding, monster AI, bullet lifetimes, and terrain layout. TypeScript is a pure UI/render layer (Three.js, React, input) that reacts to patches.
 
+### Subsystem Map
+This spec is the top-level entry point; each box below has its own spec for the detail glossed over here.
+
+- **`ecs`** — SoA world storage + scheduler; the single source of truth every subsystem reads/writes.
+- **`physics`** — Rapier3D step; derives bodies from ECS colliders, writes back positions + grounded.
+- **`pathfinding`** — stateless NavMesh A*; supplies monster waypoints.
+- **`netcode`** — per-peer delta tracking + WebRTC apply/flush.
+- **`patch`** — packs the tick's dirty entities into the `PatchBundle`.
+- `packages/adapter` (TS) — mirror types + channels that consume the bundle; `packages/system-rendering` (TS) — applies render patches to Three.js.
+
 ### Per-tick Sequence — `tick(dt_ms)`
 1. Drain inbound peer messages → apply to world.
 2. **Monster AI:** per NET_MONSTER entity — follow path, detect stuck, replan (≤ 1 A* search per tick), write desired velocity + rotation.

@@ -205,7 +205,13 @@ impl NavMesh {
     }
 
     fn build_waypoints(&self, node_path: &[NodeId]) -> Vec<Waypoint> {
+        let Some(&first) = node_path.first() else {
+            return Vec::new();
+        };
+
         let mut waypoints = Vec::with_capacity(node_path.len());
+        waypoints.push(self.node_to_waypoint(first, false, false));
+
         for window in node_path.windows(2) {
             let from = window[0];
             let to = window[1];
@@ -214,10 +220,7 @@ impl NavMesh {
                 .find(|e| e.to == to)
                 .map(|e| (e.requires_jump, e.is_ledge_drop))
                 .unwrap_or((false, false));
-            waypoints.push(self.node_to_waypoint(from, jump, ledge));
-        }
-        if let Some(&last) = node_path.last() {
-            waypoints.push(self.node_to_waypoint(last, false, false));
+            waypoints.push(self.node_to_waypoint(to, jump, ledge));
         }
         waypoints
     }
@@ -436,6 +439,35 @@ mod tests {
             start_y: None,
         });
         assert!(no_jump.is_none(), "non-jumping monster should find no path when jump is the only option");
+    }
+
+    #[test]
+    fn jump_metadata_is_attached_to_destination_waypoint() {
+        let mut mesh = NavMesh::new(NavMeshConfig {
+            cell_size: 1.0,
+            min_x: 0.0,
+            max_x: 3.0,
+            min_z: 0.0,
+            max_z: 1.0,
+        });
+
+        let lower = mesh.add_node(0.5, 0.0, 0.5);
+        let upper = mesh.add_node(1.5, 1.0, 0.5);
+        mesh.add_edge(lower, upper, 1.0, true, false);
+
+        let path = mesh
+            .find_path(PathRequest {
+                start: [0.5, 0.0, 0.5],
+                goal: [1.5, 1.0, 0.5],
+                route_seed: None,
+                can_jump: true,
+                start_y: Some(0.0),
+            })
+            .expect("jump edge should be traversable");
+
+        assert_eq!(path.len(), 2);
+        assert!(!path[0].requires_jump, "starting waypoint should not request a jump");
+        assert!(path[1].requires_jump, "destination waypoint should request the jump");
     }
 
     /// start_y picks the node closest in 3-D when two nodes share nearly the

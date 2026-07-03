@@ -366,9 +366,10 @@ impl Engine {
         const JUMP_THRESHOLD: f32 = 0.5;
         const MIN_LEDGE_DROP: f32 = 1.4;
         const MAX_LEDGE_DROP: f32 = 12.0;
+        const CORNER_DROP_TOLERANCE: f32 = 0.25;
 
-        let cols = ((MAX_X - MIN_X) / CELL_SIZE).round() as usize + 1;
-        let rows = ((MAX_Z - MIN_Z) / CELL_SIZE).round() as usize + 1;
+        let cols = ((MAX_X - MIN_X) / CELL_SIZE).floor() as usize;
+        let rows = ((MAX_Z - MIN_Z) / CELL_SIZE).floor() as usize;
 
         self.physics.sync_from_world(&self.world);
         self.physics.prepare_queries();
@@ -386,8 +387,8 @@ impl Engine {
 
         for row in 0..rows {
             for col in 0..cols {
-                let x = MIN_X + col as f32 * CELL_SIZE;
-                let z = MIN_Z + row as f32 * CELL_SIZE;
+                let x = MIN_X + (col as f32 + 0.5) * CELL_SIZE;
+                let z = MIN_Z + (row as f32 + 0.5) * CELL_SIZE;
                 if let Some(y) = self.physics.floor_height_at(x, z) {
                     let id = mesh.add_node(x, y, z);
                     debug_assert_eq!(id as usize, node_ys.len());
@@ -422,6 +423,26 @@ impl Engine {
                             None => continue,
                         };
                         let height_diff = node_ys[to_id as usize] - from_y;
+
+                        if dc != 0 && dr != 0 {
+                            let side_col_id = match node_grid[row * cols + nc as usize] {
+                                Some(id) => id,
+                                None => continue,
+                            };
+                            let side_row_id = match node_grid[nr as usize * cols + col] {
+                                Some(id) => id,
+                                None => continue,
+                            };
+
+                            let low_endpoint_y = from_y.min(node_ys[to_id as usize]);
+                            let side_col_y = node_ys[side_col_id as usize];
+                            let side_row_y = node_ys[side_row_id as usize];
+                            if side_col_y + CORNER_DROP_TOLERANCE < low_endpoint_y
+                                || side_row_y + CORNER_DROP_TOLERANCE < low_endpoint_y
+                            {
+                                continue;
+                            }
+                        }
 
                         if height_diff > MAX_STEP_UP     { continue; }
                         if height_diff < -MAX_LEDGE_DROP { continue; }
@@ -1050,6 +1071,52 @@ impl From<PatchBundle> for JsPatch {
                 net_ms: b.metrics.net_ms,
                 patch_ms: b.metrics.patch_ms,
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn engine_with_static_map() -> Engine {
+        let mut engine = Engine::new();
+        for &(x, y, z, hw, hh, hd, _) in TERRAIN {
+            engine.spawn_floor_entity(x, y, z, hw, hh, hd);
+        }
+        engine.build_navmesh();
+        engine
+    }
+
+    #[test]
+    fn east_stair_path_keeps_waypoints_inside_stair_treads() {
+        let engine = engine_with_static_map();
+        let navmesh = engine.navmesh.as_ref().expect("navmesh should be built");
+
+        let path = navmesh
+            .find_path(PathRequest {
+                start: [11.5, 0.0, 12.0],
+                goal: [31.0, 0.0, -6.0],
+                route_seed: None,
+                can_jump: true,
+                start_y: Some(0.0),
+            })
+            .expect("east stair should route to the platform");
+
+        assert!(
+            path.iter().any(|wp| wp.x > 22.0 && (wp.y - 4.0).abs() < 0.01),
+            "path should reach the upper platform: {path:?}",
+        );
+        assert!(
+            path.iter().find(|wp| wp.x > 22.0).is_some_and(|wp| wp.z > 7.1),
+            "path should enter the platform through the supported stair seam: {path:?}",
+        );
+
+        for wp in path.iter().filter(|wp| wp.x >= 10.0 && wp.x <= 22.0 && wp.y >= 1.0) {
+            assert!(
+                wp.z > 7.1 && wp.z < 16.9,
+                "stair waypoint should stay inside the tread, not on an edge: {wp:?}",
+            );
         }
     }
 }

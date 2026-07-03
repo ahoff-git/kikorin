@@ -63,32 +63,39 @@
 
 - For each black box module or subsystem, maintain a short colocated mini spec that explains the box without requiring source review.
 - Examples include netcode, ECS loop, replication, input pipeline, prediction, reconciliation, and rendering bridge.
+- Specs describe **architecture, not minutia**: current-state ins, outs, and medium-level logic — never a changelog. History lives in git.
+
+### Altitude and Layering
+
+- The main spec (`crates/engine/engine.spec.md`) is the top-level entry point. It describes the big picture: how the subsystems fit together, the per-tick sequence, and cross-cutting contracts (e.g. NET flags). Keep it high-level.
+- Each component spec sits one level lower. It fills in the details the main spec deliberately glosses over — the mechanics and non-obvious "why" specific to that box.
+- **Do not repeat yourself across specs.** A contract is documented in exactly one spec and referenced by name elsewhere. If two specs describe the same thing, one of them is wrong.
 
 ### Requirements
 
 - Each black box must have a mini spec document.
-- If code behavior, boundaries, assumptions, invariants, inputs or outputs, dependencies, or test coverage change, update the spec in the same pass.
+- If code behavior, boundaries, assumptions, invariants, inputs or outputs, dependencies, or test coverage change, update the spec to reflect the new current state in the same pass.
 - If a black box is modified and its spec is not updated, the task is incomplete.
 - Prefer updating an existing spec over creating duplicate documentation.
 - Keep specs short, concrete, and review-oriented.
 
 ### Mini Spec Contents
 
-Each mini spec should include:
+Include only the sections that carry real information for the box; omit the rest. Never add a running change log.
 
 - Purpose: what the black box is responsible for.
-- Boundaries: what it owns and what it must not do.
+- Boundaries: what it owns and what it must not do (when non-obvious).
 - Inputs and Outputs: key data in and out.
+- Key Logic: the medium-level mechanics and non-obvious "why" a reviewer needs.
 - Invariants: rules that must remain true.
 - Dependencies: other boxes, shared state, timing assumptions, and external services.
-- Change Notes: what changed in this pass and why.
 - Verification: tests, assertions, or manual checks relevant to the box.
 
 ### Workflow
 
-- When changing a black box, update its mini spec in the same pass.
-- If the requested change conflicts with the current spec, update the spec to reflect the new intended behavior and call out the contract change clearly.
-- Surface black box contract changes explicitly in the final summary.
+- When changing a black box, edit its mini spec so it reads as if the new behavior were always the design — update the affected sections in place rather than appending notes about the change.
+- If the requested change conflicts with the current spec, rewrite the spec to the new intended behavior.
+- Surface black box contract changes explicitly in the final summary (the summary is where change history belongs, not the spec).
 
 ### File Pattern
 
