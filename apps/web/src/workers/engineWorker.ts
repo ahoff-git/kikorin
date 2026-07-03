@@ -1,5 +1,6 @@
 // WASM engine worker — runs the physics simulation on a dedicated thread.
-// The simulation loop runs as fast as setTimeout(fn, 0) allows (~250 Hz in workers).
+// The simulation loop is pumped by setTimeout(fn, 0), while physics advances in
+// fixed 4 ms steps so browser stalls cannot feed Rapier a tunneling-prone dt spike.
 // Patches are accumulated between flushes and sent to the main thread at FLUSH_INTERVAL_MS.
 // Messages in:  see Req union below.
 // Messages out: { type: 'patches', bundle } at flush cadence, { type: 'ack', id, result } for requests.
@@ -36,8 +37,10 @@ async function loadWasm(origin: string): Promise<new () => EngineHandle> {
 }
 
 // How often to post accumulated patches to the main thread (~60 Hz).
-// The simulation itself runs faster; this only controls the renderer's update cadence.
+// The simulation itself advances at SIM_STEP_MS; this only controls the renderer's update cadence.
 const FLUSH_INTERVAL_MS = 16;
+const SIM_STEP_MS = 4;
+const MAX_CATCHUP_STEPS = 8;
 
 type Req =
   | { type: 'init';                id: number; signalingUrl?: string; sessionId?: string; origin: string }
@@ -45,8 +48,7 @@ type Req =
   | { type: 'destroy';             eid: number }
   | { type: 'spawn_box';           id: number; x: number; y: number; z: number; hw: number; hh: number; hd: number; health: number; net_flags: number }
   | { type: 'spawn_bullet';        id: number; x: number; y: number; z: number; vx: number; vy: number; vz: number }
-  | { type: 'spawn_floor';         id: number; x: number; y: number; z: number; hw: number; hh: number; hd: number }
-  | { type: 'build_navmesh';       id: number }
+  | { type: 'load_map';            id: number }
   | { type: 'find_path';           id: number; sx: number; sy: number; sz: number; gx: number; gz: number; canJump: boolean }
   | { type: 'update_monster_goal'; gx: number; gz: number }
   | { type: 'init_networking';     sessionId: string; signalingUrl: string };
@@ -76,8 +78,9 @@ function accumulateBundle(bundle: PatchBundle | null): void {
     pendingSemantic.set(sp.entity, prev ? { ...prev, ...sp } : sp);
   }
   for (const np of bundle.net) pendingNet.push(np);
-  // Hits are events — never merged, always queued in arrival order.
-  for (const hp of bundle.hits) pendingHits.push(hp);
+  // Hits are events: never merged, always queued in arrival order. serde-wasm-bindgen
+  // serializes Rust Option::None as an absent property, so normalize expiry events.
+  for (const hp of bundle.hits) pendingHits.push({ ...hp, target_eid: hp.target_eid ?? null });
   latestMetrics = bundle.metrics;
   latestTick = bundle.tick;
   dirty = true;
@@ -100,23 +103,39 @@ function flush(): void {
 }
 
 // Self-driven simulation loop — decoupled from the main thread RAF rate.
-// setTimeout(fn, 0) yields between steps so message handlers (set_velocity, spawn, etc.)
-// can interleave without starving.
+// setTimeout(fn, 0) yields between pumps so message handlers (set_velocity, spawn, etc.)
+// can interleave without starving. The catch-up cap prefers dropping time over
+// feeding physics a large variable step.
 let simRunning = false;
 let lastSimTime = 0;
+let simAccumulatorMs = 0;
 
 function simStep(): void {
   if (!simRunning || !engine) return;
   const now = performance.now();
-  const dt = Math.min(now - lastSimTime, 100);
+  const elapsed = Math.min(now - lastSimTime, SIM_STEP_MS * MAX_CATCHUP_STEPS);
   lastSimTime = now;
-  accumulateBundle(engine.tick(dt));
+
+  simAccumulatorMs += elapsed;
+
+  let steps = 0;
+  while (simAccumulatorMs >= SIM_STEP_MS && steps < MAX_CATCHUP_STEPS) {
+    accumulateBundle(engine.tick(SIM_STEP_MS));
+    simAccumulatorMs -= SIM_STEP_MS;
+    steps += 1;
+  }
+
+  if (steps === MAX_CATCHUP_STEPS) {
+    simAccumulatorMs = 0;
+  }
+
   setTimeout(simStep, 0);
 }
 
 function startSimulation(): void {
   simRunning = true;
   lastSimTime = performance.now();
+  simAccumulatorMs = 0;
   setTimeout(simStep, 0);
   setInterval(flush, FLUSH_INTERVAL_MS);
 }
@@ -154,15 +173,11 @@ addEventListener('message', async (event: MessageEvent<Req>) => {
       post({ type: 'ack', id: msg.id, result: eid });
       break;
     }
-    case 'spawn_floor': {
-      const eid = engine.spawn_floor_entity(msg.x, msg.y, msg.z, msg.hw, msg.hh, msg.hd);
-      post({ type: 'ack', id: msg.id, result: eid });
+    case 'load_map': {
+      const layout = engine.load_map();
+      post({ type: 'ack', id: msg.id, result: layout });
       break;
     }
-    case 'build_navmesh':
-      engine.build_navmesh();
-      post({ type: 'ack', id: msg.id, result: null });
-      break;
     case 'find_path': {
       const path = engine.find_path(msg.sx, msg.sy, msg.sz, msg.gx, msg.gz, msg.canJump);
       post({ type: 'ack', id: msg.id, result: path });

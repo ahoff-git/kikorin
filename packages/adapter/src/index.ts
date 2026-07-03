@@ -8,6 +8,7 @@ export type {
   EngineHandle,
   EngineClass,
   JsWaypoint,
+  JsTerrainBlock,
 } from './types';
 
 export { Channel } from './channel';
@@ -19,5 +20,3 @@ export {
   metricsChannel,
   hitsChannel,
 } from './channels';
-
-export { startEngineLoop, processFrame, createInputSender } from './adapter';

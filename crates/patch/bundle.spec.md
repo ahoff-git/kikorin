@@ -1,27 +1,22 @@
-## crates/patch — PatchBundle Generation & Serialization
+## crates/patch — PatchBundle Generation
 
 ### Purpose
-Scans the ECS World's dirty entity list each tick and produces a `PatchBundle` — the single binary payload that crosses the WASM boundary per tick. Owns `PatchBundle` serialization (bincode) and deserialization.
-
-### Boundaries
-- **Owns:** `PatchBundle`, `RenderPatch`, `SemanticPatch`, `MetricsPatch`, `PatchGenerator::generate`, `serialize`, `deserialize`.
-- **Must not:** mutate the ECS World, run physics, or touch netcode. Read-only access to `World` during `generate`.
+Scans the world's dirty entities each tick and produces the `PatchBundle` — the single binary payload that crosses the WASM boundary per tick. Read-only over the ECS world; never mutates state, runs physics, or touches netcode.
 
 ### Inputs and Outputs
-- **Inputs:** `&World` (reads `dirty_entities()`, component values), `Vec<NetPatch>` (from netcode drain), `MetricsPatch` (from engine timing).
-- **Outputs:** `PatchBundle` (in-memory), `Vec<u8>` (bincode-serialized) from `PatchGenerator::serialize`.
+- **In:** `&World` (dirty entities + component values), `Vec<NetPatch>` (from netcode drain), `MetricsPatch` (engine timing).
+- **Out:** `PatchBundle` in memory; `Vec<u8>` bincode from `serialize`. Bincode (not JSON) keeps the boundary payload minimal; `Engine::deserialize_patch` converts back to a JS struct.
+
+### Emission Rules
+- `RenderPatch` — emitted for entities with `DirtyFlags::TRANSFORM`.
+- `SemanticPatch` — emitted for entities with `DirtyFlags::HEALTH` or `NET`.
+- `MetricsPatch` — always present, even when render/semantic/net are empty.
 
 ### Invariants
-- `MetricsPatch` is always present in every PatchBundle, even when `render`, `semantic`, and `net` are empty.
-- `RenderPatch` is emitted only for entities with `DirtyFlags::TRANSFORM` set.
-- `SemanticPatch` is emitted only for entities with `DirtyFlags::HEALTH` or `DirtyFlags::NET` set.
-- `PatchGenerator` does not call `World::clear_dirty` — the caller (`crates/engine`) must clear dirty after serialization.
+- `generate` does not call `World::clear_dirty`; the caller (engine) clears dirty after serialization.
 
 ### Dependencies
-- `ecs` crate (World, DirtyFlags, EntityId), `netcode` crate (NetPatch type), `bincode`, `serde`.
+`ecs` (World, DirtyFlags, EntityId), `netcode` (NetPatch), `bincode`, `serde`.
 
 ### Verification
-- `cargo test -p patch` — three tests: `patch_bundle_roundtrips_through_bincode`, `generator_emits_render_patch_for_dirty_transform`, `generator_emits_semantic_patch_for_health_dirty`.
-
-### Change Notes
-- Initial implementation. `PatchBundle` is bincode-encoded (not JSON) for minimal WASM boundary size. `Engine::deserialize_patch` in `crates/engine` converts to a JS-friendly struct via `serde_wasm_bindgen`.
+`cargo test -p patch` — `patch_bundle_roundtrips_through_bincode`, `generator_emits_render_patch_for_dirty_transform`, `generator_emits_semantic_patch_for_health_dirty`.

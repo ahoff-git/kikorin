@@ -96,18 +96,19 @@ impl World {
 
     pub fn destroy_entity(&mut self, id: EntityId) {
         let i = id as usize;
-        if i < self.alive.len() {
-            self.alive[i] = false;
-            self.position[i] = None;
-            self.velocity[i] = None;
-            self.rotation[i] = None;
-            self.health[i] = None;
-            self.net_flags[i] = None;
-            self.collider[i] = None;
-            self.grounded[i] = None;
-            self.is_floor[i] = false;
-            self.dirty[i] = DirtyFlags::empty();
+        if i >= self.alive.len() || !self.alive[i] {
+            return;
         }
+        self.alive[i] = false;
+        self.position[i] = None;
+        self.velocity[i] = None;
+        self.rotation[i] = None;
+        self.health[i] = None;
+        self.net_flags[i] = None;
+        self.collider[i] = None;
+        self.grounded[i] = None;
+        self.is_floor[i] = false;
+        self.dirty[i] = DirtyFlags::empty();
         self.free_list.push(id);
     }
 

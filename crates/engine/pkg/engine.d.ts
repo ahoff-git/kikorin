@@ -35,6 +35,11 @@ export class Engine {
      * Initialize WebRTC peer networking (WASM only).
      */
     init_networking(session_id: string, signaling_url: string): void;
+    /**
+     * Load the static map: spawns all terrain entities, builds the navmesh, and returns
+     * a JS array of `{ eid, x, y, z, hw, hh, hd, kind }` for mesh creation on the TS side.
+     */
+    load_map(): any;
     constructor();
     /**
      * Set the velocity of an entity. XZ velocity is always applied.

@@ -22,8 +22,8 @@ export interface NetPatch {
 
 export interface HitPatch {
   bullet_eid: number;
-  /** null when the bullet left the play area rather than hitting a monster. */
-  target_eid: number | null;
+  /** null/undefined when the bullet expired or left the play area rather than hitting a monster. */
+  target_eid?: number | null;
 }
 
 export interface MetricsPatch {
@@ -51,6 +51,17 @@ export type JsWaypoint = {
   isLedgeDrop: boolean;
 };
 
+export type JsTerrainBlock = {
+  eid: number;
+  x: number;
+  y: number;
+  z: number;
+  hw: number;
+  hh: number;
+  hd: number;
+  kind: 'floor' | 'wall' | 'platform';
+};
+
 /** Minimal interface the WASM Engine must satisfy. */
 export interface EngineHandle {
   /** Advance the simulation by dt_ms. Returns a PatchBundle JS object directly. */
@@ -60,22 +71,24 @@ export interface EngineHandle {
   set_log_level(level: number): void;
   spawn_entity(payload: Uint8Array): number;
   destroy_entity(id: number): void;
-  /** Spawn a static floor/terrain entity. Returns the entity ID. */
-  spawn_floor_entity(x: number, y: number, z: number, hw: number, hh: number, hd: number): number;
+  /**
+   * Load the static map terrain. Spawns all floor entities and builds the navmesh
+   * in a single Rust call. Returns an array of blocks with their entity IDs and
+   * dimensions so TypeScript can create Three.js meshes.
+   */
+  load_map(): JsTerrainBlock[];
   /** Spawn a dynamic entity. net_flags=1 (NET_LOCAL) for locally-simulated entities. */
   spawn_box_entity(x: number, y: number, z: number, hw: number, hh: number, hd: number, health: number, net_flags: number): number;
   /**
-   * Spawn a projectile. The engine integrates its ballistic trajectory each tick and
-   * emits render patches. No Rapier body — bypasses broadphase entirely.
-   * TypeScript owns lifetime and hit detection; call destroy_entity to remove.
+   * Spawn a projectile. The engine integrates its ballistic trajectory each tick,
+   * enforces a TTL (PROJ_MAX_FRAMES), and emits HitPatch events for hits and expiry.
+   * No Rapier body — bypasses broadphase entirely.
    */
   spawn_bullet(x: number, y: number, z: number, vx: number, vy: number, vz: number): number;
   /** Set XZ velocity (movement) and optionally Y (one-frame jump impulse when non-zero). */
   set_entity_velocity(id: number, vx: number, vy: number, vz: number): void;
   /** Update the position monsters path toward. Call once per frame before tick(). */
   update_monster_goal(gx: number, gz: number): void;
-  /** Build (or rebuild) the navmesh from current floor geometry. Call once after terrain is spawned. */
-  build_navmesh(): void;
   /**
    * Find a path from (startX, startY, startZ) to (goalX, goalZ).
    * Returns a waypoint array or null if no path exists.

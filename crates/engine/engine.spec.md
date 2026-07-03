@@ -1,71 +1,51 @@
-## crates/engine — Rust Engine Orchestrator (WASM Entry Point)
+## crates/engine — Engine Orchestrator (WASM Entry Point)
 
 ### Purpose
-Assembles ECS, physics, netcode, patch generation, monster AI, and bullet hit detection into the single `#[wasm_bindgen]` `Engine` type. This is the only Rust artifact JavaScript sees. Owns the per-tick orchestration sequence and the WASM-bindgen public API.
+The single `#[wasm_bindgen]` `Engine` type — the only Rust artifact JavaScript sees. Assembles the ECS world, physics, netcode, pathfinding, and patch generation into one per-tick sequence, and owns the game logic that belongs to no single subsystem: monster AI, bullet simulation, and hit detection.
 
-### Boundaries
-- **Owns:** `Engine` struct, wasm-bindgen exports, per-tick sequencing, monster AI state machine (`MonsterState`), monster separation, bullet hit detection, `EntityBlueprint` decode, JS-serializable mirror types (`JsPatch`, `JsRender`, `JsSemantic`, `JsHit`, `JsMetrics`).
-- **Must not:** contain rendering logic (Three.js), input handling, or React UI state. Must not bypass the `PatchBundle` boundary — no per-entity getter calls in the hot path outside tick methods.
+### The Big Picture
+The ECS `World` is the single source of truth. Each tick, subsystems read and write the world in a fixed order; the dirty entities are then packed into one bincode `PatchBundle` that crosses the WASM boundary. JavaScript never reads entity state directly — it consumes patches and calls spawn/input methods.
 
-### Inputs and Outputs
+Rust owns all simulation: physics, pathfinding, monster AI, bullet lifetimes, and terrain layout. TypeScript is a pure UI/render layer (Three.js, React, input) that reacts to patches.
+
+### Per-tick Sequence — `tick(dt_ms)`
+1. Drain inbound peer messages → apply to world.
+2. **Monster AI:** per NET_MONSTER entity — follow path, detect stuck, replan (≤ 1 A* search per tick), write desired velocity + rotation.
+3. **Separation:** blend soft repulsion into monster XZ velocities (skipped on jump frames).
+4. **Physics:** sync world → Rapier, step, sync back.
+5. **Bullets:** integrate NET_BULLET trajectories, bounce off terrain, enforce TTL, detect monster overlaps → hit events.
+6. Mark locally-owned entities dirty; flush outbound peer deltas.
+7. Generate `PatchBundle` → clear dirty flags → advance tick.
+
+### NET Flags — entity networking/simulation contract
+The `net_flags` bitmask on each entity is the source of truth for how the engine treats it. Referenced by name across the other crates.
+- `NET_LOCAL (0x01)` — Rapier dynamic body; emits HEALTH patches; replicated outbound.
+- `NET_BULLET (0x02)` — no Rapier body; engine integrates its ballistic trajectory; emits only TRANSFORM patches.
+- `NET_MONSTER (0x04)` — engine owns its AI, separation, and hit detection. Combine with LOCAL (`0x05`) for a locally-simulated monster.
+
+### Public WASM API
 ```
-tick(dt_ms: f64) → JsValue (JsPatch)    // PatchBundle as JS object; clears dirty flags each call
-apply_input(payload: &[u8]) → void      // apply inbound peer delta or input event
-deserialize_patch(bytes: &[u8]) → JsValue  // static; converts bincode → JS object
-get_metrics() → JsValue                 // JSON metrics from last tick
-set_log_level(level: u8) → void
-spawn_entity(payload: &[u8]) → u32      // decode EntityBlueprint, return new ID
-destroy_entity(id: u32) → void
-spawn_box_entity(x,y,z,hw,hh,hd,health,net_flags) → u32  // dynamic box entity
-spawn_floor_entity(x,y,z,hw,hh,hd) → u32                 // static floor/terrain entity
-spawn_bullet(x,y,z,vx,vy,vz) → u32                       // NET_BULLET entity — no Rapier body
-update_monster_goal(gx, gz) → void      // set pathfinding target; call once per frame
-find_path(startX,startY,startZ,goalX,goalZ,canJump) → JsValue  // manual A* query (optional)
-init_networking(session_id, signaling_url) → void  // WASM only
+tick(dt_ms) → JsPatch                     per-tick simulation; returns the PatchBundle
+apply_input(bytes)                        apply inbound peer delta / input event
+spawn_box_entity(x,y,z,hw,hh,hd,health,net_flags) → id
+spawn_bullet(x,y,z,vx,vy,vz) → id         NET_BULLET; no Rapier body
+spawn_entity(EntityBlueprint bytes) → id
+destroy_entity(id)                        removes ECS + Rapier body + AI/bullet state
+load_map() → JsTerrainBlock[]             spawns static terrain, builds navmesh, returns layout
+update_monster_goal(gx, gz)               set pathfinding target; once per frame
+find_path(sx,sy,sz,gx,gz,canJump) → JsWaypoint[] | null   manual A* query
+init_networking(session_id, url)          WASM only
+get_metrics() → JsMetrics | set_log_level(u8) | deserialize_patch(bytes) → JsPatch (static)
 ```
-
-### NET Flags
-- `NET_LOCAL (0x01)`: Rapier dynamic body, HEALTH patches, networking outbound.
-- `NET_BULLET (0x02)`: No Rapier body, no HEALTH patches. Position integrated by the engine each tick; only TRANSFORM render patches emitted.
-- `NET_MONSTER (0x04)`: Monster entity flag. Engine owns AI (path following, stuck detection, replanning), separation forces, and hit detection for this entity. Combine with NET_LOCAL for locally-simulated monsters: `0x05`.
-
-### Per-tick Sequence
-1. Drain inbound peer messages → apply to World, collect NetPatches.
-2. `tick_monster_ai(dt)`: for each NET_MONSTER entity — stuck detection, path replanning (one A* per tick max), waypoint following, desired velocity + rotation written to ECS.
-2.25. `apply_monster_separation()`: blend soft repulsion into NET_MONSTER XZ velocities; skips jump frames.
-2.5. `PhysicsWorld::sync_from_world` → `step(dt_secs)` → `sync_to_world`.
-3. `tick_bullets(dt)`: for each NET_BULLET entity — integrate ballistic trajectory, bounce off terrain via `cast_ray_with_normal`, detect overlap with NET_MONSTER entities. Returns `Vec<HitPatch>` (one per collision, one per out-of-bounds bullet).
-4. Mark locally-owned entities dirty with HEALTH.
-5. Flush outbound deltas to peers.
-6. `PatchGenerator::generate` (now includes `hits`) → convert to `JsPatch` → return. `clear_dirty`. `advance_tick`.
 
 ### Invariants
-- `World::clear_dirty` is called once per tick, after patch generation.
-- `MetricsPatch` is always included in the returned bundle.
-- At most one A* search runs per engine tick (path_requested_this_tick flag).
-- Separation does not modify velocity on jump frames (`vel.y.abs() > 0.1`).
-- Hit detection uses ECS positions (updated by physics sync), not Three.js positions.
-- `destroy_entity` removes MonsterState and Rapier body in the same call.
+- At most one A* search runs per tick.
+- `load_map()` builds the navmesh internally — callers must not build it separately.
+- `destroy_entity` removes the entity's Rapier body and any monster/bullet state in the same call, so no phantom patches survive for a recycled ID.
 
 ### Dependencies
-- `ecs`, `physics`, `netcode`, `patch`, `pathfinding` crates. `wasm-bindgen`, `serde-wasm-bindgen`, `console_log`, `console_error_panic_hook` (WASM), `bincode`.
+`ecs`, `physics`, `netcode`, `patch`, `pathfinding`; `wasm-bindgen`, `serde-wasm-bindgen`, `bincode`, and (WASM only) `console_log` / `console_error_panic_hook`.
 
 ### Verification
-- `cargo build --target wasm32-unknown-unknown --release` exits 0.
-- `wasm-pack build --target bundler` in `crates/engine/` produces `pkg/` with `@kikorin/engine-wasm`.
-
-### Change Notes
-- Initial implementation: Timer abstraction for sub-millisecond timing cross-platform.
-- `destroy_entity` calls `physics.remove_entity(id)` — prevents phantom render patches.
-- Gravity raised from 9.81 to 20.0 m/s². Jump velocities scaled proportionally.
-- Added `spawn_bullet` and `NET_BULLET (0x02)` flag. Bullet entities have no Rapier body.
-- Bullets bounce off terrain using `PhysicsWorld::cast_ray_with_normal`.
-- **Previous pass:** Monster AI state machine, path following, stuck detection, and replanning migrated from TypeScript (`kikorin.tsx`) to Rust (`tick_monster_ai`). Monster separation forces migrated from the `monsterAIWorker.ts` pool to `apply_monster_separation`. Bullet hit detection migrated from TypeScript to `tick_bullets`. Added `NET_MONSTER (0x04)` flag, `MonsterState` struct, `update_monster_goal` API, and `HitPatch` in the `PatchBundle`. TypeScript is now responsible only for rendering, player input, camera, bullet lifetime, and respawn logic triggered by `HitPatch` events.
-- **This pass:** Fixed `tick_bullets` — gravity (`vy -= 20.0 * dt_secs`) was never applied to stored bullet velocity, so bullets flew in a straight line instead of arcing. Also fixed the non-bounce path to write the gravity-updated velocity back to ECS so the arc accumulates across ticks. Both the bounce (velocity reflection) and free-flight paths now use the gravity-adjusted velocity.
-
-**Contract changes from this pass:**
-- `PatchBundle` gains `hits: Vec<HitPatch>`. All consumers must handle the new field.
-- Monsters must be spawned with `net_flags = NET_LOCAL | NET_MONSTER (0x05)` instead of just `NET_LOCAL (0x01)`.
-- `update_monster_goal(gx, gz)` must be called each frame with the player position before tick().
-- `spawn_box_entity` no longer needs a MonsterPathState counterpart in TypeScript.
-- `monsterAIWorker.ts` deleted; `set_entity_velocity_batch` no longer called for monsters.
+- `cargo check -p engine` exits 0.
+- `wasm-pack build --target bundler` in `crates/engine/` produces `pkg/` (`@kikorin/engine-wasm`).

@@ -46,7 +46,6 @@ const CAM_RESTORE_SPEED = 6.0;
 const CAM_WALL_SEPARATION = 0.3;
 
 const PROJ_SPEED = 40;
-const PROJ_MAX_FRAMES = 600; // ~10 s at 60 fps
 const PROJ_HIT_RADIUS_SQ = 1.2 * 1.2; // for crosshair aim-assist only
 const AIM_FAR = 50;
 
@@ -102,61 +101,6 @@ function makeProjectileMesh(): Object3D {
   return mesh;
 }
 
-// ---- Static terrain layout ----
-
-type TerrainKind = "floor" | "step" | "wall";
-type TerrainBlock = { x: number; y: number; z: number; hw: number; hh: number; hd: number; kind?: TerrainKind };
-
-// Multi-zone map. Ramps are approximated as solid stacked steps (AABB colliders only).
-const TERRAIN: TerrainBlock[] = [
-  // ── MAIN FLOOR ───────────────────────────────────────────────────────────
-  { x: 0, y: -1, z: -5, hw: 60, hh: 1, hd: 75, kind: "floor" },
-
-  // ── EAST WING — ramp steps going east (x=10→22, y=0→4, z=12 centre) ────
-  { x: 11.5, y: 0.5, z: 12, hw: 1.5, hh: 0.5, hd: 5 },
-  { x: 14.5, y: 1.0, z: 12, hw: 1.5, hh: 1.0, hd: 5 },
-  { x: 17.5, y: 1.5, z: 12, hw: 1.5, hh: 1.5, hd: 5 },
-  { x: 20.5, y: 2.0, z: 12, hw: 1.5, hh: 2.0, hd: 5 },
-  { x: 31,   y: 3.7, z: -6, hw: 9,   hh: 0.3, hd: 22 },
-  { x: 42,   y: 3.7, z: 0,  hw: 2,   hh: 0.3, hd: 3  },
-  { x: 47,   y: 3.7, z: 0,  hw: 3,   hh: 0.3, hd: 4  },
-
-  // ── WEST WING — staircase going west ────────────────────────────────────
-  { x: -12, y: 0.5, z: 5, hw: 1.5, hh: 0.5, hd: 2.5 },
-  { x: -15, y: 1.0, z: 5, hw: 1.5, hh: 1.0, hd: 2.5 },
-  { x: -18, y: 1.5, z: 5, hw: 1.5, hh: 1.5, hd: 2.5 },
-  { x: -21, y: 2.0, z: 5, hw: 1.5, hh: 2.0, hd: 2.5 },
-  { x: -31, y: 3.7, z: -6, hw: 9, hh: 0.3, hd: 22 },
-
-  // ── NORTH BRIDGE (y=4) ───────────────────────────────────────────────────
-  { x: 0, y: 3.7, z: -26, hw: 22, hh: 0.3, hd: 5 },
-
-  // ── NORTH KEEP (y=4) ─────────────────────────────────────────────────────
-  { x: 0, y: 3.7, z: -37, hw: 8, hh: 0.3, hd: 6 },
-  { x: 0, y: 4.5, z: -44, hw: 4, hh: 0.5, hd: 1.5 },
-  { x: 0, y: 5.5, z: -47, hw: 4, hh: 0.5, hd: 1.5 },
-  { x: 0, y: 6.5, z: -50, hw: 4, hh: 0.5, hd: 1.5 },
-  { x: 0, y: 7.5, z: -53, hw: 4, hh: 0.5, hd: 1.5 },
-
-  // ── UPPER KEEP (top at y=8) ───────────────────────────────────────────────
-  { x: 0, y: 7.7, z: -58, hw: 5, hh: 0.3, hd: 4 },
-  { x: 0, y: 9.5, z: -62, hw: 5, hh: 1.5, hd: 0.4, kind: "wall" },
-
-  // ── SOUTH TERRACE ────────────────────────────────────────────────────────
-  { x: 0, y: 0.5, z: 28.5, hw: 8, hh: 0.5, hd: 1.5 },
-  { x: 0, y: 1.0, z: 25.5, hw: 8, hh: 1.0, hd: 1.5 },
-  { x: 0, y: 1.5, z: 22.5, hw: 8, hh: 1.5, hd: 1.5 },
-  { x: 0, y: 2.7, z: 17, hw: 12, hh: 0.3, hd: 5 },
-
-  // ── WALLS & PARAPETS ─────────────────────────────────────────────────────
-  { x: -5, y: 1.5, z: -7,  hw: 0.5, hh: 1.5, hd: 3,  kind: "wall" },
-  { x:  5, y: 1.5, z: -7,  hw: 0.5, hh: 1.5, hd: 3,  kind: "wall" },
-  { x:  40, y: 4.8, z: -6, hw: 0.3, hh: 0.8, hd: 22, kind: "wall" },
-  { x: -40, y: 4.8, z: -6, hw: 0.3, hh: 0.8, hd: 22, kind: "wall" },
-  { x: -11, y: 4.8, z: -31, hw: 11, hh: 0.8, hd: 0.4, kind: "wall" },
-  { x:  11, y: 4.8, z: -31, hw: 11, hh: 0.8, hd: 0.4, kind: "wall" },
-];
-
 // ---- Ownership / networking callback shape ----
 
 type OwnershipCallbacks = {
@@ -193,18 +137,17 @@ export async function setupGame(
   const ownedEids: number[] = [];
 
   // --- Terrain ---
+  // Rust owns the map layout and navmesh; we only create Three.js meshes here.
+  const terrainLayout = await engine.load_map();
   const terrainMeshes: Object3D[] = [];
-  await Promise.all(TERRAIN.map(async (b) => {
-    const eid = await engine.spawn_floor_entity(b.x, b.y, b.z, b.hw, b.hh, b.hd);
+  for (const b of terrainLayout) {
     const meshFn = b.kind === "floor" ? makeFloorMesh
                  : b.kind === "wall"  ? makeWallMesh
                  : makePlatformMesh;
-    const obj = upsertObjectByEid(eid, () => meshFn(b.hw, b.hh, b.hd));
+    const obj = upsertObjectByEid(b.eid, () => meshFn(b.hw, b.hh, b.hd));
     obj.position.set(b.x, b.y, b.z);
     terrainMeshes.push(obj);
-  }));
-
-  await engine.build_navmesh();
+  }
 
   // --- Player ---
   const playerEid = await engine.spawn_box_entity(0, 5, 0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
@@ -214,10 +157,6 @@ export async function setupGame(
 
   // --- Monsters (populated by spawnMonsters) ---
   const monsterEids: number[] = [];
-
-  // --- Projectiles ---
-  type Projectile = { eid: number; frames: number };
-  const projectiles: Projectile[] = [];
 
   // --- Input state ---
   const heldKeys = new Set<string>();
@@ -253,13 +192,11 @@ export async function setupGame(
   const unsubHits = hitsChannel.subscribe(() => {
     const hits = hitsChannel.getSnapshot();
     for (const hit of hits) {
-      // Clean up bullet (both present-in-world and out-of-bounds cases).
-      const projIdx = projectiles.findIndex(p => p.eid === hit.bullet_eid);
-      if (projIdx >= 0) projectiles.splice(projIdx, 1);
+      // Rust already destroyed the entity; call through so the proxy stays consistent.
       engine.destroy_entity(hit.bullet_eid);
       removeObjectByEid(hit.bullet_eid);
 
-      if (hit.target_eid !== null) {
+      if (hit.target_eid != null) {
         // Monster was hit — remove it and spawn a replacement at a random map edge.
         engine.destroy_entity(hit.target_eid);
         removeObjectByEid(hit.target_eid, { dispose: true });
@@ -317,7 +254,6 @@ export async function setupGame(
     ).then((eid) => {
       const obj = upsertObjectByEid(eid, makeProjectileMesh);
       obj.position.set(spawnX, spawnY, spawnZ);
-      projectiles.push({ eid, frames: 0 });
     });
   }
   window.addEventListener("mousedown", onMouseDown);
@@ -394,20 +330,6 @@ export async function setupGame(
     jumpRequested = false;
 
     engine.set_entity_velocity(playerEid, vx, vy, vz);
-
-    // --- Bullet lifetime ---
-    // Bullet hit detection and out-of-bounds are handled by the Rust engine, which
-    // emits hit events via hitsChannel (subscribed above). Here we only enforce the
-    // maximum-lifetime limit so bullets that never hit anything are eventually cleaned up.
-    for (let i = projectiles.length - 1; i >= 0; i--) {
-      const proj = projectiles[i]!;
-      proj.frames++;
-      if (proj.frames > PROJ_MAX_FRAMES) {
-        engine.destroy_entity(proj.eid);
-        removeObjectByEid(proj.eid);
-        projectiles.splice(i, 1);
-      }
-    }
 
     // --- Tell the engine where monsters should be heading ---
     applyToObjectByEid(playerEid, (obj) => {

@@ -5,6 +5,56 @@ const NET_LOCAL: u8 = 0x01;
 const NET_BULLET: u8 = 0x02;
 const NET_MONSTER: u8 = 0x04;
 
+// Bullet maximum lifetime before automatic despawn (~10 s at 60 fps).
+const PROJ_MAX_FRAMES: u32 = 600;
+// Sentinel stored in bullet_ages after a HitPatch has been emitted. Prevents
+// re-emitting the event on subsequent ticks while TS processes the HitPatch and
+// calls destroy_entity. The entity is NOT destroyed here — TS owns that step.
+const BULLET_DEAD: u32 = u32::MAX;
+
+// --- Static map terrain (x, y, z, hw, hh, hd, kind: 0=platform 1=floor 2=wall) ---
+static TERRAIN: &[(f32, f32, f32, f32, f32, f32, u8)] = &[
+    // MAIN FLOOR
+    (0.0, -1.0, -5.0, 60.0, 1.0, 75.0, 1),
+    // EAST WING — ramp steps
+    (11.5, 0.5,  12.0, 1.5, 0.5,  5.0, 0),
+    (14.5, 1.0,  12.0, 1.5, 1.0,  5.0, 0),
+    (17.5, 1.5,  12.0, 1.5, 1.5,  5.0, 0),
+    (20.5, 2.0,  12.0, 1.5, 2.0,  5.0, 0),
+    (31.0, 3.7,  -6.0, 9.0, 0.3, 22.0, 0),
+    (42.0, 3.7,   0.0, 2.0, 0.3,  3.0, 0),
+    (47.0, 3.7,   0.0, 3.0, 0.3,  4.0, 0),
+    // WEST WING — staircase
+    (-12.0, 0.5,  5.0, 1.5, 0.5, 2.5, 0),
+    (-15.0, 1.0,  5.0, 1.5, 1.0, 2.5, 0),
+    (-18.0, 1.5,  5.0, 1.5, 1.5, 2.5, 0),
+    (-21.0, 2.0,  5.0, 1.5, 2.0, 2.5, 0),
+    (-31.0, 3.7, -6.0, 9.0, 0.3, 22.0, 0),
+    // NORTH BRIDGE
+    (0.0, 3.7, -26.0, 22.0, 0.3,  5.0, 0),
+    // NORTH KEEP
+    (0.0, 3.7, -37.0,  8.0, 0.3,  6.0, 0),
+    (0.0, 4.5, -44.0,  4.0, 0.5,  1.5, 0),
+    (0.0, 5.5, -47.0,  4.0, 0.5,  1.5, 0),
+    (0.0, 6.5, -50.0,  4.0, 0.5,  1.5, 0),
+    (0.0, 7.5, -53.0,  4.0, 0.5,  1.5, 0),
+    // UPPER KEEP
+    (0.0, 7.7, -58.0,  5.0, 0.3,  4.0, 0),
+    (0.0, 9.5, -62.0,  5.0, 1.5,  0.4, 2),
+    // SOUTH TERRACE
+    (0.0, 0.5,  28.5,  8.0, 0.5,  1.5, 0),
+    (0.0, 1.0,  25.5,  8.0, 1.0,  1.5, 0),
+    (0.0, 1.5,  22.5,  8.0, 1.5,  1.5, 0),
+    (0.0, 2.7,  17.0, 12.0, 0.3,  5.0, 0),
+    // WALLS & PARAPETS
+    (-5.0, 1.5,  -7.0,  0.5, 1.5,  3.0, 2),
+    ( 5.0, 1.5,  -7.0,  0.5, 1.5,  3.0, 2),
+    ( 40.0, 4.8, -6.0,  0.3, 0.8, 22.0, 2),
+    (-40.0, 4.8, -6.0,  0.3, 0.8, 22.0, 2),
+    (-11.0, 4.8, -31.0, 11.0, 0.8,  0.4, 2),
+    ( 11.0, 4.8, -31.0, 11.0, 0.8,  0.4, 2),
+];
+
 use netcode::{DeltaTracker, NetPatch, PeerSession, encode_patches};
 use patch::{HitPatch, MetricsPatch, PatchBundle, PatchGenerator};
 use pathfinding::{NavMesh, NavMeshConfig, PathRequest, Waypoint};
@@ -99,10 +149,19 @@ pub struct Engine {
     local_entities: Vec<u32>,
     // Per-monster AI state — populated when a NET_MONSTER entity is spawned.
     monster_states: HashMap<u32, MonsterState>,
+    // Age counter (in ticks) for each NET_BULLET entity — used for TTL enforcement.
+    bullet_ages: HashMap<u32, u32>,
     // Player position used as the monster pathfinding goal; updated each tick via
     // update_monster_goal(). Stored so the engine owns the loop, not the caller.
     goal_x: f32,
     goal_z: f32,
+    // Reusable scratch buffers for the per-tick hot loop. Cleared and refilled each tick
+    // so the monster/bullet iteration lists don't heap-allocate every frame (~250 Hz).
+    // Taken out via std::mem::take during use to satisfy the borrow checker, then returned
+    // so the allocation capacity persists across ticks.
+    scratch_ids: Vec<u32>,
+    scratch_positions: Vec<[f32; 3]>,
+    scratch_snapshots: Vec<(u32, [f32; 3])>,
 }
 
 #[wasm_bindgen]
@@ -127,8 +186,12 @@ impl Engine {
             local_peer_id: "local".to_string(),
             local_entities: Vec::new(),
             monster_states: HashMap::new(),
+            bullet_ages: HashMap::new(),
             goal_x: 0.0,
             goal_z: 0.0,
+            scratch_ids: Vec::new(),
+            scratch_positions: Vec::new(),
+            scratch_snapshots: Vec::new(),
         }
     }
 
@@ -185,7 +248,8 @@ impl Engine {
         let ecs_ms = ecs_timer.elapsed_ms();
 
         // 5. Flush outbound deltas to all peers.
-        let outbound = self.delta_tracker.flush(&self.world, &self.local_peer_id.clone());
+        // No clone needed: delta_tracker, world, and local_peer_id are disjoint fields.
+        let outbound = self.delta_tracker.flush(&self.world, &self.local_peer_id);
         if !outbound.is_empty() {
             self.peer_session.broadcast(&encode_patches(&outbound));
         }
@@ -424,6 +488,24 @@ impl Engine {
         self.physics.remove_entity(id);
         self.local_entities.retain(|&e| e != id);
         self.monster_states.remove(&id);
+        self.bullet_ages.remove(&id);
+    }
+
+    /// Load the static map: spawns all terrain entities, builds the navmesh, and returns
+    /// a JS array of `{ eid, x, y, z, hw, hh, hd, kind }` for mesh creation on the TS side.
+    pub fn load_map(&mut self) -> JsValue {
+        let mut blocks: Vec<JsTerrainBlock> = Vec::with_capacity(TERRAIN.len());
+        for &(x, y, z, hw, hh, hd, kind) in TERRAIN {
+            let eid = self.spawn_floor_entity(x, y, z, hw, hh, hd);
+            let kind_str = match kind {
+                1 => "floor",
+                2 => "wall",
+                _ => "platform",
+            };
+            blocks.push(JsTerrainBlock { eid, x, y, z, hw, hh, hd, kind: kind_str.to_string() });
+        }
+        self.build_navmesh();
+        serde_wasm_bindgen::to_value(&blocks).unwrap_or(JsValue::NULL)
     }
 
     /// Spawn a static floor entity. Returns the entity ID.
@@ -494,6 +576,17 @@ impl Engine {
 // --- Private engine methods (not exposed to JS) ---
 
 impl Engine {
+    /// Fill `buf` (cleared first) with the IDs of all live entities whose net_flags
+    /// include `flag`. Associated fn so the caller can pass a scratch buffer taken out
+    /// of `self` without a borrow conflict on `self.world`.
+    fn collect_by_flag(world: &World, flag: u8, buf: &mut Vec<u32>) {
+        buf.clear();
+        buf.extend(
+            world.entities()
+                .filter(|&id| world.net_flags(id).map_or(false, |f| f & flag != 0)),
+        );
+    }
+
     /// Run monster AI for one tick: stuck detection, path replanning, waypoint following.
     /// Sets ECS velocity and rotation for each NET_MONSTER entity; physics picks them up
     /// in the following sync_from_world call.
@@ -501,16 +594,15 @@ impl Engine {
         let goal_x = self.goal_x;
         let goal_z = self.goal_z;
 
-        let monster_ids: Vec<u32> = self.world.entities()
-            .filter(|&id| self.world.net_flags(id).map_or(false, |f| f & NET_MONSTER != 0))
-            .collect();
+        let mut monster_ids = std::mem::take(&mut self.scratch_ids);
+        Self::collect_by_flag(&self.world, NET_MONSTER, &mut monster_ids);
 
         // At most one A* search per engine tick to bound the per-tick CPU spike.
         // The per-monster cooldown (3 s) provides the primary throttle; this flag
         // prevents two monsters with simultaneous cooldown expiry from stacking.
         let mut path_requested_this_tick = false;
 
-        for mid in monster_ids {
+        for &mid in &monster_ids {
             let [mx, my, mz] = match self.world.position(mid) {
                 Some(p) => p,
                 None => continue,
@@ -650,23 +742,28 @@ impl Engine {
                 self.world.set_velocity(mid, [desired_x * MONSTER_WALK_SPEED, 0.0, desired_z * MONSTER_WALK_SPEED]);
             }
         }
+
+        // Return the buffer so its capacity is reused next tick.
+        self.scratch_ids = monster_ids;
     }
 
     /// Add soft repulsion forces so monsters don't cluster. Reads current XZ velocities
     /// (which encode desired walk direction × speed), blends in separation, and writes
     /// back. Must run after tick_monster_ai and before physics sync_from_world.
     fn apply_monster_separation(&mut self) {
-        let monster_ids: Vec<u32> = self.world.entities()
-            .filter(|&id| self.world.net_flags(id).map_or(false, |f| f & NET_MONSTER != 0))
-            .collect();
+        let mut monster_ids = std::mem::take(&mut self.scratch_ids);
+        Self::collect_by_flag(&self.world, NET_MONSTER, &mut monster_ids);
 
-        if monster_ids.len() < 2 { return; }
+        if monster_ids.len() < 2 {
+            self.scratch_ids = monster_ids;
+            return;
+        }
 
         // Snapshot positions so the per-entity loop can read all neighbours without
         // re-borrowing self.world through the inner loop.
-        let positions: Vec<[f32; 3]> = monster_ids.iter()
-            .map(|&id| self.world.position(id).unwrap_or([0.0; 3]))
-            .collect();
+        let mut positions = std::mem::take(&mut self.scratch_positions);
+        positions.clear();
+        positions.extend(monster_ids.iter().map(|&id| self.world.position(id).unwrap_or([0.0; 3])));
 
         let r_sq = MONSTER_SEPARATION_RADIUS * MONSTER_SEPARATION_RADIUS;
 
@@ -711,32 +808,64 @@ impl Engine {
                 (dir_z + sz) * MONSTER_WALK_SPEED,
             ]);
         }
+
+        // Return buffers so their capacity is reused next tick.
+        self.scratch_positions = positions;
+        self.scratch_ids = monster_ids;
     }
 
     /// Integrate NET_BULLET positions (ballistic arc + wall bounce) and detect hits
     /// against NET_MONSTER entities. Returns one HitPatch per collision and one per
     /// bullet that leaves the play area (target_eid = None).
     fn tick_bullets(&mut self, dt_secs: f32) -> Vec<HitPatch> {
-        let bullet_ids: Vec<u32> = self.world.entities()
-            .filter(|&id| self.world.net_flags(id).map_or(false, |f| f & NET_BULLET != 0))
-            .collect();
+        let mut bullet_ids = std::mem::take(&mut self.scratch_ids);
+        Self::collect_by_flag(&self.world, NET_BULLET, &mut bullet_ids);
+
+        // No bullets in flight: skip the monster snapshot scan+alloc entirely. Bullets are
+        // transient, so the common case is zero bullets — most ticks return here.
+        if bullet_ids.is_empty() {
+            self.scratch_ids = bullet_ids;
+            return Vec::new();
+        }
 
         // Snapshot monster positions before the bullet loop so we can check hits without
         // a conflicting borrow on self.world inside the integration logic.
-        let monster_snapshots: Vec<(u32, [f32; 3])> = self.world.entities()
-            .filter(|&id| self.world.net_flags(id).map_or(false, |f| f & NET_MONSTER != 0))
-            .filter_map(|id| Some((id, self.world.position(id)?)))
-            .collect();
+        let mut monster_snapshots = std::mem::take(&mut self.scratch_snapshots);
+        monster_snapshots.clear();
+        monster_snapshots.extend(
+            self.world.entities()
+                .filter(|&id| self.world.net_flags(id).map_or(false, |f| f & NET_MONSTER != 0))
+                .filter_map(|id| Some((id, self.world.position(id)?))),
+        );
 
         let mut hits: Vec<HitPatch> = Vec::new();
 
-        for id in bullet_ids {
+        for &id in &bullet_ids {
+            // TTL and dead-bullet gate.
+            // Use a block so the mutable borrow on bullet_ages is dropped before the
+            // rest of the loop body (which also needs &mut self).
+            {
+                let age = self.bullet_ages.entry(id).or_insert(0);
+                if *age == BULLET_DEAD {
+                    // HitPatch already emitted; waiting for TS to call destroy_entity.
+                    continue;
+                }
+                *age += 1;
+                if *age > PROJ_MAX_FRAMES {
+                    hits.push(HitPatch { bullet_eid: id, target_eid: None });
+                    *age = BULLET_DEAD;
+                    continue;
+                }
+            }
+
             let Some(pos) = self.world.position(id) else { continue };
             let Some(vel) = self.world.velocity(id) else { continue };
 
-            // Bullet fell out of the play area.
+            // Bullet left the play area. Mark dead so we don't re-emit every tick
+            // while TS processes the HitPatch. TS owns the destroy_entity call.
             if pos[1] < -20.0 {
                 hits.push(HitPatch { bullet_eid: id, target_eid: None });
+                self.bullet_ages.insert(id, BULLET_DEAD);
                 continue;
             }
 
@@ -788,10 +917,18 @@ impl Engine {
                 let dz = bpos[2] - mpos[2];
                 if dx * dx + dy * dy + dz * dz < PROJ_HIT_RADIUS_SQ {
                     hits.push(HitPatch { bullet_eid: id, target_eid: Some(mid) });
-                    break; // one hit per bullet per tick
+                    // Mark dead so subsequent ticks don't re-emit. TS calls destroy_entity
+                    // when it processes the HitPatch — Rust must not destroy the entity here
+                    // because the freed ID could be recycled before TS's destroy arrives.
+                    self.bullet_ages.insert(id, BULLET_DEAD);
+                    break;
                 }
             }
         }
+
+        // Return buffers so their capacity is reused next tick.
+        self.scratch_snapshots = monster_snapshots;
+        self.scratch_ids = bullet_ids;
 
         hits
     }
@@ -817,6 +954,14 @@ struct ColliderBp {
 }
 
 // --- JS-serializable mirror types for serde_wasm_bindgen ---
+
+#[derive(Serialize)]
+struct JsTerrainBlock {
+    eid: u32,
+    x: f32, y: f32, z: f32,
+    hw: f32, hh: f32, hd: f32,
+    kind: String,
+}
 
 #[derive(Serialize)]
 struct JsWaypoint {

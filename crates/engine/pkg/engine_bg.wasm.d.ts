@@ -9,6 +9,7 @@ export const engine_destroy_entity: (a: number, b: number) => void;
 export const engine_find_path: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
 export const engine_get_metrics: (a: number) => any;
 export const engine_init_networking: (a: number, b: number, c: number, d: number, e: number) => void;
+export const engine_load_map: (a: number) => any;
 export const engine_new: () => number;
 export const engine_set_entity_velocity: (a: number, b: number, c: number, d: number, e: number) => void;
 export const engine_set_log_level: (a: number, b: number) => void;

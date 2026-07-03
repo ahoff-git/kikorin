@@ -4,7 +4,7 @@
 // remain synchronous from the caller's perspective.
 // The worker drives its own simulation loop — there is no tick() method here.
 
-import type { JsWaypoint, PatchBundle } from '@kikorin/adapter';
+import type { JsTerrainBlock, JsWaypoint, PatchBundle } from '@kikorin/adapter';
 
 type WorkerOut =
   | { type: 'patches'; bundle: PatchBundle | null }
@@ -68,15 +68,9 @@ export class WorkerEngineProxy {
     return p;
   }
 
-  spawn_floor_entity(x: number, y: number, z: number, hw: number, hh: number, hd: number): Promise<number> {
-    const [id, p] = this.request<number>();
-    this.worker.postMessage({ type: 'spawn_floor', id, x, y, z, hw, hh, hd });
-    return p;
-  }
-
-  build_navmesh(): Promise<void> {
-    const [id, p] = this.request<void>();
-    this.worker.postMessage({ type: 'build_navmesh', id });
+  load_map(): Promise<JsTerrainBlock[]> {
+    const [id, p] = this.request<JsTerrainBlock[]>();
+    this.worker.postMessage({ type: 'load_map', id });
     return p;
   }
 
