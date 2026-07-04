@@ -63,7 +63,9 @@ impl PhysicsWorld {
     /// Sync entity positions/colliders from ECS world into Rapier before stepping.
     pub fn sync_from_world(&mut self, world: &World) {
         for id in world.entities() {
-            let Some(cfg) = world.collider(id) else { continue };
+            let Some(cfg) = world.collider(id) else {
+                continue;
+            };
             if !cfg.active {
                 self.remove_entity(id);
                 continue;
@@ -83,7 +85,11 @@ impl PhysicsWorld {
                 if is_dynamic {
                     if let Some(rb) = self.bodies.get_mut(rb_handle) {
                         if let Some(vel) = world.velocity(id) {
-                            let vy = if vel[1].abs() > 0.01 { vel[1] } else { rb.linvel().y };
+                            let vy = if vel[1].abs() > 0.01 {
+                                vel[1]
+                            } else {
+                                rb.linvel().y
+                            };
                             rb.set_linvel(vector![vel[0], vy, vel[2]], true);
                         }
                     }
@@ -102,11 +108,7 @@ impl PhysicsWorld {
                 };
                 let rb_handle = self.bodies.insert(rb);
 
-                let shape = if cfg.sensor {
-                    SharedShape::cuboid(cfg.half_width, cfg.half_height, cfg.half_depth)
-                } else {
-                    SharedShape::cuboid(cfg.half_width, cfg.half_height, cfg.half_depth)
-                };
+                let shape = SharedShape::cuboid(cfg.half_width, cfg.half_height, cfg.half_depth);
 
                 let col_builder = if cfg.sensor {
                     ColliderBuilder::new(shape).sensor(true)
@@ -127,8 +129,11 @@ impl PhysicsWorld {
                 } else {
                     ColliderBuilder::new(shape)
                 };
-                let col_handle =
-                    self.colliders.insert_with_parent(col_builder.build(), rb_handle, &mut self.bodies);
+                let col_handle = self.colliders.insert_with_parent(
+                    col_builder.build(),
+                    rb_handle,
+                    &mut self.bodies,
+                );
 
                 self.entity_to_rb.insert(id, rb_handle);
                 self.entity_to_col.insert(id, col_handle);
@@ -162,7 +167,9 @@ impl PhysicsWorld {
     /// Write physics results (position, grounded) back into the ECS world.
     pub fn sync_to_world(&mut self, world: &mut World) {
         for (&id, &rb_handle) in &self.entity_to_rb {
-            let Some(rb) = self.bodies.get(rb_handle) else { continue };
+            let Some(rb) = self.bodies.get(rb_handle) else {
+                continue;
+            };
             if rb.is_fixed() {
                 continue;
             }
@@ -178,7 +185,7 @@ impl PhysicsWorld {
             // Ray casts are expensive at 250 Hz with many entities; recast every
             // GROUNDED_STRIDE ticks (~62 Hz) and serve the cached value in between.
             const GROUNDED_STRIDE: u64 = 4;
-            let grounded = if self.tick_count % GROUNDED_STRIDE == 0 {
+            let grounded = if self.tick_count.is_multiple_of(GROUNDED_STRIDE) {
                 let result = if let Some(cfg) = world.collider(id) {
                     const GROUND_TOL: f32 = 0.10;
                     let max_dist = cfg.half_height + GROUND_TOL;
@@ -187,18 +194,20 @@ impl PhysicsWorld {
                     let only_fixed = |_h: ColliderHandle, col: &Collider| -> bool {
                         col.parent()
                             .and_then(|rb_h| self.bodies.get(rb_h))
-                            .map_or(false, |rb| rb.is_fixed())
+                            .is_some_and(|rb| rb.is_fixed())
                     };
                     let filter = match own_col {
-                        Some(col) => QueryFilter::new().exclude_collider(col).predicate(&only_fixed),
+                        Some(col) => QueryFilter::new()
+                            .exclude_collider(col)
+                            .predicate(&only_fixed),
                         None => QueryFilter::new().predicate(&only_fixed),
                     };
                     self.query_pipeline
                         .cast_ray(&self.bodies, &self.colliders, &ray, max_dist, true, filter)
-                        .map_or(false, |(hit_col, _toi)| {
+                        .is_some_and(|(hit_col, _toi)| {
                             self.col_to_entity
                                 .get(&hit_col)
-                                .map_or(false, |&other| world.is_floor(other))
+                                .is_some_and(|&other| world.is_floor(other))
                         })
                 } else {
                     false
@@ -226,7 +235,7 @@ impl PhysicsWorld {
         let is_fixed = |_handle: ColliderHandle, col: &Collider| -> bool {
             col.parent()
                 .and_then(|rb| self.bodies.get(rb))
-                .map_or(false, |rb| rb.is_fixed())
+                .is_some_and(|rb| rb.is_fixed())
         };
         let filter = QueryFilter::new().predicate(&is_fixed);
 
@@ -237,10 +246,32 @@ impl PhysicsWorld {
 
     /// Returns the list of entity IDs currently in contact with `entity`.
     pub fn touching(&self, entity: EntityId) -> &[EntityId] {
-        self.touching.get(&entity).map(|v| v.as_slice()).unwrap_or(&[])
+        self.touching
+            .get(&entity)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
-    /// Swept collider cast — used for wall detection.
+    /// Move a dynamic body directly in Rapier.
+    ///
+    /// ECS position writes do not move existing dynamic bodies: sync_from_world treats
+    /// Rapier as the source of truth for them. Use this for explicit teleports.
+    pub fn teleport_entity(&mut self, id: EntityId, position: [f32; 3]) {
+        let Some(&rb_handle) = self.entity_to_rb.get(&id) else {
+            self.grounded_cache.remove(&id);
+            return;
+        };
+        let Some(rb) = self.bodies.get_mut(rb_handle) else {
+            self.grounded_cache.remove(&id);
+            return;
+        };
+
+        rb.set_translation(vector![position[0], position[1], position[2]], true);
+        rb.set_linvel(vector![0.0, 0.0, 0.0], true);
+        self.grounded_cache.remove(&id);
+    }
+
+    /// Swept collider cast used for wall detection.
     /// Returns the normal of the first hit surface, if any.
     pub fn cast_collider(
         &self,
@@ -256,9 +287,7 @@ impl PhysicsWorld {
         let iso = Isometry::translation(pos[0], pos[1], pos[2]);
         let dir = Vector::new(direction[0], direction[1], direction[2]);
 
-        let filter = QueryFilter::new().exclude_collider(
-            *self.entity_to_col.get(&entity)?,
-        );
+        let filter = QueryFilter::new().exclude_collider(*self.entity_to_col.get(&entity)?);
 
         self.query_pipeline
             .cast_shape(
@@ -279,12 +308,20 @@ impl PhysicsWorld {
     /// Ray cast against fixed (terrain) colliders only; returns (surface_normal, toi).
     /// `dir` must be unit-length. Used by bullet bounce: excludes dynamic bodies so
     /// bullets only reflect off walls/floors, not monsters or the player.
-    pub fn cast_ray_with_normal(&self, from: [f32; 3], dir: [f32; 3], max_toi: f32) -> Option<([f32; 3], f32)> {
-        let ray = Ray::new(point![from[0], from[1], from[2]], vector![dir[0], dir[1], dir[2]]);
+    pub fn cast_ray_with_normal(
+        &self,
+        from: [f32; 3],
+        dir: [f32; 3],
+        max_toi: f32,
+    ) -> Option<([f32; 3], f32)> {
+        let ray = Ray::new(
+            point![from[0], from[1], from[2]],
+            vector![dir[0], dir[1], dir[2]],
+        );
         let is_fixed = |_h: ColliderHandle, col: &Collider| -> bool {
             col.parent()
                 .and_then(|rb| self.bodies.get(rb))
-                .map_or(false, |rb| rb.is_fixed())
+                .is_some_and(|rb| rb.is_fixed())
         };
         let filter = QueryFilter::new().predicate(&is_fixed);
         self.query_pipeline
@@ -307,7 +344,14 @@ impl PhysicsWorld {
             vector![dir[0] / len, dir[1] / len, dir[2] / len],
         );
         self.query_pipeline
-            .cast_ray(&self.bodies, &self.colliders, &ray, len, true, QueryFilter::default())
+            .cast_ray(
+                &self.bodies,
+                &self.colliders,
+                &ray,
+                len,
+                true,
+                QueryFilter::default(),
+            )
             .and_then(|(col_handle, toi)| {
                 self.col_to_entity.get(&col_handle).map(|&eid| (eid, toi))
             })
@@ -364,26 +408,32 @@ mod tests {
         let id = world.create_entity();
         world.set_position(id, pos);
         world.set_floor(id, true);
-        world.set_collider(id, ColliderConfig {
-            active: true,
-            sensor: false,
-            half_width: half[0],
-            half_height: half[1],
-            half_depth: half[2],
-        });
+        world.set_collider(
+            id,
+            ColliderConfig {
+                active: true,
+                sensor: false,
+                half_width: half[0],
+                half_height: half[1],
+                half_depth: half[2],
+            },
+        );
         id
     }
 
     fn spawn_dynamic(world: &mut World, pos: [f32; 3], half: f32) -> EntityId {
         let id = world.create_entity();
         world.set_position(id, pos);
-        world.set_collider(id, ColliderConfig {
-            active: true,
-            sensor: false,
-            half_width: half,
-            half_height: half,
-            half_depth: half,
-        });
+        world.set_collider(
+            id,
+            ColliderConfig {
+                active: true,
+                sensor: false,
+                half_width: half,
+                half_height: half,
+                half_depth: half,
+            },
+        );
         id
     }
 
@@ -409,24 +459,30 @@ mod tests {
         let floor = world.create_entity();
         world.set_position(floor, [0.0, 0.0, 0.0]);
         world.set_floor(floor, true);
-        world.set_collider(floor, ColliderConfig {
-            active: true,
-            sensor: false,
-            half_width: 10.0,
-            half_height: 0.1,
-            half_depth: 10.0,
-        });
+        world.set_collider(
+            floor,
+            ColliderConfig {
+                active: true,
+                sensor: false,
+                half_width: 10.0,
+                half_height: 0.1,
+                half_depth: 10.0,
+            },
+        );
 
         // Dynamic entity just above the floor (bottom at y=0.05, top at y=0.55)
         let ball = world.create_entity();
         world.set_position(ball, [0.0, 0.3, 0.0]);
-        world.set_collider(ball, ColliderConfig {
-            active: true,
-            sensor: false,
-            half_width: 0.25,
-            half_height: 0.25,
-            half_depth: 0.25,
-        });
+        world.set_collider(
+            ball,
+            ColliderConfig {
+                active: true,
+                sensor: false,
+                half_width: 0.25,
+                half_height: 0.25,
+                half_depth: 0.25,
+            },
+        );
 
         phys.sync_from_world(&world);
 
@@ -441,7 +497,10 @@ mod tests {
             }
         }
 
-        assert!(grounded, "expected grounded=true within the grounded cache stride");
+        assert!(
+            grounded,
+            "expected grounded=true within the grounded cache stride"
+        );
     }
 
     #[test]
@@ -462,12 +521,19 @@ mod tests {
             // monotonic-descent check on contact, not on observed grounded.
             contacted = contacted || !phys.touching(ball).is_empty();
             if !contacted {
-                assert!(y <= prev_y + 1e-4, "airborne y must not increase: {prev_y} -> {y} at tick {i}");
+                assert!(
+                    y <= prev_y + 1e-4,
+                    "airborne y must not increase: {prev_y} -> {y} at tick {i}"
+                );
             }
             // First grounded recast tick: still far above the floor, must be mid-air.
             if i == 4 {
                 assert!(y > 1.0, "body should still be high at tick 4, y={y}");
-                assert_eq!(world.is_grounded(ball), Some(false), "mid-air body must not be grounded");
+                assert_eq!(
+                    world.is_grounded(ball),
+                    Some(false),
+                    "mid-air body must not be grounded"
+                );
             }
             if world.is_grounded(ball) == Some(true) {
                 landed = true;
@@ -476,7 +542,10 @@ mod tests {
         }
         assert!(landed, "expected grounded=true within 240 ticks");
         let y = world.position(ball).unwrap()[1];
-        assert!((y - 0.35).abs() < 0.05, "resting y should be floor top + half_height, got {y}");
+        assert!(
+            (y - 0.35).abs() < 0.05,
+            "resting y should be floor top + half_height, got {y}"
+        );
     }
 
     #[test]
@@ -499,9 +568,19 @@ mod tests {
         }
 
         let pos = world.position(ball).unwrap();
-        assert!(pos[0] < 0.3, "wall should block horizontal motion, x={}", pos[0]);
-        assert!(pos[1] < 8.0, "zero friction: body slides down while pressed against the wall");
-        assert!(phys.touching(ball).contains(&wall), "expected an active side contact with the wall");
+        assert!(
+            pos[0] < 0.3,
+            "wall should block horizontal motion, x={}",
+            pos[0]
+        );
+        assert!(
+            pos[1] < 8.0,
+            "zero friction: body slides down while pressed against the wall"
+        );
+        assert!(
+            phys.touching(ball).contains(&wall),
+            "expected an active side contact with the wall"
+        );
     }
 
     #[test]
@@ -528,9 +607,20 @@ mod tests {
             tick(&mut phys, &mut world);
         }
         let pos = world.position(ball).unwrap();
-        assert!((pos[0] - 1.65).abs() < 0.05, "ball must be pinned at the wall face, x={}", pos[0]);
-        assert!((pos[2] - 1.0).abs() < 0.05, "z is unobstructed and must track ECS velocity, z={}", pos[2]);
-        assert!(phys.touching(ball).contains(&wall), "reapplied vx must keep the wall contact alive");
+        assert!(
+            (pos[0] - 1.65).abs() < 0.05,
+            "ball must be pinned at the wall face, x={}",
+            pos[0]
+        );
+        assert!(
+            (pos[2] - 1.0).abs() < 0.05,
+            "z is unobstructed and must track ECS velocity, z={}",
+            pos[2]
+        );
+        assert!(
+            phys.touching(ball).contains(&wall),
+            "reapplied vx must keep the wall contact alive"
+        );
 
         deactivate(&mut world, wall);
         for _ in 0..30 {
@@ -542,7 +632,11 @@ mod tests {
             "x motion must resume after wall removal (velocity reapplied, not one-shot), x={}",
             pos[0]
         );
-        assert!((pos[2] - 1.5).abs() < 0.05, "z should track ECS velocity, got {}", pos[2]);
+        assert!(
+            (pos[2] - 1.5).abs() < 0.05,
+            "z should track ECS velocity, got {}",
+            pos[2]
+        );
     }
 
     #[test]
@@ -582,13 +676,19 @@ mod tests {
         world.set_velocity(ball, [0.0, 5.0, 0.0]);
         tick(&mut phys, &mut world);
         let y_after_impulse = world.position(ball).unwrap()[1];
-        assert!(y_after_impulse > rest_y + 0.05, "jump impulse should move the body up");
+        assert!(
+            y_after_impulse > rest_y + 0.05,
+            "jump impulse should move the body up"
+        );
 
         // Clear the command; Rapier's accumulated upward velocity must persist.
         world.set_velocity(ball, [0.0, 0.0, 0.0]);
         tick(&mut phys, &mut world);
         let y_next = world.position(ball).unwrap()[1];
-        assert!(y_next > y_after_impulse, "upward velocity must persist after the one-frame impulse");
+        assert!(
+            y_next > y_after_impulse,
+            "upward velocity must persist after the one-frame impulse"
+        );
     }
 
     #[test]
@@ -601,9 +701,18 @@ mod tests {
         // Queries before the first step need the query pipeline built explicitly.
         phys.prepare_queries();
 
-        let h = phys.floor_height_at(0.0, 0.0).expect("expected a floor hit on the map");
-        assert!((h - 0.1).abs() < 1e-3, "top surface should be at y=0.1, got {h}");
-        assert_eq!(phys.floor_height_at(100.0, 100.0), None, "off-map query must miss");
+        let h = phys
+            .floor_height_at(0.0, 0.0)
+            .expect("expected a floor hit on the map");
+        assert!(
+            (h - 0.1).abs() < 1e-3,
+            "top surface should be at y=0.1, got {h}"
+        );
+        assert_eq!(
+            phys.floor_height_at(100.0, 100.0),
+            None,
+            "off-map query must miss"
+        );
     }
 
     #[test]
@@ -615,10 +724,17 @@ mod tests {
         phys.sync_from_world(&world);
         phys.prepare_queries();
 
-        let (hit, toi) = phys.cast_ray([0.0, 5.0, 0.0], [0.0, -1.0, 0.0]).expect("expected a hit");
+        let (hit, toi) = phys
+            .cast_ray([0.0, 5.0, 0.0], [0.0, -1.0, 0.0])
+            .expect("expected a hit");
         assert_eq!(hit, floor);
-        assert!((toi - 4.9).abs() < 1e-3, "hit distance to floor top, got {toi}");
-        assert!(phys.cast_ray([50.0, 5.0, 50.0], [50.0, -1.0, 50.0]).is_none());
+        assert!(
+            (toi - 4.9).abs() < 1e-3,
+            "hit distance to floor top, got {toi}"
+        );
+        assert!(phys
+            .cast_ray([50.0, 5.0, 50.0], [50.0, -1.0, 50.0])
+            .is_none());
     }
 
     #[test]
@@ -633,10 +749,15 @@ mod tests {
         let (normal, toi) = phys
             .cast_ray_with_normal([0.0, 5.0, 0.0], [0.0, -1.0, 0.0], 10.0)
             .expect("expected a hit");
-        assert!(normal[1] > 0.99, "floor top normal must point up, got {normal:?}");
+        assert!(
+            normal[1] > 0.99,
+            "floor top normal must point up, got {normal:?}"
+        );
         assert!(normal[0].abs() < 1e-3 && normal[2].abs() < 1e-3);
         assert!((toi - 4.9).abs() < 1e-3, "toi to floor top, got {toi}");
-        assert!(phys.cast_ray_with_normal([0.0, 5.0, 0.0], [0.0, 1.0, 0.0], 10.0).is_none());
+        assert!(phys
+            .cast_ray_with_normal([0.0, 5.0, 0.0], [0.0, 1.0, 0.0], 10.0)
+            .is_none());
     }
 
     #[test]
@@ -652,7 +773,11 @@ mod tests {
         deactivate(&mut world, floor);
         phys.sync_from_world(&world);
         phys.prepare_queries();
-        assert_eq!(phys.floor_height_at(0.0, 0.0), None, "removed floor must no longer be hit");
+        assert_eq!(
+            phys.floor_height_at(0.0, 0.0),
+            None,
+            "removed floor must no longer be hit"
+        );
     }
 
     #[test]
@@ -666,7 +791,10 @@ mod tests {
         for _ in 0..60 {
             tick(&mut phys, &mut world);
         }
-        assert!(phys.touching(ball).contains(&floor), "settled ball must be touching the floor");
+        assert!(
+            phys.touching(ball).contains(&floor),
+            "settled ball must be touching the floor"
+        );
         let pos_at_removal = world.position(ball).unwrap();
 
         deactivate(&mut world, ball);
@@ -679,7 +807,10 @@ mod tests {
         );
         phys.step(DT);
         phys.sync_to_world(&mut world);
-        assert!(phys.touching(ball).is_empty(), "next step must clear the removed body's contacts");
+        assert!(
+            phys.touching(ball).is_empty(),
+            "next step must clear the removed body's contacts"
+        );
 
         for _ in 0..10 {
             tick(&mut phys, &mut world);
@@ -707,7 +838,10 @@ mod tests {
             world.dirty_flags(ball).contains(DirtyFlags::TRANSFORM),
             "falling body must be marked TRANSFORM-dirty"
         );
-        assert!(world.dirty_flags(floor).is_empty(), "unmoved static floor must stay clean");
+        assert!(
+            world.dirty_flags(floor).is_empty(),
+            "unmoved static floor must stay clean"
+        );
 
         // Resting dynamics are dirtied too: sync_to_world marks every non-fixed
         // body TRANSFORM unconditionally, each tick, position change or not (see
@@ -724,7 +858,10 @@ mod tests {
             world.dirty_flags(ball).contains(DirtyFlags::TRANSFORM),
             "resting dynamic is still dirtied every tick (current contract)"
         );
-        assert!(world.dirty_flags(floor).is_empty(), "static floor must never be dirtied");
+        assert!(
+            world.dirty_flags(floor).is_empty(),
+            "static floor must never be dirtied"
+        );
     }
 
     #[test]
@@ -742,11 +879,18 @@ mod tests {
             .cast_collider(ball, &world, [1.0, 0.0, 0.0], 5.0)
             .expect("sweep toward the wall must hit");
         // normal1 is the hit surface's outward normal: opposes the sweep direction.
-        assert!(n[0] < -0.99, "wall face normal must point back at the caster, got {n:?}");
-        assert!(n[1].abs() < 1e-3 && n[2].abs() < 1e-3, "axis-aligned face, got {n:?}");
+        assert!(
+            n[0] < -0.99,
+            "wall face normal must point back at the caster, got {n:?}"
+        );
+        assert!(
+            n[1].abs() < 1e-3 && n[2].abs() < 1e-3,
+            "axis-aligned face, got {n:?}"
+        );
 
         assert!(
-            phys.cast_collider(ball, &world, [-1.0, 0.0, 0.0], 5.0).is_none(),
+            phys.cast_collider(ball, &world, [-1.0, 0.0, 0.0], 5.0)
+                .is_none(),
             "sweep away from the wall must miss"
         );
     }
@@ -759,13 +903,16 @@ mod tests {
         // Sensor volume spanning y in [0.5, 1.5], directly in the fall path.
         let zone = world.create_entity();
         world.set_position(zone, [0.0, 1.0, 0.0]);
-        world.set_collider(zone, ColliderConfig {
-            active: true,
-            sensor: true,
-            half_width: 0.5,
-            half_height: 0.5,
-            half_depth: 0.5,
-        });
+        world.set_collider(
+            zone,
+            ColliderConfig {
+                active: true,
+                sensor: true,
+                half_width: 0.5,
+                half_height: 0.5,
+                half_depth: 0.5,
+            },
+        );
         let ball = spawn_dynamic(&mut world, [0.0, 3.0, 0.0], 0.25);
 
         for _ in 0..120 {
@@ -777,14 +924,20 @@ mod tests {
         }
 
         let y = world.position(ball).unwrap()[1];
-        assert!((y - 0.35).abs() < 0.05, "ball must fall through the sensor to the floor, got y={y}");
+        assert!(
+            (y - 0.35).abs() < 0.05,
+            "ball must fall through the sensor to the floor, got y={y}"
+        );
         assert!(phys.touching(ball).contains(&floor));
 
         // Sensor bodies are fixed: sync_to_world neither moves nor dirties them.
         assert_eq!(world.position(zone), Some([0.0, 1.0, 0.0]));
         world.clear_dirty();
         tick(&mut phys, &mut world);
-        assert!(world.dirty_flags(zone).is_empty(), "fixed sensor body must stay clean");
+        assert!(
+            world.dirty_flags(zone).is_empty(),
+            "fixed sensor body must stay clean"
+        );
     }
 
     #[test]
@@ -799,13 +952,25 @@ mod tests {
 
         for _ in 0..20 {
             tick(&mut phys, &mut world);
-            assert!(phys.touching(a).is_empty(), "dynamic-dynamic pairs must never contact");
-            assert!(phys.touching(b).is_empty(), "dynamic-dynamic pairs must never contact");
+            assert!(
+                phys.touching(a).is_empty(),
+                "dynamic-dynamic pairs must never contact"
+            );
+            assert!(
+                phys.touching(b).is_empty(),
+                "dynamic-dynamic pairs must never contact"
+            );
         }
         let pa = world.position(a).unwrap();
         let pb = world.position(b).unwrap();
-        assert!(pa[0].abs() < 1e-4 && (pb[0] - 0.2).abs() < 1e-4, "no depenetration push in x");
-        assert!((pa[1] - pb[1]).abs() < 1e-4, "both fall identically, undisturbed");
+        assert!(
+            pa[0].abs() < 1e-4 && (pb[0] - 0.2).abs() < 1e-4,
+            "no depenetration push in x"
+        );
+        assert!(
+            (pa[1] - pb[1]).abs() < 1e-4,
+            "both fall identically, undisturbed"
+        );
     }
 
     #[test]
@@ -879,7 +1044,11 @@ mod tests {
         for _ in 1..=12 {
             tick(&mut phys, &mut world);
         }
-        assert_eq!(world.is_grounded(ball), Some(true), "ball must be settled and grounded");
+        assert_eq!(
+            world.is_grounded(ball),
+            Some(true),
+            "ball must be settled and grounded"
+        );
 
         // Remove the floor: ticks 13-15 serve the stale cached value; the tick-16
         // recast finally observes the missing floor. This staleness (up to
@@ -894,6 +1063,10 @@ mod tests {
             );
         }
         tick(&mut phys, &mut world);
-        assert_eq!(world.is_grounded(ball), Some(false), "recast tick must see the missing floor");
+        assert_eq!(
+            world.is_grounded(ball),
+            Some(false),
+            "recast tick must see the missing floor"
+        );
     }
 }

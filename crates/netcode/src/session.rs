@@ -129,16 +129,26 @@ pub struct PeerSession;
 
 #[cfg(not(target_arch = "wasm32"))]
 impl PeerSession {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self {
+        Self
+    }
     pub fn connect(&mut self, _session_id: &str, _signaling_url: &str) {}
-    pub fn drain_inbound(&self) -> Vec<(String, Vec<u8>)> { vec![] }
+    pub fn drain_inbound(&self) -> Vec<(String, Vec<u8>)> {
+        vec![]
+    }
     pub fn broadcast(&self, _payload: &[u8]) {}
     pub fn send_to(&self, _peer_id: &str, _payload: &[u8]) {}
-    pub fn peers(&self) -> Vec<String> { vec![] }
-    pub fn is_connected(&self) -> bool { false }
+    pub fn peers(&self) -> Vec<String> {
+        vec![]
+    }
+    pub fn is_connected(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Default for PeerSession {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

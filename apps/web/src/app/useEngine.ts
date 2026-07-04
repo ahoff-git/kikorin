@@ -17,6 +17,7 @@ import {
 import type { PatchBundle } from "@kikorin/adapter";
 import { WorkerEngineProxy } from "../workers/WorkerEngineProxy";
 import { eventBus } from "@kikorin/events";
+import { recordE2EFrame, recordE2EPatch } from "./e2eMetrics";
 
 export type SendInput = (payload: Uint8Array) => void;
 
@@ -75,6 +76,7 @@ export function useEngine(
         if (bundle.net.length > 0) netChannel.emit(bundle.net);
         if (bundle.hits.length > 0) hitsChannel.emit(bundle.hits);
         metricsChannel.emit(bundle.metrics);
+        recordE2EPatch(bundle);
         emaTickMs = emaTickMs * 0.9 + bundle.metrics.tick_ms * 0.1;
         eventBus.emit('ui:timeMetricsUpdate', {
           timeMetrics: { avgDelta: Math.round(emaTickMs * 10) / 10, ticksPerSecond: Math.round(1000 / emaTickMs) },
@@ -95,6 +97,7 @@ export function useEngine(
         // Per-frame game logic (controls, camera follow) injected by scene setup.
         onFrameRef.current?.();
         renderFrame();
+        recordE2EFrame();
         rafId = requestAnimationFrame(frame);
       }
 

@@ -20,6 +20,12 @@ import { useNetworking, type ChatMessage } from "./useNetworking";
 import { useEngine } from "./useEngine";
 import { Box } from "@mui/material";
 import { PageLayout } from "./kikorinLayout";
+import {
+  installE2EControls,
+  markE2EGameReady,
+  markE2EGameStopped,
+  uninstallE2EControls,
+} from "./e2eMetrics";
 
 const MIDDLE_POINTER_BUTTON_MASK = 4;
 const CLICK_MAX_MOVEMENT_PX = 4;
@@ -182,6 +188,8 @@ export default function Home() {
         setHitHandler(onRemoteEntityHit);
         setPlayerEid(eid);
         setOwnedEids(owned);
+        markE2EGameReady(eid, owned);
+        installE2EControls(engine, eid);
 
         if (canvas) canvas.style.cursor = "default";
 
@@ -199,6 +207,8 @@ export default function Home() {
       cameraDragController?.disconnect();
       if (canvas) canvas.style.cursor = "default";
       gameCleanup?.();
+      markE2EGameStopped();
+      uninstallE2EControls();
       setPlayerEid(null);
       setOwnedEids([]);
     };

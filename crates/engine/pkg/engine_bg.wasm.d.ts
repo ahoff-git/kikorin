@@ -19,6 +19,7 @@ export const engine_spawn_box_entity: (a: number, b: number, c: number, d: numbe
 export const engine_spawn_bullet: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
 export const engine_spawn_entity: (a: number, b: number, c: number) => number;
 export const engine_spawn_floor_entity: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => number;
+export const engine_teleport_entity: (a: number, b: number, c: number, d: number, e: number) => void;
 export const engine_tick: (a: number, b: number) => any;
 export const engine_update_monster_goal: (a: number, b: number, c: number) => void;
 export const wasm_bindgen__convert__closures_____invoke__he97b17567bb63af5: (a: number, b: number, c: any) => [number, number];

@@ -147,6 +147,8 @@ export interface EngineHandle {
   spawn_bullet(x: number, y: number, z: number, vx: number, vy: number, vz: number): number;
   /** Set XZ velocity (movement) and optionally Y (one-frame jump impulse when non-zero). */
   set_entity_velocity(id: number, vx: number, vy: number, vz: number): void;
+  /** Move an entity immediately and clear dynamic velocity. */
+  teleport_entity(id: number, x: number, y: number, z: number): void;
   /** Update the position monsters path toward. Call once per frame before tick(). */
   update_monster_goal(gx: number, gz: number): void;
   /**

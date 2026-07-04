@@ -190,6 +190,16 @@ export class Engine {
         return ret >>> 0;
     }
     /**
+     * Move an entity immediately, clearing velocity for dynamic bodies.
+     * @param {number} id
+     * @param {number} x
+     * @param {number} y
+     * @param {number} z
+     */
+    teleport_entity(id, x, y, z) {
+        wasm.engine_teleport_entity(this.__wbg_ptr, id, x, y, z);
+    }
+    /**
      * Advance simulation by dt_ms milliseconds.
      * Returns a PatchBundle as a JS object directly — no bincode round-trip.
      * @param {number} dt_ms

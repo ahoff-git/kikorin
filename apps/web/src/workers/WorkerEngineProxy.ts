@@ -52,6 +52,10 @@ export class WorkerEngineProxy {
     this.worker.postMessage({ type: 'set_velocity', eid, vx, vy, vz });
   }
 
+  teleport_entity(eid: number, x: number, y: number, z: number): void {
+    this.worker.postMessage({ type: 'teleport', eid, x, y, z });
+  }
+
   destroy_entity(eid: number): void {
     this.worker.postMessage({ type: 'destroy', eid });
   }

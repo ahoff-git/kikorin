@@ -82,6 +82,10 @@ export class Engine {
      */
     spawn_floor_entity(x: number, y: number, z: number, hw: number, hh: number, hd: number): number;
     /**
+     * Move an entity immediately, clearing velocity for dynamic bodies.
+     */
+    teleport_entity(id: number, x: number, y: number, z: number): void;
+    /**
      * Advance simulation by dt_ms milliseconds.
      * Returns a PatchBundle as a JS object directly — no bincode round-trip.
      */

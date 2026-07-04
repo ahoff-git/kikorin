@@ -49,7 +49,10 @@ describe('createChronoTrigger', () => {
 
     it('throws when callback is not a function', () => {
       const ct = createChronoTrigger()
-      expect(() => ct.runAt({ callback: null as unknown as () => void })).toThrow()
+      expect(() => {
+        // @ts-expect-error exercising the runtime guard for invalid callers
+        ct.runAt({ callback: null })
+      }).toThrow()
     })
 
     it('throws when fpsTarget is zero', () => {

@@ -7,7 +7,10 @@
     "build": "node scripts/copy-wasm.cjs && next build",
     "start": "next start",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "playwright test",
+    "test:e2e:stress": "playwright test monster-tps-stress",
+    "test:e2e:headed": "playwright test --headed"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",
@@ -15,18 +18,19 @@
     "@kikorin/adapter": "workspace:*",
     "@kikorin/engine-source": "workspace:*",
     "@kikorin/engine-wasm": "workspace:*",
-    "@kikorin/react": "workspace:*",
     "@kikorin/events": "workspace:*",
+    "@kikorin/react": "workspace:*",
     "@kikorin/system-rendering": "workspace:*",
     "@kikorin/util": "workspace:*",
     "@mui/material": "^7.3.8",
     "next": "16.1.6",
+    "peerjs": "^1.5.4",
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "peerjs": "^1.5.4",
     "three": "^0.182.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

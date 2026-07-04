@@ -8,12 +8,14 @@
     "wasm:dev": "pnpm --filter @kikorin/engine-source dev",
     "build": "turbo build",
     "test": "turbo test",
+    "test:e2e": "pnpm --filter web test:e2e",
+    "test:e2e:stress": "pnpm --filter web test:e2e:stress",
     "typecheck": "turbo typecheck",
     "lint": "turbo lint",
     "test:all": "turbo run test --parallel",
     "version": "changeset version",
-    "release": "turbo build --filter=@kikorin/netcode --filter=@kikorin/util && changeset publish",
-    "ship": "changeset && changeset version && turbo build --filter=@kikorin/netcode --filter=@kikorin/util && changeset publish"
+    "release": "turbo build --filter=@kikorin/util && changeset publish",
+    "ship": "changeset && changeset version && turbo build --filter=@kikorin/util && changeset publish"
   },
   "devDependencies": {
     "@changesets/cli": "^2",

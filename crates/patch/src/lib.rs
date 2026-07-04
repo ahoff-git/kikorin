@@ -89,7 +89,15 @@ impl PatchGenerator {
             if flags.contains(DirtyFlags::TRANSFORM) {
                 if let Some([x, y, z]) = world.position(id) {
                     let [yaw, pitch, roll] = world.rotation(id).unwrap_or([0.0; 3]);
-                    render.push(RenderPatch { entity: id, x, y, z, yaw, pitch, roll });
+                    render.push(RenderPatch {
+                        entity: id,
+                        x,
+                        y,
+                        z,
+                        yaw,
+                        pitch,
+                        roll,
+                    });
                 }
             }
 
@@ -97,14 +105,29 @@ impl PatchGenerator {
             if has_semantic {
                 semantic.push(SemanticPatch {
                     entity: id,
-                    health: if flags.contains(DirtyFlags::HEALTH) { world.health(id) } else { None },
-                    net_flags: if flags.contains(DirtyFlags::NET) { world.net_flags(id) } else { None },
+                    health: if flags.contains(DirtyFlags::HEALTH) {
+                        world.health(id)
+                    } else {
+                        None
+                    },
+                    net_flags: if flags.contains(DirtyFlags::NET) {
+                        world.net_flags(id)
+                    } else {
+                        None
+                    },
                     grounded: world.is_grounded(id),
                 });
             }
         }
 
-        PatchBundle { tick: world.tick_count(), render, semantic, net, hits, metrics }
+        PatchBundle {
+            tick: world.tick_count(),
+            render,
+            semantic,
+            net,
+            hits,
+            metrics,
+        }
     }
 
     pub fn serialize(bundle: &PatchBundle) -> Vec<u8> {
@@ -129,8 +152,12 @@ mod tests {
             tick: 42,
             render: vec![RenderPatch {
                 entity: 1,
-                x: 1.0, y: 2.0, z: 3.0,
-                yaw: 0.5, pitch: 0.1, roll: 0.0,
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+                yaw: 0.5,
+                pitch: 0.1,
+                roll: 0.0,
             }],
             semantic: vec![SemanticPatch {
                 entity: 2,
@@ -139,7 +166,10 @@ mod tests {
                 grounded: Some(true),
             }],
             net: vec![],
-            hits: vec![HitPatch { bullet_eid: 5, target_eid: Some(3) }],
+            hits: vec![HitPatch {
+                bullet_eid: 5,
+                target_eid: Some(3),
+            }],
             metrics: MetricsPatch {
                 tick_ms: 16.0,
                 ai_ms: 2.0,

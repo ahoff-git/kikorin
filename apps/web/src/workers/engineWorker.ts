@@ -45,6 +45,7 @@ const MAX_CATCHUP_STEPS = 8;
 type Req =
   | { type: 'init';                id: number; signalingUrl?: string; sessionId?: string; origin: string }
   | { type: 'set_velocity';        eid: number; vx: number; vy: number; vz: number }
+  | { type: 'teleport';            eid: number; x: number; y: number; z: number }
   | { type: 'destroy';             eid: number }
   | { type: 'spawn_box';           id: number; x: number; y: number; z: number; hw: number; hh: number; hd: number; health: number; net_flags: number }
   | { type: 'spawn_bullet';        id: number; x: number; y: number; z: number; vx: number; vy: number; vz: number }
@@ -171,6 +172,9 @@ addEventListener('message', async (event: MessageEvent<Req>) => {
   switch (msg.type) {
     case 'set_velocity':
       engine.set_entity_velocity(msg.eid, msg.vx, msg.vy, msg.vz);
+      break;
+    case 'teleport':
+      engine.teleport_entity(msg.eid, msg.x, msg.y, msg.z);
       break;
     case 'destroy':
       engine.destroy_entity(msg.eid);

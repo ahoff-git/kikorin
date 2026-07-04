@@ -113,9 +113,7 @@ impl World {
     }
 
     pub fn entities(&self) -> impl Iterator<Item = EntityId> + '_ {
-        (0..self.next_id).filter(|&id| {
-            self.alive.get(id as usize).copied().unwrap_or(false)
-        })
+        (0..self.next_id).filter(|&id| self.alive.get(id as usize).copied().unwrap_or(false))
     }
 
     pub fn tick_count(&self) -> u64 {
@@ -230,20 +228,21 @@ impl World {
 }
 
 /// Runs a fixed list of systems in registration order.
+type SystemFn = Box<dyn FnMut(&mut World, f32)>;
+type RegisteredSystem = (&'static str, SystemFn);
+
 pub struct SystemScheduler {
-    systems: Vec<(&'static str, Box<dyn FnMut(&mut World, f32)>)>,
+    systems: Vec<RegisteredSystem>,
 }
 
 impl SystemScheduler {
     pub fn new() -> Self {
-        Self { systems: Vec::new() }
+        Self {
+            systems: Vec::new(),
+        }
     }
 
-    pub fn register(
-        &mut self,
-        name: &'static str,
-        system: impl FnMut(&mut World, f32) + 'static,
-    ) {
+    pub fn register(&mut self, name: &'static str, system: impl FnMut(&mut World, f32) + 'static) {
         self.systems.push((name, Box::new(system)));
     }
 

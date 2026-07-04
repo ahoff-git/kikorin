@@ -41,7 +41,7 @@ export function useNetworking(
 ): UseNetworkingReturn {
   const [localId] = useState<string>(() => crypto.randomUUID());
   const [connectedPeers, setConnectedPeers] = useState<string[]>([]);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatMessages] = useState<ChatMessage[]>([]);
 
   // Auto-initialise networking once the engine is ready.
   useEffect(() => {

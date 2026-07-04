@@ -12,7 +12,7 @@ const PROJ_MAX_FRAMES: u32 = 600;
 // calls destroy_entity. The entity is NOT destroyed here — TS owns that step.
 const BULLET_DEAD: u32 = u32::MAX;
 
-use netcode::{DeltaTracker, PeerSession, encode_patches};
+use netcode::{encode_patches, DeltaTracker, PeerSession};
 use patch::{HitPatch, MetricsPatch, NetPatch, PatchBundle, PatchGenerator};
 use pathfinding::{NavMesh, NavMeshConfig, PathRequest, Waypoint};
 use physics::PhysicsWorld;
@@ -143,16 +143,26 @@ struct Timer {
 impl Timer {
     fn new() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
-        { Self { start: std::time::Instant::now() } }
+        {
+            Self {
+                start: std::time::Instant::now(),
+            }
+        }
         #[cfg(target_arch = "wasm32")]
-        { Self { start_ms: now_ms() } }
+        {
+            Self { start_ms: now_ms() }
+        }
     }
 
     fn elapsed_ms(&self) -> f32 {
         #[cfg(not(target_arch = "wasm32"))]
-        { self.start.elapsed().as_secs_f32() * 1000.0 }
+        {
+            self.start.elapsed().as_secs_f32() * 1000.0
+        }
         #[cfg(target_arch = "wasm32")]
-        { (now_ms() - self.start_ms) as f32 }
+        {
+            (now_ms() - self.start_ms) as f32
+        }
     }
 }
 
@@ -291,9 +301,10 @@ impl Engine {
         let mut net_patches: Vec<NetPatch> = Vec::new();
         for (_peer_id, bytes) in self.peer_session.drain_inbound() {
             if let Ok(patches) = self.delta_tracker.apply_inbound(&bytes, &mut self.world) {
-                net_patches.extend(
-                    patches.into_iter().map(|p| NetPatch { peer_id: p.peer_id, entity: p.entity }),
-                );
+                net_patches.extend(patches.into_iter().map(|p| NetPatch {
+                    peer_id: p.peer_id,
+                    entity: p.entity,
+                }));
             }
         }
         let mut net_ms = net_timer.elapsed_ms();
@@ -340,14 +351,19 @@ impl Engine {
         // The JsValue conversion itself cannot be self-timed; the worker measures it as
         // boundary_ms (observed call time minus tick_ms).
         let patch_timer = Timer::new();
-        let mut bundle = self.patch_gen.generate(&self.world, net_patches, hits, MetricsPatch {
-            tick_ms: 0.0,
-            ai_ms,
-            physics_ms,
-            pathfinding_ms,
-            net_ms,
-            patch_ms: 0.0,
-        });
+        let mut bundle = self.patch_gen.generate(
+            &self.world,
+            net_patches,
+            hits,
+            MetricsPatch {
+                tick_ms: 0.0,
+                ai_ms,
+                physics_ms,
+                pathfinding_ms,
+                net_ms,
+                patch_ms: 0.0,
+            },
+        );
         bundle.metrics.patch_ms = patch_timer.elapsed_ms();
 
         self.world.clear_dirty();
@@ -427,13 +443,16 @@ impl Engine {
             self.world.set_health(id, hp);
         }
         if let Some(cfg) = bp.collider {
-            self.world.set_collider(id, ColliderConfig {
-                active: cfg.active,
-                sensor: cfg.sensor,
-                half_width: cfg.hw,
-                half_height: cfg.hh,
-                half_depth: cfg.hd,
-            });
+            self.world.set_collider(
+                id,
+                ColliderConfig {
+                    active: cfg.active,
+                    sensor: cfg.sensor,
+                    half_width: cfg.hw,
+                    half_height: cfg.hh,
+                    half_depth: cfg.hd,
+                },
+            );
         }
         id
     }
@@ -450,10 +469,18 @@ impl Engine {
         let mut min_z = f32::INFINITY;
         let mut max_z = f32::NEG_INFINITY;
         for id in self.world.entities() {
-            if !self.world.is_floor(id) { continue; }
-            let Some([x, _, z]) = self.world.position(id) else { continue };
-            let Some(col) = self.world.collider(id) else { continue };
-            if !col.active { continue; }
+            if !self.world.is_floor(id) {
+                continue;
+            }
+            let Some([x, _, z]) = self.world.position(id) else {
+                continue;
+            };
+            let Some(col) = self.world.collider(id) else {
+                continue;
+            };
+            if !col.active {
+                continue;
+            }
             min_x = min_x.min(x - col.half_width);
             max_x = max_x.max(x + col.half_width);
             min_z = min_z.min(z - col.half_depth);
@@ -518,7 +545,9 @@ impl Engine {
                     for &(dc, dr) in dirs {
                         let nc = col as i32 + dc;
                         let nr = row as i32 + dr;
-                        if nc < 0 || nr < 0 || nc >= cols as i32 || nr >= rows as i32 { continue; }
+                        if nc < 0 || nr < 0 || nc >= cols as i32 || nr >= rows as i32 {
+                            continue;
+                        }
                         let to_id = match node_grid[nr as usize * cols + nc as usize] {
                             Some(id) => id,
                             None => continue,
@@ -545,8 +574,12 @@ impl Engine {
                             }
                         }
 
-                        if height_diff > nav.max_step_up     { continue; }
-                        if height_diff < -nav.max_ledge_drop { continue; }
+                        if height_diff > nav.max_step_up {
+                            continue;
+                        }
+                        if height_diff < -nav.max_ledge_drop {
+                            continue;
+                        }
 
                         let is_ledge_drop = height_diff < -nav.min_ledge_drop;
                         let requires_jump = !is_ledge_drop && height_diff > nav.jump_threshold;
@@ -559,7 +592,13 @@ impl Engine {
                             height_diff.max(0.0) * 0.3
                         };
 
-                        mesh.add_edge(from_id, to_id, base_cost + height_cost, requires_jump, is_ledge_drop);
+                        mesh.add_edge(
+                            from_id,
+                            to_id,
+                            base_cost + height_cost,
+                            requires_jump,
+                            is_ledge_drop,
+                        );
                     }
                 }
             }
@@ -579,7 +618,9 @@ impl Engine {
         goal_z: f32,
         can_jump: bool,
     ) -> JsValue {
-        let Some(navmesh) = &self.navmesh else { return JsValue::NULL };
+        let Some(navmesh) = &self.navmesh else {
+            return JsValue::NULL;
+        };
 
         let result = navmesh.find_path(PathRequest {
             start: [start_x, start_y, start_z],
@@ -592,13 +633,16 @@ impl Engine {
         match result {
             None => JsValue::NULL,
             Some(waypoints) => {
-                let js: Vec<JsWaypoint> = waypoints.iter().map(|w| JsWaypoint {
-                    x: w.x,
-                    y: w.y,
-                    z: w.z,
-                    requires_jump: w.requires_jump,
-                    is_ledge_drop: w.is_ledge_drop,
-                }).collect();
+                let js: Vec<JsWaypoint> = waypoints
+                    .iter()
+                    .map(|w| JsWaypoint {
+                        x: w.x,
+                        y: w.y,
+                        z: w.z,
+                        requires_jump: w.requires_jump,
+                        is_ledge_drop: w.is_ledge_drop,
+                    })
+                    .collect();
                 serde_wasm_bindgen::to_value(&js).unwrap_or(JsValue::NULL)
             }
         }
@@ -630,36 +674,49 @@ impl Engine {
     pub fn spawn_floor_entity(&mut self, x: f32, y: f32, z: f32, hw: f32, hh: f32, hd: f32) -> u32 {
         let id = self.world.create_entity();
         self.world.set_position(id, [x, y, z]);
-        self.world.set_collider(id, ColliderConfig {
-            active: true,
-            sensor: false,
-            half_width: hw,
-            half_height: hh,
-            half_depth: hd,
-        });
+        self.world.set_collider(
+            id,
+            ColliderConfig {
+                active: true,
+                sensor: false,
+                half_width: hw,
+                half_height: hh,
+                half_depth: hd,
+            },
+        );
         self.world.set_floor(id, true);
         id
     }
 
     /// Spawn a dynamic entity (player, monster, box). Returns the entity ID.
     /// `net_flags`: combine NET_LOCAL (0x01) and NET_MONSTER (0x04) for monster entities.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_box_entity(
-        &mut self, x: f32, y: f32, z: f32,
-        hw: f32, hh: f32, hd: f32,
-        health: i32, net_flags: u8,
+        &mut self,
+        x: f32,
+        y: f32,
+        z: f32,
+        hw: f32,
+        hh: f32,
+        hd: f32,
+        health: i32,
+        net_flags: u8,
     ) -> u32 {
         let id = self.world.create_entity();
         self.world.set_position(id, [x, y, z]);
         self.world.set_velocity(id, [0.0, 0.0, 0.0]);
         self.world.set_health(id, health);
         self.world.set_net_flags(id, net_flags);
-        self.world.set_collider(id, ColliderConfig {
-            active: true,
-            sensor: false,
-            half_width: hw,
-            half_height: hh,
-            half_depth: hd,
-        });
+        self.world.set_collider(
+            id,
+            ColliderConfig {
+                active: true,
+                sensor: false,
+                half_width: hw,
+                half_height: hh,
+                half_depth: hd,
+            },
+        );
         if net_flags & NET_LOCAL != 0 {
             self.local_entities.push(id);
         }
@@ -688,6 +745,22 @@ impl Engine {
         if self.world.velocity(id).is_some() {
             self.world.set_velocity(id, [vx, vy, vz]);
         }
+    }
+
+    /// Move an entity immediately, clearing velocity for dynamic bodies.
+    pub fn teleport_entity(&mut self, id: u32, x: f32, y: f32, z: f32) {
+        if self.world.position(id).is_none() {
+            return;
+        }
+
+        let position = [x, y, z];
+        self.world.set_position(id, position);
+        if self.world.velocity(id).is_some() {
+            self.world.set_velocity(id, [0.0, 0.0, 0.0]);
+        }
+        self.world.mark_dirty(id, DirtyFlags::TRANSFORM);
+        self.delta_tracker.mark_dirty(id);
+        self.physics.teleport_entity(id, position);
     }
 }
 
@@ -731,8 +804,12 @@ impl Engine {
                 }
                 JsTerrainBlock {
                     eid,
-                    x: b.x, y: b.y, z: b.z,
-                    hw: b.hw, hh: b.hh, hd: b.hd,
+                    x: b.x,
+                    y: b.y,
+                    z: b.z,
+                    hw: b.hw,
+                    hh: b.hh,
+                    hd: b.hd,
                     kind: b.kind.clone(),
                 }
             })
@@ -747,8 +824,9 @@ impl Engine {
     fn collect_by_flag(world: &World, flag: u8, buf: &mut Vec<u32>) {
         buf.clear();
         buf.extend(
-            world.entities()
-                .filter(|&id| world.net_flags(id).map_or(false, |f| f & flag != 0)),
+            world
+                .entities()
+                .filter(|&id| world.net_flags(id).is_some_and(|f| f & flag != 0)),
         );
     }
 
@@ -780,7 +858,9 @@ impl Engine {
             let dx = goal_x - mx;
             let dz = goal_z - mz;
             let dist = (dx * dx + dz * dz).sqrt();
-            if dist < 0.001 { continue; }
+            if dist < 0.001 {
+                continue;
+            }
 
             // --- Stuck detection & replanning (mutates state, no navmesh access) ---
             let should_replan = {
@@ -796,7 +876,7 @@ impl Engine {
                     state.stuck_sample_timer = 0.0;
                     let moved = ((mx - state.last_sample_x).powi(2)
                         + (mz - state.last_sample_z).powi(2))
-                        .sqrt();
+                    .sqrt();
                     if moved < ai.stuck_move_threshold {
                         state.stuck_timer += ai.stuck_sample_interval;
                         if state.stuck_timer >= ai.stuck_escape_after {
@@ -814,8 +894,10 @@ impl Engine {
                 state.replan_cooldown = (state.replan_cooldown - dt_secs).max(0.0);
 
                 let path_stale = match state.path.as_ref().and_then(|p| p.last()) {
-                    Some(wp) => ((goal_x - wp.x).powi(2) + (goal_z - wp.z).powi(2)).sqrt()
-                        > ai.replan_stale_dist,
+                    Some(wp) => {
+                        ((goal_x - wp.x).powi(2) + (goal_z - wp.z).powi(2)).sqrt()
+                            > ai.replan_stale_dist
+                    }
                     None => true,
                 };
 
@@ -862,8 +944,12 @@ impl Engine {
                         let wp = &state.path.as_ref().unwrap()[state.waypoint_index];
                         (wp.x, wp.z, wp.y, wp.requires_jump)
                     };
-                    if (wp_x - mx).hypot(wp_z - mz) >= ai.waypoint_reach { break; }
-                    if req_jump && my - 0.9 < wp_y - ai.jump_height_tolerance { break; }
+                    if (wp_x - mx).hypot(wp_z - mz) >= ai.waypoint_reach {
+                        break;
+                    }
+                    if req_jump && my - 0.9 < wp_y - ai.jump_height_tolerance {
+                        break;
+                    }
                     state.waypoint_index += 1;
                 }
 
@@ -886,8 +972,16 @@ impl Engine {
                     let wp_dx = wp_x - mx;
                     let wp_dz = wp_z - mz;
                     let wp_dist = (wp_dx * wp_dx + wp_dz * wp_dz).sqrt();
-                    let dir_x = if wp_dist > 0.0 { wp_dx / wp_dist } else { dx / dist };
-                    let dir_z = if wp_dist > 0.0 { wp_dz / wp_dist } else { dz / dist };
+                    let dir_x = if wp_dist > 0.0 {
+                        wp_dx / wp_dist
+                    } else {
+                        dx / dist
+                    };
+                    let dir_z = if wp_dist > 0.0 {
+                        wp_dz / wp_dist
+                    } else {
+                        dz / dist
+                    };
                     let wants_jump = req_jump
                         && state.jump_cooldown <= 0.0
                         && grounded
@@ -905,17 +999,23 @@ impl Engine {
             self.world.mark_dirty(mid, DirtyFlags::TRANSFORM);
 
             if wants_jump {
-                self.world.set_velocity(mid, [
-                    desired_x * ai.walk_speed,
-                    ai.jump_speed,
-                    desired_z * ai.walk_speed,
-                ]);
+                self.world.set_velocity(
+                    mid,
+                    [
+                        desired_x * ai.walk_speed,
+                        ai.jump_speed,
+                        desired_z * ai.walk_speed,
+                    ],
+                );
                 if let Some(s) = self.monster_states.get_mut(&mid) {
                     s.jump_cooldown = ai.jump_cooldown;
                 }
             } else {
                 // Desired direction stored as velocity; separation pass adjusts it below.
-                self.world.set_velocity(mid, [desired_x * ai.walk_speed, 0.0, desired_z * ai.walk_speed]);
+                self.world.set_velocity(
+                    mid,
+                    [desired_x * ai.walk_speed, 0.0, desired_z * ai.walk_speed],
+                );
             }
         }
 
@@ -941,7 +1041,11 @@ impl Engine {
         // re-borrowing self.world through the inner loop.
         let mut positions = std::mem::take(&mut self.scratch_positions);
         positions.clear();
-        positions.extend(monster_ids.iter().map(|&id| self.world.position(id).unwrap_or([0.0; 3])));
+        positions.extend(
+            monster_ids
+                .iter()
+                .map(|&id| self.world.position(id).unwrap_or([0.0; 3])),
+        );
 
         let r_sq = ai.separation_radius * ai.separation_radius;
 
@@ -951,14 +1055,18 @@ impl Engine {
                 None => continue,
             };
             // Skip jump frames so separation doesn't fight the vertical impulse.
-            if vel[1].abs() > 0.1 { continue; }
+            if vel[1].abs() > 0.1 {
+                continue;
+            }
 
             let [mx, _, mz] = positions[i];
             let mut sx = 0.0_f32;
             let mut sz = 0.0_f32;
 
             for (j, pos_j) in positions.iter().enumerate() {
-                if i == j { continue; }
+                if i == j {
+                    continue;
+                }
                 let dx = pos_j[0] - mx;
                 let dz = pos_j[2] - mz;
                 let d2 = dx * dx + dz * dz;
@@ -970,7 +1078,9 @@ impl Engine {
                 }
             }
 
-            if sx.abs() < 1e-6 && sz.abs() < 1e-6 { continue; }
+            if sx.abs() < 1e-6 && sz.abs() < 1e-6 {
+                continue;
+            }
 
             // Recover unit desired direction from velocity (vel = dir × walk_speed).
             let speed = (vel[0] * vel[0] + vel[2] * vel[2]).sqrt();
@@ -980,11 +1090,14 @@ impl Engine {
                 (0.0, 0.0)
             };
 
-            self.world.set_velocity(mid, [
-                (dir_x + sx) * ai.walk_speed,
-                vel[1],
-                (dir_z + sz) * ai.walk_speed,
-            ]);
+            self.world.set_velocity(
+                mid,
+                [
+                    (dir_x + sx) * ai.walk_speed,
+                    vel[1],
+                    (dir_z + sz) * ai.walk_speed,
+                ],
+            );
         }
 
         // Return buffers so their capacity is reused next tick.
@@ -1011,8 +1124,13 @@ impl Engine {
         let mut monster_snapshots = std::mem::take(&mut self.scratch_snapshots);
         monster_snapshots.clear();
         monster_snapshots.extend(
-            self.world.entities()
-                .filter(|&id| self.world.net_flags(id).map_or(false, |f| f & NET_MONSTER != 0))
+            self.world
+                .entities()
+                .filter(|&id| {
+                    self.world
+                        .net_flags(id)
+                        .is_some_and(|f| f & NET_MONSTER != 0)
+                })
                 .filter_map(|id| Some((id, self.world.position(id)?))),
         );
 
@@ -1030,19 +1148,29 @@ impl Engine {
                 }
                 *age += 1;
                 if *age > PROJ_MAX_FRAMES {
-                    hits.push(HitPatch { bullet_eid: id, target_eid: None });
+                    hits.push(HitPatch {
+                        bullet_eid: id,
+                        target_eid: None,
+                    });
                     *age = BULLET_DEAD;
                     continue;
                 }
             }
 
-            let Some(pos) = self.world.position(id) else { continue };
-            let Some(vel) = self.world.velocity(id) else { continue };
+            let Some(pos) = self.world.position(id) else {
+                continue;
+            };
+            let Some(vel) = self.world.velocity(id) else {
+                continue;
+            };
 
             // Bullet left the play area. Mark dead so we don't re-emit every tick
             // while TS processes the HitPatch. TS owns the destroy_entity call.
             if pos[1] < -20.0 {
-                hits.push(HitPatch { bullet_eid: id, target_eid: None });
+                hits.push(HitPatch {
+                    bullet_eid: id,
+                    target_eid: None,
+                });
                 self.bullet_ages.insert(id, BULLET_DEAD);
                 continue;
             }
@@ -1056,26 +1184,38 @@ impl Engine {
                 let dir = [vel[0] / speed, vel[1] / speed, vel[2] / speed];
                 let dist = speed * dt_secs;
 
-                if let Some((normal, toi)) = self.physics.cast_ray_with_normal([pos[0], pos[1], pos[2]], dir, dist) {
+                if let Some((normal, toi)) =
+                    self.physics
+                        .cast_ray_with_normal([pos[0], pos[1], pos[2]], dir, dist)
+                {
                     let dot = vel[0] * normal[0] + vel[1] * normal[1] + vel[2] * normal[2];
-                    self.world.set_velocity(id, [
-                        vel[0] - 2.0 * dot * normal[0],
-                        vel[1] - 2.0 * dot * normal[1],
-                        vel[2] - 2.0 * dot * normal[2],
-                    ]);
-                    self.world.set_position(id, [
-                        pos[0] + dir[0] * toi + normal[0] * 0.02,
-                        pos[1] + dir[1] * toi + normal[1] * 0.02,
-                        pos[2] + dir[2] * toi + normal[2] * 0.02,
-                    ]);
+                    self.world.set_velocity(
+                        id,
+                        [
+                            vel[0] - 2.0 * dot * normal[0],
+                            vel[1] - 2.0 * dot * normal[1],
+                            vel[2] - 2.0 * dot * normal[2],
+                        ],
+                    );
+                    self.world.set_position(
+                        id,
+                        [
+                            pos[0] + dir[0] * toi + normal[0] * 0.02,
+                            pos[1] + dir[1] * toi + normal[1] * 0.02,
+                            pos[2] + dir[2] * toi + normal[2] * 0.02,
+                        ],
+                    );
                 } else {
                     // Store gravity-updated velocity so the arc accumulates next tick.
                     self.world.set_velocity(id, vel);
-                    self.world.set_position(id, [
-                        pos[0] + vel[0] * dt_secs,
-                        pos[1] + vel[1] * dt_secs,
-                        pos[2] + vel[2] * dt_secs,
-                    ]);
+                    self.world.set_position(
+                        id,
+                        [
+                            pos[0] + vel[0] * dt_secs,
+                            pos[1] + vel[1] * dt_secs,
+                            pos[2] + vel[2] * dt_secs,
+                        ],
+                    );
                 }
             } else {
                 self.world.set_velocity(id, vel);
@@ -1094,7 +1234,10 @@ impl Engine {
                 let dy = bpos[1] - mpos[1];
                 let dz = bpos[2] - mpos[2];
                 if dx * dx + dy * dy + dz * dz < PROJ_HIT_RADIUS_SQ {
-                    hits.push(HitPatch { bullet_eid: id, target_eid: Some(mid) });
+                    hits.push(HitPatch {
+                        bullet_eid: id,
+                        target_eid: Some(mid),
+                    });
                     // Mark dead so subsequent ticks don't re-emit. TS calls destroy_entity
                     // when it processes the HitPatch — Rust must not destroy the entity here
                     // because the freed ID could be recycled before TS's destroy arrives.
@@ -1109,6 +1252,12 @@ impl Engine {
         self.scratch_ids = bullet_ids;
 
         hits
+    }
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1136,8 +1285,12 @@ struct ColliderBp {
 #[derive(Serialize)]
 struct JsTerrainBlock {
     eid: u32,
-    x: f32, y: f32, z: f32,
-    hw: f32, hh: f32, hd: f32,
+    x: f32,
+    y: f32,
+    z: f32,
+    hw: f32,
+    hh: f32,
+    hd: f32,
     kind: String,
 }
 
@@ -1175,8 +1328,12 @@ struct JsPatch {
 #[derive(Serialize)]
 struct JsRender {
     entity: u32,
-    x: f32, y: f32, z: f32,
-    yaw: f32, pitch: f32, roll: f32,
+    x: f32,
+    y: f32,
+    z: f32,
+    yaw: f32,
+    pitch: f32,
+    roll: f32,
 }
 
 #[derive(Serialize)]
@@ -1203,25 +1360,45 @@ impl From<PatchBundle> for JsPatch {
     fn from(b: PatchBundle) -> Self {
         Self {
             tick: b.tick,
-            render: b.render.into_iter().map(|r| JsRender {
-                entity: r.entity,
-                x: r.x, y: r.y, z: r.z,
-                yaw: r.yaw, pitch: r.pitch, roll: r.roll,
-            }).collect(),
-            semantic: b.semantic.into_iter().map(|s| JsSemantic {
-                entity: s.entity,
-                health: s.health,
-                net_flags: s.net_flags,
-                grounded: s.grounded,
-            }).collect(),
-            net: b.net.into_iter().map(|n| JsNet {
-                peer_id: n.peer_id,
-                entity: n.entity,
-            }).collect(),
-            hits: b.hits.into_iter().map(|h| JsHit {
-                bullet_eid: h.bullet_eid,
-                target_eid: h.target_eid,
-            }).collect(),
+            render: b
+                .render
+                .into_iter()
+                .map(|r| JsRender {
+                    entity: r.entity,
+                    x: r.x,
+                    y: r.y,
+                    z: r.z,
+                    yaw: r.yaw,
+                    pitch: r.pitch,
+                    roll: r.roll,
+                })
+                .collect(),
+            semantic: b
+                .semantic
+                .into_iter()
+                .map(|s| JsSemantic {
+                    entity: s.entity,
+                    health: s.health,
+                    net_flags: s.net_flags,
+                    grounded: s.grounded,
+                })
+                .collect(),
+            net: b
+                .net
+                .into_iter()
+                .map(|n| JsNet {
+                    peer_id: n.peer_id,
+                    entity: n.entity,
+                })
+                .collect(),
+            hits: b
+                .hits
+                .into_iter()
+                .map(|h| JsHit {
+                    bullet_eid: h.bullet_eid,
+                    target_eid: h.target_eid,
+                })
+                .collect(),
             metrics: JsMetrics {
                 tick_ms: b.metrics.tick_ms,
                 ai_ms: b.metrics.ai_ms,
@@ -1246,49 +1423,54 @@ mod tests {
         // MAIN FLOOR
         (0.0, -1.0, -5.0, 60.0, 1.0, 75.0, true),
         // EAST WING — ramp steps
-        (11.5, 0.5,  12.0, 1.5, 0.5,  5.0, true),
-        (14.5, 1.0,  12.0, 1.5, 1.0,  5.0, true),
-        (17.5, 1.5,  12.0, 1.5, 1.5,  5.0, true),
-        (20.5, 2.0,  12.0, 1.5, 2.0,  5.0, true),
-        (31.0, 3.7,  -6.0, 9.0, 0.3, 22.0, true),
-        (42.0, 3.7,   0.0, 2.0, 0.3,  3.0, true),
-        (47.0, 3.7,   0.0, 3.0, 0.3,  4.0, true),
+        (11.5, 0.5, 12.0, 1.5, 0.5, 5.0, true),
+        (14.5, 1.0, 12.0, 1.5, 1.0, 5.0, true),
+        (17.5, 1.5, 12.0, 1.5, 1.5, 5.0, true),
+        (20.5, 2.0, 12.0, 1.5, 2.0, 5.0, true),
+        (31.0, 3.7, -6.0, 9.0, 0.3, 22.0, true),
+        (42.0, 3.7, 0.0, 2.0, 0.3, 3.0, true),
+        (47.0, 3.7, 0.0, 3.0, 0.3, 4.0, true),
         // WEST WING — staircase
-        (-12.0, 0.5,  5.0, 1.5, 0.5, 2.5, true),
-        (-15.0, 1.0,  5.0, 1.5, 1.0, 2.5, true),
-        (-18.0, 1.5,  5.0, 1.5, 1.5, 2.5, true),
-        (-21.0, 2.0,  5.0, 1.5, 2.0, 2.5, true),
+        (-12.0, 0.5, 5.0, 1.5, 0.5, 2.5, true),
+        (-15.0, 1.0, 5.0, 1.5, 1.0, 2.5, true),
+        (-18.0, 1.5, 5.0, 1.5, 1.5, 2.5, true),
+        (-21.0, 2.0, 5.0, 1.5, 2.0, 2.5, true),
         (-31.0, 3.7, -6.0, 9.0, 0.3, 22.0, true),
         // NORTH BRIDGE
-        (0.0, 3.7, -26.0, 22.0, 0.3,  5.0, true),
+        (0.0, 3.7, -26.0, 22.0, 0.3, 5.0, true),
         // NORTH KEEP
-        (0.0, 3.7, -37.0,  8.0, 0.3,  6.0, true),
-        (0.0, 4.5, -44.0,  4.0, 0.5,  1.5, true),
-        (0.0, 5.5, -47.0,  4.0, 0.5,  1.5, true),
-        (0.0, 6.5, -50.0,  4.0, 0.5,  1.5, true),
-        (0.0, 7.5, -53.0,  4.0, 0.5,  1.5, true),
+        (0.0, 3.7, -37.0, 8.0, 0.3, 6.0, true),
+        (0.0, 4.5, -44.0, 4.0, 0.5, 1.5, true),
+        (0.0, 5.5, -47.0, 4.0, 0.5, 1.5, true),
+        (0.0, 6.5, -50.0, 4.0, 0.5, 1.5, true),
+        (0.0, 7.5, -53.0, 4.0, 0.5, 1.5, true),
         // UPPER KEEP
-        (0.0, 7.7, -58.0,  5.0, 0.3,  4.0, true),
-        (0.0, 9.5, -62.0,  5.0, 1.5,  0.4, false),
+        (0.0, 7.7, -58.0, 5.0, 0.3, 4.0, true),
+        (0.0, 9.5, -62.0, 5.0, 1.5, 0.4, false),
         // SOUTH TERRACE
-        (0.0, 0.5,  28.5,  8.0, 0.5,  1.5, true),
-        (0.0, 1.0,  25.5,  8.0, 1.0,  1.5, true),
-        (0.0, 1.5,  22.5,  8.0, 1.5,  1.5, true),
-        (0.0, 2.7,  17.0, 12.0, 0.3,  5.0, true),
+        (0.0, 0.5, 28.5, 8.0, 0.5, 1.5, true),
+        (0.0, 1.0, 25.5, 8.0, 1.0, 1.5, true),
+        (0.0, 1.5, 22.5, 8.0, 1.5, 1.5, true),
+        (0.0, 2.7, 17.0, 12.0, 0.3, 5.0, true),
         // WALLS & PARAPETS
-        (-5.0, 1.5,  -7.0,  0.5, 1.5,  3.0, false),
-        ( 5.0, 1.5,  -7.0,  0.5, 1.5,  3.0, false),
-        ( 40.0, 4.8, -6.0,  0.3, 0.8, 22.0, false),
-        (-40.0, 4.8, -6.0,  0.3, 0.8, 22.0, false),
-        (-11.0, 4.8, -31.0, 11.0, 0.8,  0.4, false),
-        ( 11.0, 4.8, -31.0, 11.0, 0.8,  0.4, false),
+        (-5.0, 1.5, -7.0, 0.5, 1.5, 3.0, false),
+        (5.0, 1.5, -7.0, 0.5, 1.5, 3.0, false),
+        (40.0, 4.8, -6.0, 0.3, 0.8, 22.0, false),
+        (-40.0, 4.8, -6.0, 0.3, 0.8, 22.0, false),
+        (-11.0, 4.8, -31.0, 11.0, 0.8, 0.4, false),
+        (11.0, 4.8, -31.0, 11.0, 0.8, 0.4, false),
     ];
 
     fn castle_blocks() -> Vec<MapBlock> {
         CASTLE_MAP
             .iter()
             .map(|&(x, y, z, hw, hh, hd, walkable)| MapBlock {
-                x, y, z, hw, hh, hd,
+                x,
+                y,
+                z,
+                hw,
+                hh,
+                hd,
                 kind: if walkable { "platform" } else { "wall" }.to_string(),
                 walkable,
             })
@@ -1317,15 +1499,21 @@ mod tests {
             .expect("east stair should route to the platform");
 
         assert!(
-            path.iter().any(|wp| wp.x > 22.0 && (wp.y - 4.0).abs() < 0.01),
+            path.iter()
+                .any(|wp| wp.x > 22.0 && (wp.y - 4.0).abs() < 0.01),
             "path should reach the upper platform: {path:?}",
         );
         assert!(
-            path.iter().find(|wp| wp.x > 22.0).is_some_and(|wp| wp.z > 7.1),
+            path.iter()
+                .find(|wp| wp.x > 22.0)
+                .is_some_and(|wp| wp.z > 7.1),
             "path should enter the platform through the supported stair seam: {path:?}",
         );
 
-        for wp in path.iter().filter(|wp| wp.x >= 10.0 && wp.x <= 22.0 && wp.y >= 1.0) {
+        for wp in path
+            .iter()
+            .filter(|wp| wp.x >= 10.0 && wp.x <= 22.0 && wp.y >= 1.0)
+        {
             assert!(
                 wp.z > 7.1 && wp.z < 16.9,
                 "stair waypoint should stay inside the tread, not on an edge: {wp:?}",
@@ -1344,7 +1532,12 @@ mod tests {
         ]
         .iter()
         .map(|&(x, y, z, hw, hh, hd)| MapBlock {
-            x, y, z, hw, hh, hd,
+            x,
+            y,
+            z,
+            hw,
+            hh,
+            hd,
             kind: "floor".to_string(),
             walkable: true,
         })
@@ -1361,7 +1554,10 @@ mod tests {
             can_jump: true,
             start_y: Some(0.0),
         });
-        assert!(path.is_some(), "path should exist across terrain located at ~(200, 200)");
+        assert!(
+            path.is_some(),
+            "path should exist across terrain located at ~(200, 200)"
+        );
     }
 
     #[test]
@@ -1405,9 +1601,27 @@ mod tests {
         // per tick and the tick budget collapses.
         let mut engine = Engine::new();
         engine.load_map_blocks(&[
-            MapBlock { x: 0.0, y: -1.0, z: 0.0, hw: 20.0, hh: 1.0, hd: 20.0, kind: "floor".into(), walkable: true },
+            MapBlock {
+                x: 0.0,
+                y: -1.0,
+                z: 0.0,
+                hw: 20.0,
+                hh: 1.0,
+                hd: 20.0,
+                kind: "floor".into(),
+                walkable: true,
+            },
             // Island 8 units up: far beyond max_step_up, no edges connect it.
-            MapBlock { x: 30.0, y: 7.0, z: 0.0, hw: 3.0, hh: 0.3, hd: 3.0, kind: "platform".into(), walkable: true },
+            MapBlock {
+                x: 30.0,
+                y: 7.0,
+                z: 0.0,
+                hw: 3.0,
+                hh: 0.3,
+                hd: 3.0,
+                kind: "platform".into(),
+                walkable: true,
+            },
         ]);
         engine.spawn_box_entity(0.0, 1.0, 0.0, 0.4, 0.9, 0.4, 30, NET_LOCAL | NET_MONSTER);
         engine.update_monster_goal(30.0, 0.0); // snaps to the island → unreachable
@@ -1422,6 +1636,37 @@ mod tests {
         assert!(
             searches <= 4,
             "failed searches must be cooldown-limited, got {searches} in 1000 ticks",
+        );
+    }
+
+    #[test]
+    fn teleport_entity_moves_existing_dynamic_body() {
+        let mut engine = Engine::new();
+        engine.load_map_blocks(&[MapBlock {
+            x: 0.0,
+            y: -1.0,
+            z: 0.0,
+            hw: 20.0,
+            hh: 1.0,
+            hd: 20.0,
+            kind: "floor".into(),
+            walkable: true,
+        }]);
+        let eid = engine.spawn_box_entity(0.0, 5.0, 0.0, 0.4, 0.9, 0.4, 30, NET_LOCAL);
+
+        engine.physics.sync_from_world(&engine.world);
+        engine.teleport_entity(eid, 8.0, 4.0, -6.0);
+        engine.physics.sync_to_world(&mut engine.world);
+
+        let pos = engine
+            .world
+            .position(eid)
+            .expect("entity should still exist");
+        assert!(
+            (pos[0] - 8.0).abs() < 0.001
+                && (pos[1] - 4.0).abs() < 0.001
+                && (pos[2] + 6.0).abs() < 0.001,
+            "dynamic body should be moved through Rapier, got {pos:?}",
         );
     }
 }

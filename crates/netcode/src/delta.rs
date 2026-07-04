@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use bincode::{Decode, Encode};
 use ecs::{EntityId, World};
-use bincode::{Encode, Decode};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, Encode, Decode)]
 pub struct NetPatch {
@@ -14,8 +14,8 @@ pub enum NetEventKind {
     Connected,
     Disconnected,
     DeltaUpdate { fields: Vec<FieldUpdate> },
-    FullSync    { fields: Vec<FieldUpdate> },
-    GameEvent   { payload: Vec<u8> },
+    FullSync { fields: Vec<FieldUpdate> },
+    GameEvent { payload: Vec<u8> },
 }
 
 #[derive(Clone, Debug, Encode, Decode)]
@@ -65,23 +65,51 @@ impl DeltaTracker {
 
             if let Some(pos) = world.position(id) {
                 if snap.position != Some(pos) {
-                    fields.push(FieldUpdate { component_id: COMP_POSITION, field_id: 0, value: pos[0] as f64 });
-                    fields.push(FieldUpdate { component_id: COMP_POSITION, field_id: 1, value: pos[1] as f64 });
-                    fields.push(FieldUpdate { component_id: COMP_POSITION, field_id: 2, value: pos[2] as f64 });
+                    fields.push(FieldUpdate {
+                        component_id: COMP_POSITION,
+                        field_id: 0,
+                        value: pos[0] as f64,
+                    });
+                    fields.push(FieldUpdate {
+                        component_id: COMP_POSITION,
+                        field_id: 1,
+                        value: pos[1] as f64,
+                    });
+                    fields.push(FieldUpdate {
+                        component_id: COMP_POSITION,
+                        field_id: 2,
+                        value: pos[2] as f64,
+                    });
                     snap.position = Some(pos);
                 }
             }
             if let Some(rot) = world.rotation(id) {
                 if snap.rotation != Some(rot) {
-                    fields.push(FieldUpdate { component_id: COMP_ROTATION, field_id: 0, value: rot[0] as f64 });
-                    fields.push(FieldUpdate { component_id: COMP_ROTATION, field_id: 1, value: rot[1] as f64 });
-                    fields.push(FieldUpdate { component_id: COMP_ROTATION, field_id: 2, value: rot[2] as f64 });
+                    fields.push(FieldUpdate {
+                        component_id: COMP_ROTATION,
+                        field_id: 0,
+                        value: rot[0] as f64,
+                    });
+                    fields.push(FieldUpdate {
+                        component_id: COMP_ROTATION,
+                        field_id: 1,
+                        value: rot[1] as f64,
+                    });
+                    fields.push(FieldUpdate {
+                        component_id: COMP_ROTATION,
+                        field_id: 2,
+                        value: rot[2] as f64,
+                    });
                     snap.rotation = Some(rot);
                 }
             }
             if let Some(flags) = world.net_flags(id) {
                 if snap.net_flags != Some(flags) {
-                    fields.push(FieldUpdate { component_id: COMP_NET_FLAGS, field_id: 0, value: flags as f64 });
+                    fields.push(FieldUpdate {
+                        component_id: COMP_NET_FLAGS,
+                        field_id: 0,
+                        value: flags as f64,
+                    });
                     snap.net_flags = Some(flags);
                 }
             }
@@ -100,33 +128,64 @@ impl DeltaTracker {
 
     /// Emit a full snapshot of all known entities for a new peer joining.
     pub fn full_snapshot(&self, world: &World, peer_id: &str) -> Vec<NetPatch> {
-        world.entities().filter_map(|id| {
-            let mut fields = Vec::new();
+        world
+            .entities()
+            .filter_map(|id| {
+                let mut fields = Vec::new();
 
-            if let Some(pos) = world.position(id) {
-                fields.push(FieldUpdate { component_id: COMP_POSITION, field_id: 0, value: pos[0] as f64 });
-                fields.push(FieldUpdate { component_id: COMP_POSITION, field_id: 1, value: pos[1] as f64 });
-                fields.push(FieldUpdate { component_id: COMP_POSITION, field_id: 2, value: pos[2] as f64 });
-            }
-            if let Some(rot) = world.rotation(id) {
-                fields.push(FieldUpdate { component_id: COMP_ROTATION, field_id: 0, value: rot[0] as f64 });
-                fields.push(FieldUpdate { component_id: COMP_ROTATION, field_id: 1, value: rot[1] as f64 });
-                fields.push(FieldUpdate { component_id: COMP_ROTATION, field_id: 2, value: rot[2] as f64 });
-            }
-            if let Some(flags) = world.net_flags(id) {
-                fields.push(FieldUpdate { component_id: COMP_NET_FLAGS, field_id: 0, value: flags as f64 });
-            }
+                if let Some(pos) = world.position(id) {
+                    fields.push(FieldUpdate {
+                        component_id: COMP_POSITION,
+                        field_id: 0,
+                        value: pos[0] as f64,
+                    });
+                    fields.push(FieldUpdate {
+                        component_id: COMP_POSITION,
+                        field_id: 1,
+                        value: pos[1] as f64,
+                    });
+                    fields.push(FieldUpdate {
+                        component_id: COMP_POSITION,
+                        field_id: 2,
+                        value: pos[2] as f64,
+                    });
+                }
+                if let Some(rot) = world.rotation(id) {
+                    fields.push(FieldUpdate {
+                        component_id: COMP_ROTATION,
+                        field_id: 0,
+                        value: rot[0] as f64,
+                    });
+                    fields.push(FieldUpdate {
+                        component_id: COMP_ROTATION,
+                        field_id: 1,
+                        value: rot[1] as f64,
+                    });
+                    fields.push(FieldUpdate {
+                        component_id: COMP_ROTATION,
+                        field_id: 2,
+                        value: rot[2] as f64,
+                    });
+                }
+                if let Some(flags) = world.net_flags(id) {
+                    fields.push(FieldUpdate {
+                        component_id: COMP_NET_FLAGS,
+                        field_id: 0,
+                        value: flags as f64,
+                    });
+                }
 
-            if fields.is_empty() {
-                None
-            } else {
-                Some(NetPatch {
-                    peer_id: peer_id.to_string(),
-                    entity: id,
-                    kind: NetEventKind::FullSync { fields },
-                })
-            }
-        }).collect()
+                if fields.is_empty() {
+                    None
+                } else {
+                    Some(NetPatch {
+                        peer_id: peer_id.to_string(),
+                        entity: id,
+                        kind: NetEventKind::FullSync { fields },
+                    })
+                }
+            })
+            .collect()
     }
 
     /// Apply an inbound encoded NetPatch slice to the world.
@@ -162,19 +221,43 @@ pub fn apply_patch_to_world(patch: &NetPatch, world: &mut World) {
 
     for f in fields {
         match (f.component_id, f.field_id) {
-            (COMP_POSITION, 0) => { pos[0] = f.value as f32; has_pos = true; }
-            (COMP_POSITION, 1) => { pos[1] = f.value as f32; has_pos = true; }
-            (COMP_POSITION, 2) => { pos[2] = f.value as f32; has_pos = true; }
-            (COMP_ROTATION, 0) => { rot[0] = f.value as f32; has_rot = true; }
-            (COMP_ROTATION, 1) => { rot[1] = f.value as f32; has_rot = true; }
-            (COMP_ROTATION, 2) => { rot[2] = f.value as f32; has_rot = true; }
-            (COMP_NET_FLAGS, 0) => { world.set_net_flags(id, f.value as u8); }
+            (COMP_POSITION, 0) => {
+                pos[0] = f.value as f32;
+                has_pos = true;
+            }
+            (COMP_POSITION, 1) => {
+                pos[1] = f.value as f32;
+                has_pos = true;
+            }
+            (COMP_POSITION, 2) => {
+                pos[2] = f.value as f32;
+                has_pos = true;
+            }
+            (COMP_ROTATION, 0) => {
+                rot[0] = f.value as f32;
+                has_rot = true;
+            }
+            (COMP_ROTATION, 1) => {
+                rot[1] = f.value as f32;
+                has_rot = true;
+            }
+            (COMP_ROTATION, 2) => {
+                rot[2] = f.value as f32;
+                has_rot = true;
+            }
+            (COMP_NET_FLAGS, 0) => {
+                world.set_net_flags(id, f.value as u8);
+            }
             _ => {}
         }
     }
 
-    if has_pos { world.set_position(id, pos); }
-    if has_rot { world.set_rotation(id, rot); }
+    if has_pos {
+        world.set_position(id, pos);
+    }
+    if has_rot {
+        world.set_rotation(id, rot);
+    }
 }
 
 pub fn encode_patches(patches: &[NetPatch]) -> Vec<u8> {
@@ -223,9 +306,21 @@ mod tests {
             entity: e,
             kind: NetEventKind::DeltaUpdate {
                 fields: vec![
-                    FieldUpdate { component_id: COMP_POSITION, field_id: 0, value: 5.0 },
-                    FieldUpdate { component_id: COMP_POSITION, field_id: 1, value: 10.0 },
-                    FieldUpdate { component_id: COMP_POSITION, field_id: 2, value: 15.0 },
+                    FieldUpdate {
+                        component_id: COMP_POSITION,
+                        field_id: 0,
+                        value: 5.0,
+                    },
+                    FieldUpdate {
+                        component_id: COMP_POSITION,
+                        field_id: 1,
+                        value: 10.0,
+                    },
+                    FieldUpdate {
+                        component_id: COMP_POSITION,
+                        field_id: 2,
+                        value: 15.0,
+                    },
                 ],
             },
         }];

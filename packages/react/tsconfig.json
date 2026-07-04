@@ -3,7 +3,6 @@
   "compilerOptions": {
     "noEmit": true,
     "paths": {
-      "@kikorin/engine": ["../engine/src/index.ts"],
       "@kikorin/events": ["../events/src/index.ts"]
     }
   },

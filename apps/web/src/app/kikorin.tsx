@@ -23,6 +23,7 @@ import {
   Vector3,
   type Object3D,
 } from "three";
+import { recordE2EEntitySpawn } from "./e2eMetrics";
 
 // NET_LOCAL flag: entity is simulated locally, included in render patches every tick.
 const NET_LOCAL = 0x01;
@@ -153,6 +154,7 @@ export async function setupGame(
   // --- Player ---
   const playerEid = await engine.spawn_box_entity(0, 5, 0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
   upsertObjectByEid(playerEid, () => makePersonMesh(0x4488cc, 0xffe082));
+  recordE2EEntitySpawn("player", playerEid);
   ownership.addOwnedEntity(playerEid);
   ownedEids.push(playerEid);
 
@@ -255,6 +257,7 @@ export async function setupGame(
     ).then((eid) => {
       const obj = upsertObjectByEid(eid, makeProjectileMesh);
       obj.position.set(spawnX, spawnY, spawnZ);
+      recordE2EEntitySpawn("bullet", eid);
     });
   }
   window.addEventListener("mousedown", onMouseDown);
@@ -432,6 +435,7 @@ export async function setupGame(
         const mObj = upsertObjectByEid(eid, () => makePersonMesh(0xcc4444, 0xff8800));
         mObj.position.set(x, 5, z);
         monsterEids.push(eid);
+        recordE2EEntitySpawn("monster", eid);
         ownedEids.push(eid);
         ownership.addOwnedEntity(eid);
       }),

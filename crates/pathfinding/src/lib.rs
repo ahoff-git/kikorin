@@ -83,7 +83,12 @@ impl NavMesh {
         is_ledge_drop: bool,
     ) {
         if let Some(edges) = self.edges.get_mut(from as usize) {
-            edges.push(Edge { to, cost, requires_jump, is_ledge_drop });
+            edges.push(Edge {
+                to,
+                cost,
+                requires_jump,
+                is_ledge_drop,
+            });
         }
     }
 
@@ -150,7 +155,7 @@ impl NavMesh {
 
         let start_node = match req.start_y {
             Some(y) => self.nearest_walkable_3d(req.start[0], y, req.start[2])?,
-            None    => self.nearest_walkable(req.start[0], req.start[2])?,
+            None => self.nearest_walkable(req.start[0], req.start[2])?,
         };
         let goal_node = self.nearest_walkable(req.goal[0], req.goal[2])?;
 
@@ -169,20 +174,23 @@ impl NavMesh {
                 if n_usize >= self.edges.len() {
                     return vec![];
                 }
-                self.edges[n_usize].iter().filter_map(|e| {
-                    if !can_jump && e.requires_jump {
-                        return None;
-                    }
-                    let noise = seed.map_or(0.0, |s| {
-                        let h = (n as u64)
-                            .wrapping_mul(2654435761)
-                            .wrapping_add(e.to as u64)
-                            .wrapping_add(s as u64);
-                        (h % 100) as f32 / 100.0 * 0.05 * e.cost
-                    });
-                    let cost_fixed = ((e.cost + noise) * 1000.0) as u32;
-                    Some((e.to, cost_fixed))
-                }).collect::<Vec<_>>()
+                self.edges[n_usize]
+                    .iter()
+                    .filter_map(|e| {
+                        if !can_jump && e.requires_jump {
+                            return None;
+                        }
+                        let noise = seed.map_or(0.0, |s| {
+                            let h = (n as u64)
+                                .wrapping_mul(2654435761)
+                                .wrapping_add(e.to as u64)
+                                .wrapping_add(s as u64);
+                            (h % 100) as f32 / 100.0 * 0.05 * e.cost
+                        });
+                        let cost_fixed = ((e.cost + noise) * 1000.0) as u32;
+                        Some((e.to, cost_fixed))
+                    })
+                    .collect::<Vec<_>>()
             },
             |&n| {
                 let [nx, ny, nz] = self.nodes[n as usize];
@@ -201,7 +209,13 @@ impl NavMesh {
 
     fn node_to_waypoint(&self, id: NodeId, requires_jump: bool, is_ledge_drop: bool) -> Waypoint {
         let [x, y, z] = self.nodes[id as usize];
-        Waypoint { x, y, z, requires_jump, is_ledge_drop }
+        Waypoint {
+            x,
+            y,
+            z,
+            requires_jump,
+            is_ledge_drop,
+        }
     }
 
     fn build_waypoints(&self, node_path: &[NodeId]) -> Vec<Waypoint> {
@@ -238,17 +252,16 @@ impl NavMesh {
             let curr = &waypoints[i];
             let next = &waypoints[i + 1];
 
-            let dir_in  = [curr.x - prev.x, curr.y - prev.y, curr.z - prev.z];
+            let dir_in = [curr.x - prev.x, curr.y - prev.y, curr.z - prev.z];
             let dir_out = [next.x - curr.x, next.y - curr.y, next.z - curr.z];
 
-            let len_in  = (dir_in[0].powi(2)  + dir_in[1].powi(2)  + dir_in[2].powi(2)).sqrt();
+            let len_in = (dir_in[0].powi(2) + dir_in[1].powi(2) + dir_in[2].powi(2)).sqrt();
             let len_out = (dir_out[0].powi(2) + dir_out[1].powi(2) + dir_out[2].powi(2)).sqrt();
 
             let keep = if len_in < 1e-6 || len_out < 1e-6 {
                 true
             } else {
-                let dot =
-                    (dir_in[0] / len_in) * (dir_out[0] / len_out)
+                let dot = (dir_in[0] / len_in) * (dir_out[0] / len_out)
                     + (dir_in[1] / len_in) * (dir_out[1] / len_out)
                     + (dir_in[2] / len_in) * (dir_out[2] / len_out);
                 dot < cos_threshold || curr.requires_jump || curr.is_ledge_drop
@@ -263,7 +276,10 @@ impl NavMesh {
     }
 
     fn grid_key(&self, x: f32, z: f32) -> (i32, i32) {
-        ((x / self.cell_size).floor() as i32, (z / self.cell_size).floor() as i32)
+        (
+            (x / self.cell_size).floor() as i32,
+            (z / self.cell_size).floor() as i32,
+        )
     }
 }
 
@@ -283,16 +299,18 @@ mod tests {
         // Deterministic wall set using a simple LCG
         let mut rng = seed;
         let next_rng = |r: &mut u64| -> f32 {
-            *r = r.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *r = r
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (*r >> 33) as f32 / u32::MAX as f32
         };
 
         let total = size * size;
         let mut is_wall = vec![false; total];
         // keep start (0,0) and goal (size-1, size-1) clear
-        for i in 0..total {
+        for (i, wall) in is_wall.iter_mut().enumerate() {
             if i != 0 && i != total - 1 {
-                is_wall[i] = next_rng(&mut rng) < wall_ratio;
+                *wall = next_rng(&mut rng) < wall_ratio;
             }
         }
 
@@ -337,7 +355,12 @@ mod tests {
             node_ids[goal_id]
         } else {
             // scan back to find a non-wall goal
-            node_ids.iter().rev().find(|&&id| id != u32::MAX).copied().unwrap()
+            node_ids
+                .iter()
+                .rev()
+                .find(|&&id| id != u32::MAX)
+                .copied()
+                .unwrap()
         };
 
         (mesh, start, goal)
@@ -415,10 +438,10 @@ mod tests {
         });
         // Three nodes in a line; the only edge from 0→1 requires a jump.
         let a = mesh.add_node(0.5, 0.0, 0.5);
-        let b = mesh.add_node(1.5, 1.0, 0.5);  // elevated — jump required
+        let b = mesh.add_node(1.5, 1.0, 0.5); // elevated — jump required
         let c = mesh.add_node(2.5, 1.0, 0.5);
-        mesh.add_edge(a, b, 2.0, true, false);   // jump edge
-        mesh.add_edge(b, a, 2.0, false, true);   // ledge drop back
+        mesh.add_edge(a, b, 2.0, true, false); // jump edge
+        mesh.add_edge(b, a, 2.0, false, true); // ledge drop back
         mesh.add_edge(b, c, 1.0, false, false);
         mesh.add_edge(c, b, 1.0, false, false);
 
@@ -429,7 +452,10 @@ mod tests {
             can_jump: true,
             start_y: None,
         });
-        assert!(with_jump.is_some(), "jumping monster should find path through jump edge");
+        assert!(
+            with_jump.is_some(),
+            "jumping monster should find path through jump edge"
+        );
 
         let no_jump = mesh.find_path(PathRequest {
             start: [0.5, 0.0, 0.5],
@@ -438,7 +464,10 @@ mod tests {
             can_jump: false,
             start_y: None,
         });
-        assert!(no_jump.is_none(), "non-jumping monster should find no path when jump is the only option");
+        assert!(
+            no_jump.is_none(),
+            "non-jumping monster should find no path when jump is the only option"
+        );
     }
 
     #[test]
@@ -466,8 +495,14 @@ mod tests {
             .expect("jump edge should be traversable");
 
         assert_eq!(path.len(), 2);
-        assert!(!path[0].requires_jump, "starting waypoint should not request a jump");
-        assert!(path[1].requires_jump, "destination waypoint should request the jump");
+        assert!(
+            !path[0].requires_jump,
+            "starting waypoint should not request a jump"
+        );
+        assert!(
+            path[1].requires_jump,
+            "destination waypoint should request the jump"
+        );
     }
 
     /// start_y picks the node closest in 3-D when two nodes share nearly the
@@ -500,11 +535,18 @@ mod tests {
             can_jump: true,
             start_y: Some(0.0),
         });
-        assert!(path.is_some(), "should find ground-level path when start_y anchors to ground");
+        assert!(
+            path.is_some(),
+            "should find ground-level path when start_y anchors to ground"
+        );
         let wp = path.unwrap();
         // All waypoints should be near y=0
         for w in &wp {
-            assert!(w.y < 1.0, "waypoint should be on the ground layer, got y={}", w.y);
+            assert!(
+                w.y < 1.0,
+                "waypoint should be on the ground layer, got y={}",
+                w.y
+            );
         }
     }
 }

@@ -1,6 +1,6 @@
 # Kikorin
 
-Game engine monorepo. The `apps/web` Next.js app is a throwaway testbed. The publishable packages are `@kikorin/netcode` (Hydra) and `@kikorin/util`.
+Game engine monorepo. The `apps/web` Next.js app is a throwaway testbed. The publishable npm package is `@kikorin/util`.
 
 ## New machine setup
 
@@ -32,7 +32,7 @@ Walks through an interactive prompt (which packages changed, patch / minor / maj
 
 ## Publishing a new package
 
-1. Add `tsup` to the package's `devDependencies` and `"build": "tsup"` to its scripts — copy `tsup.config.ts` from `packages/netcode/`
-2. Add `"files": ["dist"]` and a `publishConfig` block pointing exports to `dist/` — copy the pattern from `packages/netcode/package.json`
+1. Add `tsup` to the package's `devDependencies` and `"build": "tsup"` to its scripts — copy `tsup.config.ts` from `packages/util/`
+2. Add `"files": ["dist"]` and a `publishConfig` block pointing exports to `dist/` — copy the pattern from `packages/util/package.json`
 3. Remove `"private": true` from the package's `package.json`
 4. Add `--filter=@kikorin/<pkg-name>` to the `ship` and `release` scripts in the root `package.json`
