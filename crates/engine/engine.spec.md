@@ -22,7 +22,7 @@ This spec is the top-level entry point; each box below has its own spec for the 
 1. Drain inbound peer messages → apply to world; map applied wire patches to boundary `NetPatch`es (see `crates/patch` spec).
 2. **Monster AI:** per NET_MONSTER entity — follow path, detect stuck, replan (≤ 1 A* search per tick), write desired velocity + rotation.
 3. **Separation:** blend soft repulsion into monster XZ velocities (skipped on jump frames).
-4. **Physics:** sync world → Rapier, step, sync back.
+4. **Physics:** stamp latched jump impulses into world velocity, sync world → Rapier, step, sync back, reset consumed impulses to vy=0.
 5. **Bullets:** integrate NET_BULLET trajectories, bounce off terrain, enforce TTL, detect monster overlaps → hit events.
 6. Mark locally-owned entities dirty; flush outbound peer deltas.
 7. Generate `PatchBundle` → clear dirty flags → advance tick.
@@ -45,7 +45,7 @@ spawn_bullet(x,y,z,vx,vy,vz) → id         NET_BULLET; no Rapier body
 spawn_floor_entity(x,y,z,hw,hh,hd) → id   static terrain body
 spawn_entity(EntityBlueprint bytes) → id
 destroy_entity(id)                        removes ECS + Rapier body + AI/bullet state
-set_entity_velocity(id,vx,vy,vz)          XZ movement; non-zero vy = one-frame jump impulse
+set_entity_velocity(id,vx,vy,vz)          XZ movement (last write wins); non-zero vy latches a jump impulse
 load_map(blocks) → JsTerrainBlock[]       spawns game-supplied terrain, builds navmesh, returns blocks + eids
 build_navmesh()                           rebuild navmesh from current floor geometry
 set_ai_config(cfg) | set_nav_config(cfg)  game tuning overrides (partial; missing = defaults)
@@ -62,10 +62,11 @@ get_metrics() → JsMetrics | set_log_level(u8) | deserialize_patch(bytes) → J
 - Navmesh nodes are placed only on **walkable** surfaces: blocks with `walkable: false` (walls) stay solid for physics, but node sampling skips their tops and continues to the surface beneath. This prevents unreachable node ribbons on wall tops, which would make goals that snap to them permanently unpathable.
 - The engine ships no game data: map layout and tuning defaults are overridable inputs.
 - `destroy_entity` removes the entity's Rapier body and any monster/bullet state in the same call, so no phantom patches survive for a recycled ID.
+- **Jump is an event; XZ movement is state.** A non-zero vy in `set_entity_velocity` latches a jump impulse consumed by exactly one physics step; vy=0 calls never clear the latch. Input messages coalesce last-write-wins between ticks (the worker drains its queue back-to-back when ticks run long), so a jump command riding the velocity field directly would be overwritten before a step consumed it. Consecutive jumps before a tick collapse to the last one; `destroy_entity` and `teleport_entity` drop a pending latch.
 
 ### Dependencies
 `ecs`, `physics`, `netcode`, `patch`, `pathfinding`; `wasm-bindgen`, `serde-wasm-bindgen`, `bincode`, and (WASM only) `console_log` / `console_error_panic_hook`.
 
 ### Verification
-- `cargo check -p engine` exits 0.
+- `cargo test -p engine` — navmesh construction over realistic geometry, replan cooldown limiting, dynamic-body teleport, and the jump-latch contract (survives movement-command overwrites, consumed by exactly one step, dropped on destroy).
 - `wasm-pack build --target bundler` in `crates/engine/` produces `pkg/` (`@kikorin/engine-wasm`).

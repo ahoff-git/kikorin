@@ -51,8 +51,10 @@ export class Engine {
      */
     set_ai_config(cfg: any): void;
     /**
-     * Set the velocity of an entity. XZ velocity is always applied.
-     * Pass vy=0 to preserve gravity accumulation; non-zero vy applies a one-frame jump impulse.
+     * Set the velocity of an entity. XZ is a movement command, applied last-write-wins.
+     * Non-zero vy latches a jump impulse consumed by exactly one physics step; vy=0
+     * never clears a pending latch, so a jump survives movement commands that coalesce
+     * ahead of the next tick. Consecutive jumps before a tick collapse to the last one.
      */
     set_entity_velocity(id: number, vx: number, vy: number, vz: number): void;
     /**

@@ -11,7 +11,7 @@ Wraps Rapier3D for rigid-body simulation of ECS entities. The ECS world is the s
 Out-of-tick queries (`floor_height_at`, `cast_ray`, `cast_collider`) need the query pipeline populated; `step` rebuilds it each tick, but callers using these before the first step (e.g. navmesh construction) must call `prepare_queries()` first.
 
 ### Velocity Split — game controls XZ, Rapier owns Y
-`sync_from_world` writes ECS `velocity.x` / `velocity.z` to Rapier `linvel` every tick, but `velocity.y` only when non-zero. This is the one-frame jump-impulse pattern: game logic sets a large positive Y for exactly one frame then clears it; between jumps Rapier's gravity-accumulated Y linvel is preserved. Lets game logic drive horizontal movement while Rapier handles vertical physics.
+`sync_from_world` writes ECS `velocity.x` / `velocity.z` to Rapier `linvel` every tick, but `velocity.y` only when non-zero. The engine stamps a latched jump impulse into `velocity.y` for exactly the consuming tick and resets it to 0 afterward (see the jump-latch invariant in the engine spec); between jumps Rapier's gravity-accumulated Y linvel is preserved. Lets game logic drive horizontal movement while Rapier handles vertical physics.
 
 ### Grounded Detection
 A short downward ray from the entity centre, max distance `half_height + GROUND_TOL (0.10)`; `grounded` is true iff it hits a floor entity. A straight-down ray can only reach top/bottom surfaces — vertical side faces of stairs and walls are parallel to it and never hit — so side contacts cannot produce a false positive.

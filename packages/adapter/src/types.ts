@@ -145,7 +145,11 @@ export interface EngineHandle {
    * No Rapier body — bypasses broadphase entirely.
    */
   spawn_bullet(x: number, y: number, z: number, vx: number, vy: number, vz: number): number;
-  /** Set XZ velocity (movement) and optionally Y (one-frame jump impulse when non-zero). */
+  /**
+   * Set XZ movement velocity (last write wins). Non-zero vy latches a jump impulse
+   * consumed by exactly one physics step; vy=0 never clears a pending jump, so a
+   * jump command survives movement commands coalescing ahead of the next tick.
+   */
   set_entity_velocity(id: number, vx: number, vy: number, vz: number): void;
   /** Move an entity immediately and clear dynamic velocity. */
   teleport_entity(id: number, x: number, y: number, z: number): void;

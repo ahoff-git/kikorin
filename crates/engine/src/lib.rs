@@ -213,6 +213,11 @@ pub struct Engine {
     monster_states: HashMap<u32, MonsterState>,
     // Age counter (in ticks) for each NET_BULLET entity — used for TTL enforcement.
     bullet_ages: HashMap<u32, u32>,
+    // Jump impulses latched by set_entity_velocity (non-zero vy) awaiting the next
+    // physics step. A dedicated latch — not the world velocity field — because input
+    // messages coalesce last-write-wins between ticks: when ticks run long, a queued
+    // jump command followed by plain movement commands must still fire.
+    pending_jumps: HashMap<u32, f32>,
     // Player position used as the monster pathfinding goal; updated each tick via
     // update_monster_goal(). Stored so the engine owns the loop, not the caller.
     goal_x: f32,
@@ -254,6 +259,7 @@ impl Engine {
             local_entities: Vec::new(),
             monster_states: HashMap::new(),
             bullet_ages: HashMap::new(),
+            pending_jumps: HashMap::new(),
             goal_x: 0.0,
             goal_z: 0.0,
             ai: AiConfig::default(),
@@ -320,11 +326,9 @@ impl Engine {
         self.apply_monster_separation();
         let mut ai_ms = ai_timer.elapsed_ms();
 
-        // 2.5. Physics step.
+        // 2.5. Physics step (consumes latched jump impulses — see step_physics).
         let physics_timer = Timer::new();
-        self.physics.sync_from_world(&self.world);
-        self.physics.step(dt_secs);
-        self.physics.sync_to_world(&mut self.world);
+        self.step_physics(dt_secs);
         let physics_ms = physics_timer.elapsed_ms();
 
         // 3. Bullet update + hit detection, plus marking locally-owned entities dirty for
@@ -656,6 +660,7 @@ impl Engine {
         self.monster_states.remove(&id);
         self.bullet_ages.remove(&id);
         self.non_walkable_terrain.remove(&id);
+        self.pending_jumps.remove(&id);
     }
 
     /// Load a map from a JS array of `{ x, y, z, hw, hh, hd, kind }` blocks: spawns a
@@ -739,11 +744,18 @@ impl Engine {
         id
     }
 
-    /// Set the velocity of an entity. XZ velocity is always applied.
-    /// Pass vy=0 to preserve gravity accumulation; non-zero vy applies a one-frame jump impulse.
+    /// Set the velocity of an entity. XZ is a movement command, applied last-write-wins.
+    /// Non-zero vy latches a jump impulse consumed by exactly one physics step; vy=0
+    /// never clears a pending latch, so a jump survives movement commands that coalesce
+    /// ahead of the next tick. Consecutive jumps before a tick collapse to the last one.
     pub fn set_entity_velocity(&mut self, id: u32, vx: f32, vy: f32, vz: f32) {
-        if self.world.velocity(id).is_some() {
-            self.world.set_velocity(id, [vx, vy, vz]);
+        if let Some(v) = self.world.velocity(id) {
+            // vy stays at its current world value (0 between jumps — the gravity-owned
+            // sentinel in physics::sync_from_world); the latch carries the impulse.
+            self.world.set_velocity(id, [vx, v[1], vz]);
+            if vy != 0.0 {
+                self.pending_jumps.insert(id, vy);
+            }
         }
     }
 
@@ -758,6 +770,7 @@ impl Engine {
         if self.world.velocity(id).is_some() {
             self.world.set_velocity(id, [0.0, 0.0, 0.0]);
         }
+        self.pending_jumps.remove(&id);
         self.world.mark_dirty(id, DirtyFlags::TRANSFORM);
         self.delta_tracker.mark_dirty(id);
         self.physics.teleport_entity(id, position);
@@ -767,6 +780,30 @@ impl Engine {
 // --- Private engine methods (not exposed to JS) ---
 
 impl Engine {
+    /// Physics phase of a tick: stamp latched jump impulses into world velocity so
+    /// this sync applies them, step Rapier, then reset vy to 0 (the gravity-owned
+    /// sentinel — see physics::sync_from_world) so later ticks preserve gravity
+    /// accumulation. Factored out of tick() so native tests can drive physics
+    /// without crossing the JsValue boundary.
+    fn step_physics(&mut self, dt_secs: f32) {
+        for (&id, &vy) in &self.pending_jumps {
+            if let Some(v) = self.world.velocity(id) {
+                self.world.set_velocity(id, [v[0], vy, v[2]]);
+            }
+        }
+
+        self.physics.sync_from_world(&self.world);
+        self.physics.step(dt_secs);
+        self.physics.sync_to_world(&mut self.world);
+
+        for &id in self.pending_jumps.keys() {
+            if let Some(v) = self.world.velocity(id) {
+                self.world.set_velocity(id, [v[0], 0.0, v[2]]);
+            }
+        }
+        self.pending_jumps.clear();
+    }
+
     /// Height of the topmost WALKABLE floor surface at (x, z), for navmesh node
     /// placement. Unlike physics.floor_height_at, this skips non-walkable terrain
     /// (walls) and non-floor entities, continuing the scan below them — so a cell
@@ -1637,6 +1674,92 @@ mod tests {
             searches <= 4,
             "failed searches must be cooldown-limited, got {searches} in 1000 ticks",
         );
+    }
+
+    fn engine_with_flat_floor() -> Engine {
+        let mut engine = Engine::new();
+        engine.load_map_blocks(&[MapBlock {
+            x: 0.0,
+            y: -1.0,
+            z: 0.0,
+            hw: 20.0,
+            hh: 1.0,
+            hd: 20.0,
+            kind: "floor".into(),
+            walkable: true,
+        }]);
+        engine
+    }
+
+    #[test]
+    fn jump_latch_survives_movement_commands_before_the_next_tick() {
+        // The lagged-worker message pattern: when a sim pump runs long, queued input
+        // messages drain back-to-back — a jump command followed by plain movement
+        // commands, all before the next physics step. The jump must still fire.
+        let mut engine = engine_with_flat_floor();
+        let eid = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        for _ in 0..10 {
+            engine.step_physics(0.004);
+        }
+        let y0 = engine.world.position(eid).expect("entity exists")[1];
+
+        engine.set_entity_velocity(eid, 0.0, 12.0, 0.0); // jump press frame
+        engine.set_entity_velocity(eid, 0.0, 0.0, 0.0); // subsequent movement frames
+        engine.set_entity_velocity(eid, 0.0, 0.0, 0.0);
+
+        for _ in 0..50 {
+            engine.step_physics(0.004);
+        }
+        let y1 = engine.world.position(eid).expect("entity exists")[1];
+        assert!(
+            y1 > y0 + 0.5,
+            "latched jump must fire despite later movement commands: y0={y0} y1={y1}",
+        );
+    }
+
+    #[test]
+    fn jump_impulse_is_consumed_by_exactly_one_step() {
+        let mut engine = engine_with_flat_floor();
+        let eid = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        for _ in 0..10 {
+            engine.step_physics(0.004);
+        }
+
+        engine.set_entity_velocity(eid, 0.0, 12.0, 0.0);
+        engine.step_physics(0.004);
+
+        // Latch consumed: no pending entry, and world vy back to the gravity-owned 0.
+        assert!(engine.pending_jumps.is_empty(), "latch must clear after the step");
+        assert_eq!(
+            engine.world.velocity(eid).expect("entity exists")[1],
+            0.0,
+            "world vy must reset so later ticks preserve gravity accumulation",
+        );
+
+        // Full flight at vy=12, g=-20 is ~1.2 s. The body must rise and come back
+        // down — a re-applied impulse would hold it climbing forever.
+        let mut apex = f32::MIN;
+        for _ in 0..400 {
+            engine.step_physics(0.004);
+            apex = apex.max(engine.world.position(eid).expect("entity exists")[1]);
+        }
+        let y_final = engine.world.position(eid).expect("entity exists")[1];
+        assert!(apex > 2.0, "jump must gain real height, apex={apex}");
+        assert!(
+            y_final < 1.5,
+            "body must land again — impulse re-applied? y_final={y_final} apex={apex}",
+        );
+    }
+
+    #[test]
+    fn destroying_an_entity_drops_its_pending_jump() {
+        // Entity IDs are recycled; a stale latch must not launch the next entity
+        // that reuses the slot.
+        let mut engine = engine_with_flat_floor();
+        let eid = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        engine.set_entity_velocity(eid, 0.0, 12.0, 0.0);
+        engine.destroy_entity(eid);
+        assert!(engine.pending_jumps.is_empty());
     }
 
     #[test]
