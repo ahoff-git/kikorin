@@ -236,7 +236,7 @@ dependencies = [
  "console_error_panic_hook",
  "console_log",
  "ecs",
- "getrandom 0.2.17",
+ "getrandom",
  "js-sys",
  "log",
  "netcode",
@@ -304,17 +304,6 @@ dependencies = [
  "libc",
  "wasi",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "getrandom"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
-dependencies = [
- "cfg-if",
- "libc",
- "r-efi",
 ]
 
 [[package]]
@@ -466,11 +455,6 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "ecs",
- "js-sys",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-peers",
- "web-sys",
 ]
 
 [[package]]
@@ -657,12 +641,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "r-efi"
-version = "6.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
-
-[[package]]
 name = "rapier3d"
 version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -752,15 +730,6 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
-]
-
-[[package]]
-name = "serde-json-wasm"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "479b4dbc401ca13ee8ce902851b834893251404c4f3c65370a49e047a6be09a5"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -926,17 +895,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
 
 [[package]]
-name = "uuid"
-version = "1.23.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
-dependencies = [
- "getrandom 0.4.3",
- "js-sys",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "virtue"
 version = "0.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -967,8 +925,6 @@ dependencies = [
  "cfg-if",
  "once_cell",
  "rustversion",
- "serde",
- "serde_json",
  "wasm-bindgen-macro",
  "wasm-bindgen-shared",
 ]
@@ -1053,33 +1009,6 @@ name = "wasm-bindgen-test-shared"
 version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c31d56021e873866c968588ed85ccdf56db5c426e44afdb4618c39895104b920"
-
-[[package]]
-name = "wasm-peers"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "844021ded98404e3e28bd49b15968e4c56e84607a6126fa04cce492ba6f28518"
-dependencies = [
- "console_error_panic_hook",
- "js-sys",
- "log",
- "serde",
- "serde-json-wasm",
- "uuid",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-peers-protocol",
- "web-sys",
-]
-
-[[package]]
-name = "wasm-peers-protocol"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "597a4960581ab8e7999bbbdc28f3807434de0e82a4d064846ffa1f5f0f2418e8"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "web-sys"

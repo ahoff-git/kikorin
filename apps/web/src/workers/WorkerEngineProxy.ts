@@ -4,10 +4,13 @@
 // remain synchronous from the caller's perspective.
 // The worker drives its own simulation loop — there is no tick() method here.
 
-import type { AiConfigInput, JsTerrainBlock, JsWaypoint, NavConfigInput, PatchBundle, TerrainBlockInput } from '@kikorin/adapter';
+import type { AiConfigInput, JsTerrainBlock, JsWaypoint, MonsterConfigInput, NavConfigInput, PatchBundle, PlayerConfigInput, PlayerInputState, TerrainBlockInput } from '@kikorin/adapter';
+
+type NetOutItem = { peer: string | null; data: Uint8Array };
 
 type WorkerOut =
   | { type: 'patches'; bundle: PatchBundle | null }
+  | { type: 'net_out'; items: NetOutItem[] }
   | { type: 'ack'; id: number; result: unknown };
 
 export class WorkerEngineProxy {
@@ -15,6 +18,7 @@ export class WorkerEngineProxy {
   private seq = 0;
   private pending = new Map<number, (result: unknown) => void>();
   private patchCb: ((bundle: PatchBundle | null) => void) | null = null;
+  private netOutCb: ((items: NetOutItem[]) => void) | null = null;
 
   constructor(worker: Worker) {
     this.worker = worker;
@@ -22,6 +26,8 @@ export class WorkerEngineProxy {
       const msg = e.data;
       if (msg.type === 'patches') {
         this.patchCb?.(msg.bundle);
+      } else if (msg.type === 'net_out') {
+        this.netOutCb?.(msg.items);
       } else if (msg.type === 'ack') {
         const resolve = this.pending.get(msg.id);
         if (resolve) { resolve(msg.result); this.pending.delete(msg.id); }
@@ -33,6 +39,11 @@ export class WorkerEngineProxy {
     this.patchCb = cb;
   }
 
+  /** Outbound peer payloads from the engine — the transport layer sends them. */
+  onNetOut(cb: ((items: NetOutItem[]) => void) | null): void {
+    this.netOutCb = cb;
+  }
+
   private request<T>(): [number, Promise<T>] {
     const id = this.seq++;
     const p = new Promise<T>(res => this.pending.set(id, res as (v: unknown) => void));
@@ -40,12 +51,27 @@ export class WorkerEngineProxy {
   }
 
   /** Load the WASM engine inside the worker. Must be awaited before any other call. */
-  init(signalingUrl?: string, sessionId?: string): Promise<void> {
+  init(): Promise<void> {
     const [id, p] = this.request<void>();
     // Pass origin so the worker can build an absolute WASM URL even when
     // Turbopack serves the worker from a blob URL (self.location.origin = "null").
-    this.worker.postMessage({ type: 'init', id, signalingUrl, sessionId, origin: location.origin });
+    this.worker.postMessage({ type: 'init', id, origin: location.origin });
     return p;
+  }
+
+  /** Transport bridge: a peer's data channel opened. Fire-and-forget. */
+  net_peer_connected(peerId: string): void {
+    this.worker.postMessage({ type: 'net_peer_connected', peerId });
+  }
+
+  /** Transport bridge: a peer's data channel closed. Fire-and-forget. */
+  net_peer_disconnected(peerId: string): void {
+    this.worker.postMessage({ type: 'net_peer_disconnected', peerId });
+  }
+
+  /** Transport bridge: inbound payload from a peer. Fire-and-forget. */
+  net_ingest(peerId: string, data: Uint8Array): void {
+    this.worker.postMessage({ type: 'net_ingest', peerId, data });
   }
 
   set_entity_velocity(eid: number, vx: number, vy: number, vz: number): void {
@@ -66,9 +92,9 @@ export class WorkerEngineProxy {
     return p;
   }
 
-  spawn_bullet(x: number, y: number, z: number, vx: number, vy: number, vz: number): Promise<number> {
+  spawn_bullet(x: number, y: number, z: number, vx: number, vy: number, vz: number, net_flags: number): Promise<number> {
     const [id, p] = this.request<number>();
-    this.worker.postMessage({ type: 'spawn_bullet', id, x, y, z, vx, vy, vz });
+    this.worker.postMessage({ type: 'spawn_bullet', id, x, y, z, vx, vy, vz, net_flags });
     return p;
   }
 
@@ -88,20 +114,60 @@ export class WorkerEngineProxy {
     this.worker.postMessage({ type: 'set_nav_config', cfg });
   }
 
+  /** Override player controller/combat tuning. Fire-and-forget. */
+  set_player_config(cfg: PlayerConfigInput): void {
+    this.worker.postMessage({ type: 'set_player_config', cfg });
+  }
+
+  /** Override monster spawn/respawn tuning. Fire-and-forget. */
+  set_monster_config(cfg: MonsterConfigInput): void {
+    this.worker.postMessage({ type: 'set_monster_config', cfg });
+  }
+
+  /** Hand the entity to the engine's player controller. Fire-and-forget. */
+  register_player(eid: number): void {
+    this.worker.postMessage({ type: 'register_player', eid });
+  }
+
+  /** Latest raw input state; call once per frame. Fire-and-forget. */
+  set_player_input(input: PlayerInputState): void {
+    this.worker.postMessage({ type: 'set_player_input', input });
+  }
+
+  /** Fire one bullet along the player's facing. Fire-and-forget. */
+  player_fire(): void {
+    this.worker.postMessage({ type: 'player_fire' });
+  }
+
+  /** Spawn monsters on the configured ring. Fire-and-forget; spawns arrive as lifecycle patches. */
+  spawn_monsters(count: number): void {
+    this.worker.postMessage({ type: 'spawn_monsters', count });
+  }
+
   find_path(sx: number, sy: number, sz: number, gx: number, gz: number, canJump: boolean): Promise<JsWaypoint[] | null> {
     const [id, p] = this.request<JsWaypoint[] | null>();
     this.worker.postMessage({ type: 'find_path', id, sx, sy, sz, gx, gz, canJump });
     return p;
   }
 
-  /** Update the monster pathfinding goal. Fire-and-forget; call once per frame. */
+  /** Update the default monster goal. Fire-and-forget; call once per frame. */
   update_monster_goal(gx: number, gz: number): void {
     this.worker.postMessage({ type: 'update_monster_goal', gx, gz });
   }
 
+  /** Give one monster its own goal, overriding the default until cleared. */
+  set_monster_goal(eid: number, gx: number, gz: number): void {
+    this.worker.postMessage({ type: 'set_monster_goal', eid, gx, gz });
+  }
+
+  /** Revert a monster to the default goal. */
+  clear_monster_goal(eid: number): void {
+    this.worker.postMessage({ type: 'clear_monster_goal', eid });
+  }
+
   /** Initialise (or reinitialise) WebRTC networking inside the worker. Fire-and-forget. */
-  init_networking(sessionId: string, signalingUrl: string): void {
-    this.worker.postMessage({ type: 'init_networking', sessionId, signalingUrl });
+  init_networking(sessionId: string, signalingUrl: string, stunUrl?: string): void {
+    this.worker.postMessage({ type: 'init_networking', sessionId, signalingUrl, stunUrl });
   }
 
   terminate(): void {

@@ -3,6 +3,7 @@ export type {
   SemanticPatch,
   NetPatch,
   HitPatch,
+  LifecyclePatch,
   MetricsPatch,
   PatchBundle,
   EngineHandle,
@@ -12,6 +13,9 @@ export type {
   TerrainBlockInput,
   AiConfigInput,
   NavConfigInput,
+  PlayerInputState,
+  PlayerConfigInput,
+  MonsterConfigInput,
 } from './types';
 
 export { Channel } from './channel';
@@ -22,4 +26,16 @@ export {
   netChannel,
   metricsChannel,
   hitsChannel,
+  lifecycleChannel,
+  EMPTY_METRICS,
+  METRIC_FIELDS,
 } from './channels';
+
+export {
+  NET_LOCAL,
+  NET_BULLET,
+  NET_MONSTER,
+  NET_REPLICATED,
+  NET_PREDICTABLE,
+  NET_LOW_URGENCY,
+} from './netFlags';

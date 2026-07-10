@@ -3,6 +3,8 @@ import type { TerrainBlockInput } from '@kikorin/adapter';
 // The kikorin castle map. Game data, not engine data: the engine receives these
 // blocks via load_map(), spawns a static body per block, and derives the navmesh
 // bounds from this geometry. `kind` only affects mesh styling on our side.
+// NOTE: e2e/player-location-metrics.spec.ts teleports to coordinates on specific
+// blocks below — moving them requires updating that spec's PLAYER_LOCATIONS.
 const platform = (x: number, y: number, z: number, hw: number, hh: number, hd: number): TerrainBlockInput =>
   ({ x, y, z, hw, hh, hd, kind: 'platform' });
 const floor = (x: number, y: number, z: number, hw: number, hh: number, hd: number): TerrainBlockInput =>

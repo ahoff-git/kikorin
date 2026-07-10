@@ -3,12 +3,27 @@ use std::collections::HashMap;
 
 pub type NodeId = u32;
 
+/// Node-lookup snap window, in grid cells around the query point (see `nearest_node`).
+const SNAP_RADIUS_CELLS: i32 = 2;
+
+// A* runs on integer costs; the edge cost and the heuristic must scale by the
+// same factor — if they diverged the heuristic could overestimate and break
+// A*'s shortest-path guarantee.
+const COST_SCALE: f32 = 1000.0;
+
+// Optional per-request cost jitter so monster groups don't single-file: each
+// (node, edge, seed) triple hashes to a deterministic bump of at most this
+// fraction of the edge cost — enough to pick between near-equal routes without
+// ever preferring a clearly longer one.
+const ROUTE_NOISE_MAX_FRACTION: f32 = 0.05;
+// Knuth multiplicative hash constant.
+const ROUTE_NOISE_HASH_MULT: u64 = 2654435761;
+
+/// Mesh bounds are not part of the config: the spatial index is an unbounded
+/// grid hashmap, so the mesh covers wherever nodes are added. Callers own the
+/// sampling domain.
 pub struct NavMeshConfig {
     pub cell_size: f32,
-    pub min_x: f32,
-    pub max_x: f32,
-    pub min_z: f32,
-    pub max_z: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,7 +58,6 @@ struct Edge {
 /// NavMesh wrapping the `pathfinding` crate's A* implementation.
 /// Nodes are 3-D world positions; edges carry cost and jump/drop metadata.
 pub struct NavMesh {
-    _config: NavMeshConfig,
     nodes: Vec<[f32; 3]>,
     edges: Vec<Vec<Edge>>,
     // spatial index: bucket (grid_x, grid_z) → Vec<NodeId>
@@ -53,13 +67,11 @@ pub struct NavMesh {
 
 impl NavMesh {
     pub fn new(config: NavMeshConfig) -> Self {
-        let cell_size = config.cell_size;
         Self {
-            _config: config,
             nodes: Vec::new(),
             edges: Vec::new(),
             grid: HashMap::new(),
-            cell_size,
+            cell_size: config.cell_size,
         }
     }
 
@@ -93,54 +105,36 @@ impl NavMesh {
     }
 
     pub fn nearest_walkable(&self, x: f32, z: f32) -> Option<NodeId> {
-        self.nearest_in_radius(x, z, f32::INFINITY)
+        self.nearest_node(x, None, z)
     }
 
     /// Like `nearest_walkable` but uses full 3-D distance, so a monster
     /// standing on the ground level won't snap to a platform node above it.
     pub fn nearest_walkable_3d(&self, x: f32, y: f32, z: f32) -> Option<NodeId> {
-        self.nearest_3d_in_radius(x, y, z, f32::INFINITY)
+        self.nearest_node(x, Some(y), z)
     }
 
-    fn nearest_in_radius(&self, x: f32, z: f32, max_dist: f32) -> Option<NodeId> {
+    /// Nearest node to the query point; `y = None` compares XZ distance only.
+    /// Only nodes within ±SNAP_RADIUS_CELLS grid cells are considered — a query
+    /// farther off-mesh than that returns None even if reachable nodes exist
+    /// beyond the window.
+    fn nearest_node(&self, x: f32, y: Option<f32>, z: f32) -> Option<NodeId> {
         let mut best_id = None;
-        let mut best_dist = max_dist;
+        let mut best_dist = f32::INFINITY;
 
         let (gx, gz) = self.grid_key(x, z);
-        let radius = 2_i32;
-        for dx in -radius..=radius {
-            for dz in -radius..=radius {
-                if let Some(candidates) = self.grid.get(&(gx + dx, gz + dz)) {
-                    for &id in candidates {
-                        let [nx, _ny, nz] = self.nodes[id as usize];
-                        let d = ((nx - x).powi(2) + (nz - z).powi(2)).sqrt();
-                        if d < best_dist {
-                            best_dist = d;
-                            best_id = Some(id);
-                        }
-                    }
-                }
-            }
-        }
-        best_id
-    }
-
-    fn nearest_3d_in_radius(&self, x: f32, y: f32, z: f32, max_dist: f32) -> Option<NodeId> {
-        let mut best_id = None;
-        let mut best_dist = max_dist;
-
-        let (gx, gz) = self.grid_key(x, z);
-        let radius = 2_i32;
-        for dx in -radius..=radius {
-            for dz in -radius..=radius {
-                if let Some(candidates) = self.grid.get(&(gx + dx, gz + dz)) {
-                    for &id in candidates {
-                        let [nx, ny, nz] = self.nodes[id as usize];
-                        let d = ((nx - x).powi(2) + (ny - y).powi(2) + (nz - z).powi(2)).sqrt();
-                        if d < best_dist {
-                            best_dist = d;
-                            best_id = Some(id);
-                        }
+        for dx in -SNAP_RADIUS_CELLS..=SNAP_RADIUS_CELLS {
+            for dz in -SNAP_RADIUS_CELLS..=SNAP_RADIUS_CELLS {
+                let Some(candidates) = self.grid.get(&(gx + dx, gz + dz)) else {
+                    continue;
+                };
+                for &id in candidates {
+                    let [nx, ny, nz] = self.nodes[id as usize];
+                    let dy = y.map_or(0.0, |y| ny - y);
+                    let d = ((nx - x).powi(2) + dy.powi(2) + (nz - z).powi(2)).sqrt();
+                    if d < best_dist {
+                        best_dist = d;
+                        best_id = Some(id);
                     }
                 }
             }
@@ -182,12 +176,12 @@ impl NavMesh {
                         }
                         let noise = seed.map_or(0.0, |s| {
                             let h = (n as u64)
-                                .wrapping_mul(2654435761)
+                                .wrapping_mul(ROUTE_NOISE_HASH_MULT)
                                 .wrapping_add(e.to as u64)
                                 .wrapping_add(s as u64);
-                            (h % 100) as f32 / 100.0 * 0.05 * e.cost
+                            (h % 100) as f32 / 100.0 * ROUTE_NOISE_MAX_FRACTION * e.cost
                         });
-                        let cost_fixed = ((e.cost + noise) * 1000.0) as u32;
+                        let cost_fixed = ((e.cost + noise) * COST_SCALE) as u32;
                         Some((e.to, cost_fixed))
                     })
                     .collect::<Vec<_>>()
@@ -197,7 +191,7 @@ impl NavMesh {
                 let dx = nx - gx;
                 let dy = ny - gy;
                 let dz = nz - gz;
-                ((dx * dx + dy * dy + dz * dz).sqrt() * 1000.0) as u32
+                ((dx * dx + dy * dy + dz * dz).sqrt() * COST_SCALE) as u32
             },
             |&n| n == goal_node,
         );
@@ -288,13 +282,7 @@ mod tests {
     use super::*;
 
     fn build_grid_mesh(size: usize, wall_ratio: f32, seed: u64) -> (NavMesh, NodeId, NodeId) {
-        let mut mesh = NavMesh::new(NavMeshConfig {
-            cell_size: 1.0,
-            min_x: 0.0,
-            max_x: size as f32,
-            min_z: 0.0,
-            max_z: size as f32,
-        });
+        let mut mesh = NavMesh::new(NavMeshConfig { cell_size: 1.0 });
 
         // Deterministic wall set using a simple LCG
         let mut rng = seed;
@@ -368,28 +356,48 @@ mod tests {
 
     #[test]
     fn astar_finds_path_on_32x32_grid() {
-        let (mesh, _start, _goal) = build_grid_mesh(32, 0.20, 42);
+        // A* must agree with BFS ground-truth reachability on the same graph —
+        // random walls may or may not disconnect the corners for a given seed,
+        // so reachability is computed, not assumed.
+        let (mesh, start, goal) = build_grid_mesh(32, 0.20, 42);
+
+        let mut seen = vec![false; mesh.nodes.len()];
+        let mut queue = std::collections::VecDeque::from([start]);
+        seen[start as usize] = true;
+        while let Some(n) = queue.pop_front() {
+            for e in &mesh.edges[n as usize] {
+                if !seen[e.to as usize] {
+                    seen[e.to as usize] = true;
+                    queue.push_back(e.to);
+                }
+            }
+        }
+        let reachable = seen[goal as usize];
+
+        let [sx, _, sz] = mesh.nodes[start as usize];
+        let [gx, _, gz] = mesh.nodes[goal as usize];
         let path = mesh.find_path(PathRequest {
-            start: [0.5, 0.0, 0.5],
-            goal: [31.5, 0.0, 31.5],
+            start: [sx, 0.0, sz],
+            goal: [gx, 0.0, gz],
             route_seed: None,
             can_jump: true,
             start_y: None,
         });
+
+        assert_eq!(
+            path.is_some(),
+            reachable,
+            "A* must find a path exactly when BFS says the goal is reachable",
+        );
         if let Some(p) = path {
-            assert!(!p.is_empty());
+            let last = p.last().unwrap();
+            assert_eq!((last.x, last.z), (gx, gz), "path must end at the goal node");
         }
     }
 
     #[test]
     fn astar_returns_none_for_isolated_goal() {
-        let mut mesh = NavMesh::new(NavMeshConfig {
-            cell_size: 1.0,
-            min_x: 0.0,
-            max_x: 4.0,
-            min_z: 0.0,
-            max_z: 4.0,
-        });
+        let mut mesh = NavMesh::new(NavMeshConfig { cell_size: 1.0 });
         // Only two isolated nodes, no edges between them
         mesh.add_node(0.5, 0.0, 0.5); // 0
         mesh.add_node(3.5, 0.0, 3.5); // 1
@@ -406,36 +414,95 @@ mod tests {
 
     #[test]
     fn route_seed_produces_different_paths() {
+        // The noise is a small deterministic tie-breaker, so any single seed pair
+        // may legitimately pick the same optimal route; the contract is that seed
+        // variety exists — some seed must diverge from the baseline.
         let (mesh, _, _) = build_grid_mesh(16, 0.10, 7);
-        let p1 = mesh.find_path(PathRequest {
+        let request = |seed: u32| PathRequest {
             start: [0.5, 0.0, 0.5],
             goal: [15.5, 0.0, 15.5],
-            route_seed: Some(1),
+            route_seed: Some(seed),
             can_jump: true,
             start_y: None,
+        };
+
+        let base = mesh.find_path(request(1)).expect("seeded path must exist");
+        let diverged = (2..=20).any(|s| {
+            mesh.find_path(request(s)).expect("seeded path must exist") != base
         });
-        let p2 = mesh.find_path(PathRequest {
-            start: [0.5, 0.0, 0.5],
-            goal: [15.5, 0.0, 15.5],
-            route_seed: Some(999),
-            can_jump: true,
-            start_y: None,
-        });
-        assert!(p1.is_some());
-        assert!(p2.is_some());
+        assert!(
+            diverged,
+            "at least one seed in 2..=20 must produce a route different from seed 1",
+        );
+    }
+
+    /// simplify() drops intermediate waypoints on a straight segment.
+    #[test]
+    fn simplify_collapses_collinear_waypoints() {
+        let mut mesh = NavMesh::new(NavMeshConfig { cell_size: 1.0 });
+        // Five collinear nodes in a chain — only the endpoints should survive.
+        let ids: Vec<NodeId> = (0..5)
+            .map(|i| mesh.add_node(i as f32 + 0.5, 0.0, 0.5))
+            .collect();
+        for w in ids.windows(2) {
+            mesh.add_edge(w[0], w[1], 1.0, false, false);
+        }
+
+        let path = mesh
+            .find_path(PathRequest {
+                start: [0.5, 0.0, 0.5],
+                goal: [4.5, 0.0, 0.5],
+                route_seed: None,
+                can_jump: true,
+                start_y: None,
+            })
+            .expect("straight chain must have a path");
+
+        assert_eq!(
+            path.len(),
+            2,
+            "collinear intermediates should be simplified away: {path:?}"
+        );
+    }
+
+    /// Jump waypoints are never simplified away, even when perfectly collinear —
+    /// the follower needs the jump flag at the exact takeoff-destination node.
+    #[test]
+    fn simplify_preserves_jump_waypoints() {
+        let mut mesh = NavMesh::new(NavMeshConfig { cell_size: 1.0 });
+        let ids: Vec<NodeId> = (0..4)
+            .map(|i| mesh.add_node(i as f32 + 0.5, 0.0, 0.5))
+            .collect();
+        mesh.add_edge(ids[0], ids[1], 1.0, false, false);
+        mesh.add_edge(ids[1], ids[2], 1.0, true, false); // jump edge, collinear
+        mesh.add_edge(ids[2], ids[3], 1.0, false, false);
+
+        let path = mesh
+            .find_path(PathRequest {
+                start: [0.5, 0.0, 0.5],
+                goal: [3.5, 0.0, 0.5],
+                route_seed: None,
+                can_jump: true,
+                start_y: None,
+            })
+            .expect("chain with jump edge must have a path");
+
+        let jump_wp = path
+            .iter()
+            .find(|wp| wp.requires_jump)
+            .expect("jump waypoint must survive simplification");
+        assert_eq!(
+            (jump_wp.x, jump_wp.z),
+            (2.5, 0.5),
+            "jump flag must stay on the jump edge's destination node"
+        );
     }
 
     /// A graph where the only path goes through a jump edge.
     /// can_jump=true finds a path; can_jump=false returns None.
     #[test]
     fn can_jump_false_blocks_jump_only_path() {
-        let mut mesh = NavMesh::new(NavMeshConfig {
-            cell_size: 1.0,
-            min_x: 0.0,
-            max_x: 3.0,
-            min_z: 0.0,
-            max_z: 1.0,
-        });
+        let mut mesh = NavMesh::new(NavMeshConfig { cell_size: 1.0 });
         // Three nodes in a line; the only edge from 0→1 requires a jump.
         let a = mesh.add_node(0.5, 0.0, 0.5);
         let b = mesh.add_node(1.5, 1.0, 0.5); // elevated — jump required
@@ -472,13 +539,7 @@ mod tests {
 
     #[test]
     fn jump_metadata_is_attached_to_destination_waypoint() {
-        let mut mesh = NavMesh::new(NavMeshConfig {
-            cell_size: 1.0,
-            min_x: 0.0,
-            max_x: 3.0,
-            min_z: 0.0,
-            max_z: 1.0,
-        });
+        let mut mesh = NavMesh::new(NavMeshConfig { cell_size: 1.0 });
 
         let lower = mesh.add_node(0.5, 0.0, 0.5);
         let upper = mesh.add_node(1.5, 1.0, 0.5);
@@ -509,13 +570,7 @@ mod tests {
     /// same XZ but differ in height (ground vs. elevated platform).
     #[test]
     fn start_y_selects_correct_height_layer() {
-        let mut mesh = NavMesh::new(NavMeshConfig {
-            cell_size: 1.0,
-            min_x: 0.0,
-            max_x: 5.0,
-            min_z: 0.0,
-            max_z: 1.0,
-        });
+        let mut mesh = NavMesh::new(NavMeshConfig { cell_size: 1.0 });
         // Ground layer: nodes at y=0
         let g0 = mesh.add_node(0.5, 0.0, 0.5);
         let g1 = mesh.add_node(1.5, 0.0, 0.5);

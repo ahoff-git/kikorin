@@ -13,18 +13,17 @@ import {
   netChannel,
   metricsChannel,
   hitsChannel,
+  lifecycleChannel,
 } from "@kikorin/adapter";
 import type { PatchBundle } from "@kikorin/adapter";
 import { WorkerEngineProxy } from "../workers/WorkerEngineProxy";
 import { eventBus } from "@kikorin/events";
+import { log, logLevels } from "@kikorin/util";
 import { recordE2EFrame, recordE2EPatch } from "./e2eMetrics";
-
-export type SendInput = (payload: Uint8Array) => void;
 
 export interface UseEngineReturn {
   /** The engine proxy; null until the worker is initialised and WASM is loaded. */
   engine: WorkerEngineProxy | null;
-  sendInput: SendInput;
   /**
    * Inject per-frame game logic (camera follow, control processing, etc.).
    * The callback runs after the tick command is sent and before rendering each frame.
@@ -41,12 +40,7 @@ export interface UseEngineReturn {
  * to the main thread at ~60 Hz. The render loop consumes those patches asynchronously,
  * so rendering always uses the most recent flushed positions.
  */
-export function useEngine(
-  canvasRef: RefObject<HTMLCanvasElement | null>,
-  signalingUrl?: string,
-  sessionId?: string,
-): UseEngineReturn {
-  const sendInputRef = useRef<SendInput>(() => {});
+export function useEngine(canvasRef: RefObject<HTMLCanvasElement | null>): UseEngineReturn {
   const onFrameRef = useRef<(() => void) | null>(null);
   const [engine, setEngine] = useState<WorkerEngineProxy | null>(null);
 
@@ -55,8 +49,13 @@ export function useEngine(
     let running = false;
     let unsubRender: (() => void) | null = null;
     let proxy: WorkerEngineProxy | null = null;
-    // EMA of worker tick_ms — α=0.1, converges in ~10 ticks.
-    let emaTickMs = 16;
+    // EMA of the Rust tick's execution cost (tick_ms) — α=0.1. This measures how
+    // expensive a tick is, NOT how often ticks run.
+    let emaTickMs = 4;
+    // Actual TPS is measured from the bundle's tick counter against wall-clock
+    // time between flushes (~250 when the sim keeps up with its 4 ms step).
+    let prevTick = 0;
+    let prevTickTimeMs = 0;
 
     async function start() {
       const canvas = canvasRef.current;
@@ -75,20 +74,32 @@ export function useEngine(
         if (bundle.semantic.length > 0) hudChannel.emit(bundle.semantic);
         if (bundle.net.length > 0) netChannel.emit(bundle.net);
         if (bundle.hits.length > 0) hitsChannel.emit(bundle.hits);
+        if (bundle.lifecycle.length > 0) lifecycleChannel.emit(bundle.lifecycle);
         metricsChannel.emit(bundle.metrics);
         recordE2EPatch(bundle);
+
         emaTickMs = emaTickMs * 0.9 + bundle.metrics.tick_ms * 0.1;
+        const now = performance.now();
+        const ticksPerSecond =
+          prevTickTimeMs > 0 && now > prevTickTimeMs
+            ? ((bundle.tick - prevTick) * 1000) / (now - prevTickTimeMs)
+            : 0;
+        prevTick = bundle.tick;
+        prevTickTimeMs = now;
+
         eventBus.emit('ui:timeMetricsUpdate', {
-          timeMetrics: { avgDelta: Math.round(emaTickMs * 10) / 10, ticksPerSecond: Math.round(1000 / emaTickMs) },
+          timeMetrics: {
+            avgDelta: Math.round(emaTickMs * 10) / 10,
+            ticksPerSecond: Math.round(ticksPerSecond),
+          },
         });
       });
 
       // Load WASM inside the worker thread (async; main thread stays free).
-      await proxy.init(signalingUrl, sessionId);
+      await proxy.init();
 
       setupRenderer(canvas);
       unsubRender = subscribeToRenderChannel();
-      sendInputRef.current = () => {};
 
       running = true;
 
@@ -105,7 +116,7 @@ export function useEngine(
       setEngine(proxy);
     }
 
-    start().catch(console.error);
+    start().catch((err) => log(logLevels.error, "engine start failed", ["engine"], err));
 
     return () => {
       running = false;
@@ -115,13 +126,12 @@ export function useEngine(
       proxy?.terminate();
       setEngine(null);
     };
-  // canvasRef is a stable ref — safe to omit. signalingUrl/sessionId rarely change.
+  // canvasRef is a stable ref — safe to omit.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signalingUrl, sessionId]);
+  }, []);
 
   return {
     engine,
-    sendInput: (payload) => sendInputRef.current(payload),
     onFrameRef,
   };
 }

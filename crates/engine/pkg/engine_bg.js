@@ -13,21 +13,19 @@ export class Engine {
         wasm.__wbg_engine_free(ptr, 0);
     }
     /**
-     * Apply a serialized input event or inbound peer message.
-     * @param {Uint8Array} payload
-     */
-    apply_input(payload) {
-        const ptr0 = passArray8ToWasm0(payload, wasm.__wbindgen_malloc);
-        const len0 = WASM_VECTOR_LEN;
-        wasm.engine_apply_input(this.__wbg_ptr, ptr0, len0);
-    }
-    /**
      * Build (or rebuild) the navmesh by scanning floor geometry via the physics world.
      * Bounds are derived from the loaded floor entities (AABB padded by one cell), so
      * maps of any size and location work without engine changes.
      */
     build_navmesh() {
         wasm.engine_build_navmesh(this.__wbg_ptr);
+    }
+    /**
+     * Revert a monster to the default goal.
+     * @param {number} id
+     */
+    clear_monster_goal(id) {
+        wasm.engine_clear_monster_goal(this.__wbg_ptr, id);
     }
     /**
      * Deserialize a PatchBundle byte array into a JS object.
@@ -70,18 +68,6 @@ export class Engine {
         return ret;
     }
     /**
-     * Initialize WebRTC peer networking (WASM only).
-     * @param {string} session_id
-     * @param {string} signaling_url
-     */
-    init_networking(session_id, signaling_url) {
-        const ptr0 = passStringToWasm0(session_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(signaling_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len1 = WASM_VECTOR_LEN;
-        wasm.engine_init_networking(this.__wbg_ptr, ptr0, len0, ptr1, len1);
-    }
-    /**
      * Load a map from a JS array of `{ x, y, z, hw, hh, hd, kind }` blocks: spawns a
      * static terrain entity per block, builds the navmesh from the resulting floor
      * geometry, and returns the same blocks with `eid` added for mesh creation on the
@@ -93,6 +79,47 @@ export class Engine {
         const ret = wasm.engine_load_map(this.__wbg_ptr, blocks);
         return ret;
     }
+    /**
+     * Inbound payload from a peer; applied at the start of the next tick.
+     * @param {string} peer_id
+     * @param {Uint8Array} payload
+     */
+    net_ingest(peer_id, payload) {
+        const ptr0 = passStringToWasm0(peer_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(payload, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.engine_net_ingest(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+    }
+    /**
+     * Initialize WebRTC peer networking (WASM only).
+     * A peer's data channel opened. Queues a late-join full sync + PeerJoined.
+     * @param {string} peer_id
+     */
+    net_peer_connected(peer_id) {
+        const ptr0 = passStringToWasm0(peer_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.engine_net_peer_connected(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
+     * A peer's data channel closed. Its mirrors despawn next tick (the silent
+     * timeout remains as a backstop for channels that die without closing).
+     * @param {string} peer_id
+     */
+    net_peer_disconnected(peer_id) {
+        const ptr0 = passStringToWasm0(peer_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.engine_net_peer_disconnected(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
+     * Everything the engine wants sent since the last call, as
+     * `[{ peer: string | null, data: Uint8Array }]` — null peer = broadcast.
+     * @returns {any}
+     */
+    net_take_outbound() {
+        const ret = wasm.engine_net_take_outbound(this.__wbg_ptr);
+        return ret;
+    }
     constructor() {
         const ret = wasm.engine_new();
         this.__wbg_ptr = ret;
@@ -100,8 +127,26 @@ export class Engine {
         return this;
     }
     /**
+     * Fire one bullet from the player along its facing + aim pitch (tuning in
+     * PlayerConfig). Ballistic, replicated, predictable; spawn and death reach
+     * the game as lifecycle patches.
+     */
+    player_fire() {
+        wasm.engine_player_fire(this.__wbg_ptr);
+    }
+    /**
+     * Register the player entity. From then on the engine runs its controller
+     * (facing, movement, jump budget) from set_player_input, fires its bullets
+     * via player_fire, and aims the default monster goal at it every tick.
+     * @param {number} eid
+     */
+    register_player(eid) {
+        wasm.engine_register_player(this.__wbg_ptr, eid);
+    }
+    /**
      * Override monster AI tuning. Accepts a partial JS object; missing fields fall
-     * back to engine defaults (not to previously set values). Invalid input is ignored.
+     * back to engine defaults (not to previously set values). Invalid input is
+     * ignored with a warning.
      * @param {any} cfg
      */
     set_ai_config(cfg) {
@@ -128,12 +173,44 @@ export class Engine {
         wasm.engine_set_log_level(this.__wbg_ptr, _level);
     }
     /**
+     * Override monster spawn/respawn tuning (partial-object semantics).
+     * @param {any} cfg
+     */
+    set_monster_config(cfg) {
+        wasm.engine_set_monster_config(this.__wbg_ptr, cfg);
+    }
+    /**
+     * Give one monster its own goal, overriding the default until cleared.
+     * No-op for entities without monster AI state.
+     * @param {number} id
+     * @param {number} gx
+     * @param {number} gz
+     */
+    set_monster_goal(id, gx, gz) {
+        wasm.engine_set_monster_goal(this.__wbg_ptr, id, gx, gz);
+    }
+    /**
      * Override navmesh build tuning (same partial-object semantics as set_ai_config).
      * Takes effect on the next load_map / build_navmesh call.
      * @param {any} cfg
      */
     set_nav_config(cfg) {
         wasm.engine_set_nav_config(this.__wbg_ptr, cfg);
+    }
+    /**
+     * Override player controller/combat tuning (partial-object semantics).
+     * @param {any} cfg
+     */
+    set_player_config(cfg) {
+        wasm.engine_set_player_config(this.__wbg_ptr, cfg);
+    }
+    /**
+     * Latest raw input state from the UI (call once per frame). Invalid input
+     * is ignored with a warning.
+     * @param {any} input
+     */
+    set_player_input(input) {
+        wasm.engine_set_player_input(this.__wbg_ptr, input);
     }
     /**
      * Spawn a dynamic entity (player, monster, box). Returns the entity ID.
@@ -153,17 +230,20 @@ export class Engine {
         return ret >>> 0;
     }
     /**
-     * Spawn a projectile. The engine integrates its ballistic trajectory each tick.
+     * Spawn a projectile. The engine integrates its ballistic trajectory each
+     * tick. `net_flags` adds the game's networking profile (e.g. NET_REPLICATED
+     * | NET_PREDICTABLE); NET_BULLET is always set.
      * @param {number} x
      * @param {number} y
      * @param {number} z
      * @param {number} vx
      * @param {number} vy
      * @param {number} vz
+     * @param {number} net_flags
      * @returns {number}
      */
-    spawn_bullet(x, y, z, vx, vy, vz) {
-        const ret = wasm.engine_spawn_bullet(this.__wbg_ptr, x, y, z, vx, vy, vz);
+    spawn_bullet(x, y, z, vx, vy, vz, net_flags) {
+        const ret = wasm.engine_spawn_bullet(this.__wbg_ptr, x, y, z, vx, vy, vz, net_flags);
         return ret >>> 0;
     }
     /**
@@ -192,6 +272,14 @@ export class Engine {
         return ret >>> 0;
     }
     /**
+     * Spawn `count` monsters on a ring around the origin (placement/template
+     * from MonsterConfig). Each spawn surfaces as a lifecycle patch.
+     * @param {number} count
+     */
+    spawn_monsters(count) {
+        wasm.engine_spawn_monsters(this.__wbg_ptr, count);
+    }
+    /**
      * Move an entity immediately, clearing velocity for dynamic bodies.
      * @param {number} id
      * @param {number} x
@@ -204,6 +292,8 @@ export class Engine {
     /**
      * Advance simulation by dt_ms milliseconds.
      * Returns a PatchBundle as a JS object directly — no bincode round-trip.
+     * Thin WASM wrapper: the simulation itself lives in `tick_core` so native
+     * tests can execute full ticks without crossing the JsValue boundary.
      * @param {number} dt_ms
      * @returns {any}
      */
@@ -212,8 +302,9 @@ export class Engine {
         return ret;
     }
     /**
-     * Update the position monsters path toward. Call once per frame before tick()
-     * with the player's current world position.
+     * Update the default goal — the position every monster without a
+     * per-entity override paths toward. Call once per frame before tick()
+     * (kikorin passes the player's position).
      * @param {number} gx
      * @param {number} gz
      */
@@ -225,6 +316,17 @@ if (Symbol.dispose) Engine.prototype[Symbol.dispose] = Engine.prototype.free;
 export function __wbg_Error_92b29b0548f8b746(arg0, arg1) {
     const ret = Error(getStringFromWasm0(arg0, arg1));
     return ret;
+}
+export function __wbg_Number_9a4e0ecb0fa16705(arg0) {
+    const ret = Number(arg0);
+    return ret;
+}
+export function __wbg_String_8564e559799eccda(arg0, arg1) {
+    const ret = String(arg1);
+    const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+    getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
 }
 export function __wbg___wbindgen_boolean_get_fa956cfa2d1bd751(arg0) {
     const v = arg0;
@@ -249,10 +351,6 @@ export function __wbg___wbindgen_is_function_1ff95bcc5517c252(arg0) {
 export function __wbg___wbindgen_is_object_a27215656b807791(arg0) {
     const val = arg0;
     const ret = typeof(val) === 'object' && val !== null;
-    return ret;
-}
-export function __wbg___wbindgen_is_string_ea5e6cc2e4141dfe(arg0) {
-    const ret = typeof(arg0) === 'string';
     return ret;
 }
 export function __wbg___wbindgen_is_undefined_c05833b95a3cf397(arg0) {
@@ -280,48 +378,10 @@ export function __wbg___wbindgen_string_get_b0ca35b86a603356(arg0, arg1) {
 export function __wbg___wbindgen_throw_344f42d3211c4765(arg0, arg1) {
     throw new Error(getStringFromWasm0(arg0, arg1));
 }
-export function __wbg__wbg_cb_unref_fffb441def202758(arg0) {
-    arg0._wbg_cb_unref();
-}
-export function __wbg_addIceCandidate_f7ceaa2f75a37e0a(arg0, arg1) {
-    const ret = arg0.addIceCandidate(arg1);
-    return ret;
-}
 export function __wbg_call_8a2dd23819f8a60a() { return handleError(function (arg0, arg1) {
     const ret = arg0.call(arg1);
     return ret;
 }, arguments); }
-export function __wbg_candidate_c03bb5d81bec0300(arg0) {
-    const ret = arg0.candidate;
-    return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
-}
-export function __wbg_candidate_f7f684cdcc2dfa01(arg0, arg1) {
-    const ret = arg1.candidate;
-    const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len1 = WASM_VECTOR_LEN;
-    getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
-    getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
-}
-export function __wbg_channel_295d3e772fc68baf(arg0) {
-    const ret = arg0.channel;
-    return ret;
-}
-export function __wbg_createAnswer_aa2ae2f1c1d400a3(arg0) {
-    const ret = arg0.createAnswer();
-    return ret;
-}
-export function __wbg_createDataChannel_c6d560e9b1225d62(arg0, arg1, arg2) {
-    const ret = arg0.createDataChannel(getStringFromWasm0(arg1, arg2));
-    return ret;
-}
-export function __wbg_createOffer_bf4e8d6b4b5cea92(arg0) {
-    const ret = arg0.createOffer();
-    return ret;
-}
-export function __wbg_data_328de4280640da92(arg0) {
-    const ret = arg0.data;
-    return ret;
-}
 export function __wbg_debug_87fd9b1a625b7efb(arg0) {
     console.debug(arg0);
 }
@@ -358,14 +418,6 @@ export function __wbg_get_unchecked_6e0ad6d2a41b06f6(arg0, arg1) {
 export function __wbg_get_with_ref_key_6412cf3094599694(arg0, arg1) {
     const ret = arg0[arg1];
     return ret;
-}
-export function __wbg_iceConnectionState_722477d70a05449c(arg0) {
-    const ret = arg0.iceConnectionState;
-    return (__wbindgen_enum_RtcIceConnectionState.indexOf(ret) + 1 || 8) - 1;
-}
-export function __wbg_iceGatheringState_24878fec91d64fb7(arg0) {
-    const ret = arg0.iceGatheringState;
-    return (__wbindgen_enum_RtcIceGatheringState.indexOf(ret) + 1 || 4) - 1;
 }
 export function __wbg_info_eadbe775a8e2e9eb(arg0) {
     console.info(arg0);
@@ -404,6 +456,10 @@ export function __wbg_isArray_0677c962b281d01a(arg0) {
     const ret = Array.isArray(arg0);
     return ret;
 }
+export function __wbg_isSafeInteger_04f36e4056f1b851(arg0) {
+    const ret = Number.isSafeInteger(arg0);
+    return ret;
+}
 export function __wbg_iterator_6f722e4a93058b71() {
     const ret = Symbol.iterator;
     return ret;
@@ -427,18 +483,6 @@ export function __wbg_new_32b398fb48b6d94a() {
     const ret = new Array();
     return ret;
 }
-export function __wbg_new_816428067631f70f() { return handleError(function () {
-    const ret = new RTCPeerConnection();
-    return ret;
-}, arguments); }
-export function __wbg_new_90f6a15d50ef9cc1() { return handleError(function (arg0) {
-    const ret = new RTCIceCandidate(arg0);
-    return ret;
-}, arguments); }
-export function __wbg_new_bf8729ffe10e9ee7() { return handleError(function (arg0, arg1) {
-    const ret = new WebSocket(getStringFromWasm0(arg0, arg1));
-    return ret;
-}, arguments); }
 export function __wbg_new_cd45aabdf6073e84(arg0) {
     const ret = new Uint8Array(arg0);
     return ret;
@@ -447,10 +491,10 @@ export function __wbg_new_da52cf8fe3429cb2() {
     const ret = new Object();
     return ret;
 }
-export function __wbg_new_with_configuration_40ac01bf87e5584e() { return handleError(function (arg0) {
-    const ret = new RTCPeerConnection(arg0);
+export function __wbg_new_from_slice_77cdfb7977362f3c(arg0, arg1) {
+    const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
     return ret;
-}, arguments); }
+}
 export function __wbg_next_6dbf2c0ac8cde20f(arg0) {
     const ret = arg0.next;
     return ret;
@@ -474,42 +518,6 @@ export function __wbg_push_d2ae3af0c1217ae6(arg0, arg1) {
     const ret = arg0.push(arg1);
     return ret;
 }
-export function __wbg_queueMicrotask_0ab5b2d2393e99b9(arg0) {
-    const ret = arg0.queueMicrotask;
-    return ret;
-}
-export function __wbg_queueMicrotask_6a09b7bc46549209(arg0) {
-    queueMicrotask(arg0);
-}
-export function __wbg_resolve_2191a4dfe481c25b(arg0) {
-    const ret = Promise.resolve(arg0);
-    return ret;
-}
-export function __wbg_sdpMLineIndex_25f34f297ced702a(arg0) {
-    const ret = arg0.sdpMLineIndex;
-    return isLikeNone(ret) ? 0xFFFFFF : ret;
-}
-export function __wbg_sdpMid_d3e98f8b4c29e5d9(arg0, arg1) {
-    const ret = arg1.sdpMid;
-    var ptr1 = isLikeNone(ret) ? 0 : passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    var len1 = WASM_VECTOR_LEN;
-    getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
-    getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
-}
-export function __wbg_send_632c4452a512b363() { return handleError(function (arg0, arg1, arg2) {
-    arg0.send(getStringFromWasm0(arg1, arg2));
-}, arguments); }
-export function __wbg_send_df98dd5ede9b3f4d() { return handleError(function (arg0, arg1, arg2) {
-    arg0.send(getStringFromWasm0(arg1, arg2));
-}, arguments); }
-export function __wbg_setLocalDescription_423abfc919239ddf(arg0, arg1) {
-    const ret = arg0.setLocalDescription(arg1);
-    return ret;
-}
-export function __wbg_setRemoteDescription_921ff9a4233c90c7(arg0, arg1) {
-    const ret = arg0.setRemoteDescription(arg1);
-    return ret;
-}
 export function __wbg_set_6be42768c690e380(arg0, arg1, arg2) {
     arg0[arg1] = arg2;
 }
@@ -519,57 +527,6 @@ export function __wbg_set_8535240470bf2500() { return handleError(function (arg0
 }, arguments); }
 export function __wbg_set_8a16b38e4805b298(arg0, arg1, arg2) {
     arg0[arg1 >>> 0] = arg2;
-}
-export function __wbg_set_binaryType_a37b086c78ca7c29(arg0, arg1) {
-    arg0.binaryType = __wbindgen_enum_BinaryType[arg1];
-}
-export function __wbg_set_candidate_b89b8e526c803fd7(arg0, arg1, arg2) {
-    arg0.candidate = getStringFromWasm0(arg1, arg2);
-}
-export function __wbg_set_ice_servers_6f53a44e0587e42f(arg0, arg1) {
-    arg0.iceServers = arg1;
-}
-export function __wbg_set_ondatachannel_54d1710068091335(arg0, arg1) {
-    arg0.ondatachannel = arg1;
-}
-export function __wbg_set_onerror_df3caac09d010d29(arg0, arg1) {
-    arg0.onerror = arg1;
-}
-export function __wbg_set_onicecandidate_0fd31ace2f760bf0(arg0, arg1) {
-    arg0.onicecandidate = arg1;
-}
-export function __wbg_set_oniceconnectionstatechange_3170cd4b61eb8eb0(arg0, arg1) {
-    arg0.oniceconnectionstatechange = arg1;
-}
-export function __wbg_set_onicegatheringstatechange_c32363e95fcf9fef(arg0, arg1) {
-    arg0.onicegatheringstatechange = arg1;
-}
-export function __wbg_set_onmessage_5b4754d6f18ffa95(arg0, arg1) {
-    arg0.onmessage = arg1;
-}
-export function __wbg_set_onmessage_836d2f72130b4706(arg0, arg1) {
-    arg0.onmessage = arg1;
-}
-export function __wbg_set_onnegotiationneeded_4d72799b24f77b10(arg0, arg1) {
-    arg0.onnegotiationneeded = arg1;
-}
-export function __wbg_set_onopen_4f65470ae522a61a(arg0, arg1) {
-    arg0.onopen = arg1;
-}
-export function __wbg_set_onopen_8994b7ffb0ef2792(arg0, arg1) {
-    arg0.onopen = arg1;
-}
-export function __wbg_set_sdp_de28f5c5c5b94fcb(arg0, arg1, arg2) {
-    arg0.sdp = getStringFromWasm0(arg1, arg2);
-}
-export function __wbg_set_sdp_m_line_index_49082bcdf215d6f1(arg0, arg1) {
-    arg0.sdpMLineIndex = arg1 === 0xFFFFFF ? undefined : arg1;
-}
-export function __wbg_set_sdp_mid_c99b69998b5d136f(arg0, arg1, arg2) {
-    arg0.sdpMid = arg1 === 0 ? undefined : getStringFromWasm0(arg1, arg2);
-}
-export function __wbg_set_type_0a410d31ee19e04c(arg0, arg1) {
-    arg0.type = __wbindgen_enum_RtcSdpType[arg1];
 }
 export function __wbg_stack_3b0d974bbf31e44f(arg0, arg1) {
     const ret = arg1.stack;
@@ -594,14 +551,6 @@ export function __wbg_static_accessor_WINDOW_f2829a2234d7819e() {
     const ret = typeof window === 'undefined' ? null : window;
     return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
 }
-export function __wbg_then_16d107c451e9905d(arg0, arg1, arg2) {
-    const ret = arg0.then(arg1, arg2);
-    return ret;
-}
-export function __wbg_then_6ec10ae38b3e92f7(arg0, arg1) {
-    const ret = arg0.then(arg1);
-    return ret;
-}
 export function __wbg_value_a5d5488a9589444a(arg0) {
     const ret = arg0.value;
     return ret;
@@ -609,47 +558,17 @@ export function __wbg_value_a5d5488a9589444a(arg0) {
 export function __wbg_warn_b1370d804fa3e259(arg0) {
     console.warn(arg0);
 }
-export function __wbindgen_cast_0000000000000001(arg0, arg1) {
-    // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 528, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-    const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h4cb0e549c76a2f61);
-    return ret;
-}
-export function __wbindgen_cast_0000000000000002(arg0, arg1) {
-    // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 580, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-    const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__he97b17567bb63af5);
-    return ret;
-}
-export function __wbindgen_cast_0000000000000003(arg0, arg1) {
-    // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 528, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-    const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h4cb0e549c76a2f61_2);
-    return ret;
-}
-export function __wbindgen_cast_0000000000000004(arg0, arg1) {
-    // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("RTCDataChannelEvent")], shim_idx: 525, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-    const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__he3585aedacd1d894);
-    return ret;
-}
-export function __wbindgen_cast_0000000000000005(arg0, arg1) {
-    // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("RTCPeerConnectionIceEvent")], shim_idx: 528, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-    const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h4cb0e549c76a2f61_4);
-    return ret;
-}
-export function __wbindgen_cast_0000000000000006(arg0, arg1) {
-    // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 531, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-    const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hcce9a11005266d23);
-    return ret;
-}
-export function __wbindgen_cast_0000000000000007(arg0) {
+export function __wbindgen_cast_0000000000000001(arg0) {
     // Cast intrinsic for `F64 -> Externref`.
     const ret = arg0;
     return ret;
 }
-export function __wbindgen_cast_0000000000000008(arg0, arg1) {
+export function __wbindgen_cast_0000000000000002(arg0, arg1) {
     // Cast intrinsic for `Ref(String) -> Externref`.
     const ret = getStringFromWasm0(arg0, arg1);
     return ret;
 }
-export function __wbindgen_cast_0000000000000009(arg0) {
+export function __wbindgen_cast_0000000000000003(arg0) {
     // Cast intrinsic for `U64 -> Externref`.
     const ret = BigInt.asUintN(64, arg0);
     return ret;
@@ -663,44 +582,6 @@ export function __wbindgen_init_externref_table() {
     table.set(offset + 2, true);
     table.set(offset + 3, false);
 }
-function wasm_bindgen__convert__closures_____invoke__hcce9a11005266d23(arg0, arg1) {
-    wasm.wasm_bindgen__convert__closures_____invoke__hcce9a11005266d23(arg0, arg1);
-}
-
-function wasm_bindgen__convert__closures_____invoke__h4cb0e549c76a2f61(arg0, arg1, arg2) {
-    wasm.wasm_bindgen__convert__closures_____invoke__h4cb0e549c76a2f61(arg0, arg1, arg2);
-}
-
-function wasm_bindgen__convert__closures_____invoke__h4cb0e549c76a2f61_2(arg0, arg1, arg2) {
-    wasm.wasm_bindgen__convert__closures_____invoke__h4cb0e549c76a2f61_2(arg0, arg1, arg2);
-}
-
-function wasm_bindgen__convert__closures_____invoke__he3585aedacd1d894(arg0, arg1, arg2) {
-    wasm.wasm_bindgen__convert__closures_____invoke__he3585aedacd1d894(arg0, arg1, arg2);
-}
-
-function wasm_bindgen__convert__closures_____invoke__h4cb0e549c76a2f61_4(arg0, arg1, arg2) {
-    wasm.wasm_bindgen__convert__closures_____invoke__h4cb0e549c76a2f61_4(arg0, arg1, arg2);
-}
-
-function wasm_bindgen__convert__closures_____invoke__he97b17567bb63af5(arg0, arg1, arg2) {
-    const ret = wasm.wasm_bindgen__convert__closures_____invoke__he97b17567bb63af5(arg0, arg1, arg2);
-    if (ret[1]) {
-        throw takeFromExternrefTable0(ret[0]);
-    }
-}
-
-
-const __wbindgen_enum_BinaryType = ["blob", "arraybuffer"];
-
-
-const __wbindgen_enum_RtcIceConnectionState = ["new", "checking", "connected", "completed", "failed", "disconnected", "closed"];
-
-
-const __wbindgen_enum_RtcIceGatheringState = ["new", "gathering", "complete"];
-
-
-const __wbindgen_enum_RtcSdpType = ["offer", "pranswer", "answer", "rollback"];
 const EngineFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_engine_free(ptr, 1));
@@ -710,10 +591,6 @@ function addToExternrefTable0(obj) {
     wasm.__wbindgen_externrefs.set(idx, obj);
     return idx;
 }
-
-const CLOSURE_DTORS = (typeof FinalizationRegistry === 'undefined')
-    ? { register: () => {}, unregister: () => {} }
-    : new FinalizationRegistry(state => wasm.__wbindgen_destroy_closure(state.a, state.b));
 
 function debugString(val) {
     // primitive types
@@ -818,34 +695,6 @@ function isLikeNone(x) {
     return x === undefined || x === null;
 }
 
-function makeMutClosure(arg0, arg1, f) {
-    const state = { a: arg0, b: arg1, cnt: 1 };
-    const real = (...args) => {
-
-        // First up with a closure we increment the internal reference
-        // count. This ensures that the Rust closure environment won't
-        // be deallocated while we're invoking it.
-        state.cnt++;
-        const a = state.a;
-        state.a = 0;
-        try {
-            return f(a, state.b, ...args);
-        } finally {
-            state.a = a;
-            real._wbg_cb_unref();
-        }
-    };
-    real._wbg_cb_unref = () => {
-        if (--state.cnt === 0) {
-            wasm.__wbindgen_destroy_closure(state.a, state.b);
-            state.a = 0;
-            CLOSURE_DTORS.unregister(state);
-        }
-    };
-    CLOSURE_DTORS.register(real, state, state);
-    return real;
-}
-
 function passArray8ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 1, 1) >>> 0;
     getUint8ArrayMemory0().set(arg, ptr / 1);
@@ -888,12 +737,6 @@ function passStringToWasm0(arg, malloc, realloc) {
 
     WASM_VECTOR_LEN = offset;
     return ptr;
-}
-
-function takeFromExternrefTable0(idx) {
-    const value = wasm.__wbindgen_externrefs.get(idx);
-    wasm.__externref_table_dealloc(idx);
-    return value;
 }
 
 let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });

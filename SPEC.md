@@ -10,8 +10,8 @@ A modular, data-driven Rust game engine compiled to WASM that lives inside a Nex
 
 | Side | Owns |
 |---|---|
-| **Rust (`crates/`)** | Canonical ECS state, dirty tracking, system execution, Rapier physics, NavMesh A* pathfinding, peer delta protocol, monster AI / bullets, per-tick `PatchBundle` generation |
-| **TypeScript (`packages/`, `apps/web`)** | User input, Three.js rendering, React HUD, WASM loading + worker hosting, adapter channel fan-out, batched consumer-side state updates, **game data** (map layout, tuning) |
+| **Rust (`crates/`)** | Canonical ECS state, dirty tracking, system execution, Rapier physics, NavMesh A* pathfinding, peer delta protocol, monster AI / bullets, the player controller (movement/facing/jump from raw input), combat (fire, damage, death, respawn), monster population, entity lifecycle, per-tick `PatchBundle` generation |
+| **TypeScript (`packages/`, `apps/web`)** | Raw input capture (key/mouse state → `set_player_input`), Three.js rendering (meshes follow lifecycle/render patches), camera, React HUD, WASM loading + worker hosting, adapter channel fan-out, **peer transport** (PeerJS on the main thread over the free public broker — workers have no RTCPeerConnection; bytes shuttle through the engine's `net_*` bridge), **game data** (map layout, tuning) |
 
 TypeScript never writes engine state directly — all mutations go through the WASM API (spawn/destroy/velocity/input methods). The `PatchBundle` is the only per-tick data that crosses the boundary; there are no per-entity getter calls in the hot path.
 
@@ -43,7 +43,7 @@ Each crate compiles and passes its tests independently (`cargo test -p <crate>`)
 1. Rust `Engine::tick(dt_ms)` runs the fixed system order (see [engine.spec.md](./crates/engine/engine.spec.md)) and returns a `PatchBundle` — render, semantic, net, and hit patches for dirty entities plus always-present metrics.
 2. A dedicated Web Worker hosts the WASM engine, self-drives the sim in fixed 4 ms steps, and accumulates bundles between flushes (transforms/semantic merged per entity, net/hit events queued), posting one merged bundle to the main thread at ~60 Hz.
 3. `useEngine` fans the bundle out onto typed pub/sub channels in `packages/adapter`: `renderChannel`, `hudChannel`, `netChannel`, `metricsChannel`, `hitsChannel`.
-4. Consumers subscribe only to what they need: Three.js reads flat render patches, React HUD reads semantic state, debug tooling reads metrics. Raw engine state never floods React or Three.js.
+4. Consumers subscribe only to what they need: Three.js applies flat render patches on emit, game logic reads semantic (grounded) and hit events, and the HUD's tick-cost/TPS readout is derived in `useEngine` from bundle metrics and the tick counter (`metricsChannel` remains available for debug overlays but has no standing subscriber). Raw engine state never floods React or Three.js.
 
 ---
 
@@ -61,7 +61,9 @@ Always emitted; consumers may ignore them. Coverage spans all layers:
 | Networking (inbound apply + outbound flush) | `net_ms` | Rust |
 | Patch generation | `patch_ms` | Rust |
 | WASM boundary (JsValue conversion + call overhead) | `boundary_ms` | worker (observed call time − `tick_ms`) |
-| Rendering pipeline | `frame_ms` EMA | `system-rendering` (`getRenderMetrics()`) |
+| Rendering pipeline | `frame_ms` EMA | `system-rendering` (`getRenderMetrics()`; currently no standing consumer) |
+
+`tick_ms` is the tick's **execution cost**; actual ticks-per-second is measured separately from the bundle tick counter against wall-clock time (`useEngine` for the HUD, `observedTps` in the e2e harness). `1000 / tick_ms` is CPU headroom, not tick rate.
 
 ### Logging
 - Rust: `log::*` gated by `set_log_level(0–4)`; init at `warn`.
@@ -76,7 +78,7 @@ Boundary hot path uses `serde-wasm-bindgen` (tick returns a JS object directly);
 
 - **No duplicated logic** between Rust and TypeScript: when a subsystem moves to Rust, the TS version is deleted, not maintained in parallel.
 - **Modularity invariant**: the crate layering above; siblings never import each other.
-- **TypeScript strict mode**: `strict: true`, no `any`, no `as unknown as X` casts.
+- **TypeScript strict mode**: `strict: true`, no `any`. Unknown-narrowing casts are allowed only at platform boundaries the type system cannot express (e.g. the worker global scope under the DOM lib).
 - **No test mocks for engine state**: tests exercise real ECS/physics/pathfinding logic.
 - **Subsystems that are not active** (e.g., no navmesh built) emit empty patch slices or `null`, never errors.
 - **Dirty flags are cleared at end of tick**, after the patch is generated.
@@ -85,7 +87,7 @@ Boundary hot path uses `serde-wasm-bindgen` (tick returns a JS object directly);
 
 ## Verification
 
-- `cargo test --workspace` — unit tests per crate (ECS lifecycle + 10k-entity perf bound, physics contracts — gravity/grounded/velocity-split/queries/removal, A* pathing/route constraints, patch round-trip + emission rules, netcode delta round-trip, engine navmesh routing + derived bounds).
+- `cargo test --workspace` — unit tests per crate (ECS lifecycle/column invariants + 10k-entity perf bound, physics contracts — gravity/grounded/velocity-split/sensor-exclusion/queries/removal, A* pathing vs BFS ground truth + route constraints + simplify rules, patch round-trip + emission rules, netcode delta round-trip + snapshot eviction, engine navmesh routing + derived bounds + jump latch + bullet lifecycle + separation via native `tick_core`).
 - `pnpm test` — adapter channel delivery, rendering registry/subscription, util suites.
 - `pnpm typecheck` — zero errors, workspace-wide.
 - `pnpm wasm:build` — wasm-pack build (`--target bundler`), renames pkg to `@kikorin/engine-wasm`, copies the binary to `apps/web/public/engine_bg.wasm`. This is the only command that requires the Rust toolchain: `crates/engine/pkg/` is committed, and the web build copies the binary from it into `public/` (`apps/web/scripts/copy-wasm.cjs`), so deploy environments (Vercel) build without Rust. After changing Rust code, run `pnpm wasm:build` and commit the regenerated `pkg/`.
@@ -99,12 +101,13 @@ Each black box has a colocated mini spec. [engine.spec.md](./crates/engine/engin
 
 **Rust crates:**
 - [Engine orchestrator (WASM entry point)](./crates/engine/engine.spec.md)
-- [ECS world & scheduler](./crates/ecs/updateLoop.spec.md)
+- [ECS world](./crates/ecs/ecs.spec.md)
 - [Physics world (Rapier3D)](./crates/physics/physics.spec.md)
 - [Pathfinding (NavMesh A*)](./crates/pathfinding/pathfinding.spec.md)
-- [Netcode peer delta tracker](./crates/netcode/peer.spec.md)
+- [Netcode delta tracker & peer session](./crates/netcode/peer.spec.md)
 - [Patch bundle generation](./crates/patch/bundle.spec.md)
 
 **TypeScript packages:**
-- [Adapter — boundary types & channel fan-out](./packages/adapter/adapter.spec.md)
+- [Adapter — boundary types, constants & channel fan-out](./packages/adapter/adapter.spec.md)
 - [System-rendering — Three.js render bridge](./packages/system-rendering/rendering.spec.md)
+- [Util — logging contract](./packages/util/logging.spec.md)

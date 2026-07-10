@@ -17,7 +17,20 @@ export interface SemanticPatch {
 
 export interface NetPatch {
   peer_id: string;
+  /** Local mirror entity id (matches render patches); 0 for peer_left. */
   entity: number;
+  /**
+   * spawned/updated/despawned track a remote peer's entity via its local
+   * mirror (create/remove meshes on spawned/despawned). peer_joined fires as
+   * soon as the data channel opens (before any entity data); peer_left fires
+   * once when a peer disconnects or times out, after its entities despawn.
+   */
+  kind: 'spawned' | 'updated' | 'despawned' | 'peer_joined' | 'peer_left';
+  /**
+   * The mirror's public net profile (NET_BULLET/NET_MONSTER/NET_PREDICTABLE
+   * bits), present on spawned events — style the remote mesh from it.
+   */
+  flags?: number | null;
 }
 
 export interface HitPatch {
@@ -46,13 +59,75 @@ export interface MetricsPatch {
   boundary_ms?: number;
 }
 
+/**
+ * Local-entity lifecycle event: the engine created or destroyed an entity
+ * (fire, death, respawn, TTL, explicit spawn). Create/remove meshes from these
+ * — the engine is the source of truth for what exists. Terrain is excluded
+ * (load_map returns it); remote mirrors ride NetPatch instead.
+ */
+export interface LifecyclePatch {
+  entity: number;
+  kind: 'spawned' | 'despawned';
+  /** The entity's net-flag profile — style meshes from it. */
+  flags: number;
+}
+
 export interface PatchBundle {
   tick: number;
   render: RenderPatch[];
   semantic: SemanticPatch[];
   net: NetPatch[];
   hits: HitPatch[];
+  lifecycle: LifecyclePatch[];
   metrics: MetricsPatch;
+}
+
+/**
+ * Raw player input state, sent once per frame. The engine turns it into
+ * movement/facing/jumps — TS owns only the key/mouse mapping that produces it.
+ */
+export interface PlayerInputState {
+  /** −1..1 forward/back axis, relative to the player's yaw. */
+  forward?: number;
+  /** −1..1 strafe axis (positive = left). */
+  strafe?: number;
+  /** −1..1 turn axis; ignored while yaw_override is set. */
+  turn?: number;
+  /** Absolute yaw (radians) when the camera drives facing (pointer lock). */
+  yaw_override?: number | null;
+  /** Held state; the engine edge-detects for the jump budget. */
+  jump_held?: boolean;
+  /** Aim pitch (radians), used for firing. */
+  aim_pitch?: number;
+}
+
+/** Player controller/combat tuning overrides (partial; missing = engine defaults). */
+export interface PlayerConfigInput {
+  walk_speed?: number;
+  turn_speed?: number;
+  jump_speed?: number;
+  max_jumps?: number;
+  bullet_speed?: number;
+  bullet_spawn_forward?: number;
+  bullet_spawn_up?: number;
+  bullet_damage?: number;
+}
+
+/** Monster spawn/respawn tuning overrides (partial; missing = engine defaults). */
+export interface MonsterConfigInput {
+  half_width?: number;
+  half_height?: number;
+  half_depth?: number;
+  health?: number;
+  net_flags?: number;
+  spawn_y?: number;
+  ring_base_radius?: number;
+  ring_radius_step?: number;
+  ring_steps?: number;
+  respawn?: boolean;
+  respawn_radius_min?: number;
+  respawn_radius_max?: number;
+  respawn_y?: number;
 }
 
 export type JsWaypoint = {
@@ -71,7 +146,8 @@ export type JsTerrainBlock = {
   hw: number;
   hh: number;
   hd: number;
-  kind: 'floor' | 'wall' | 'platform';
+  /** Opaque styling tag owned by the game; the engine passes it through untouched. */
+  kind: string;
 };
 
 /** One static terrain block of a game-owned map, as passed to load_map. */
@@ -122,7 +198,6 @@ export interface NavConfigInput {
 export interface EngineHandle {
   /** Advance the simulation by dt_ms. Returns a PatchBundle JS object directly. */
   tick(dt_ms: number): PatchBundle | null;
-  apply_input(payload: Uint8Array): void;
   get_metrics(): MetricsPatch;
   set_log_level(level: number): void;
   spawn_entity(payload: Uint8Array): number;
@@ -137,14 +212,33 @@ export interface EngineHandle {
   set_ai_config(cfg: AiConfigInput): void;
   /** Override navmesh build tuning; applies to the next load_map/build_navmesh. */
   set_nav_config(cfg: NavConfigInput): void;
+  /** Override player controller/combat tuning (partial; missing = engine defaults). */
+  set_player_config(cfg: PlayerConfigInput): void;
+  /** Override monster spawn/respawn tuning (partial; missing = engine defaults). */
+  set_monster_config(cfg: MonsterConfigInput): void;
+  /**
+   * Register the player entity. The engine then runs its controller from
+   * set_player_input, fires via player_fire, and aims the default monster goal
+   * at it every tick.
+   */
+  register_player(eid: number): void;
+  /** Latest raw input state; call once per frame. */
+  set_player_input(input: PlayerInputState): void;
+  /** Fire one bullet along the player's facing + aim pitch. */
+  player_fire(): void;
+  /** Spawn `count` monsters on the configured ring; spawns surface as lifecycle patches. */
+  spawn_monsters(count: number): void;
   /** Spawn a dynamic entity. net_flags=1 (NET_LOCAL) for locally-simulated entities. */
   spawn_box_entity(x: number, y: number, z: number, hw: number, hh: number, hd: number, health: number, net_flags: number): number;
   /**
    * Spawn a projectile. The engine integrates its ballistic trajectory each tick,
-   * enforces a TTL (PROJ_MAX_FRAMES), and emits HitPatch events for hits and expiry.
-   * No Rapier body — bypasses broadphase entirely.
+   * enforces a TTL, and emits each HitPatch exactly once (hit, expiry, or kill
+   * plane). The engine never destroys bullets — the game must call destroy_entity
+   * when it processes the HitPatch. No Rapier body — bypasses broadphase entirely.
+   * net_flags adds the networking profile (e.g. NET_REPLICATED | NET_PREDICTABLE);
+   * NET_BULLET is always set by the engine.
    */
-  spawn_bullet(x: number, y: number, z: number, vx: number, vy: number, vz: number): number;
+  spawn_bullet(x: number, y: number, z: number, vx: number, vy: number, vz: number, net_flags: number): number;
   /**
    * Set XZ movement velocity (last write wins). Non-zero vy latches a jump impulse
    * consumed by exactly one physics step; vy=0 never clears a pending jump, so a
@@ -153,16 +247,31 @@ export interface EngineHandle {
   set_entity_velocity(id: number, vx: number, vy: number, vz: number): void;
   /** Move an entity immediately and clear dynamic velocity. */
   teleport_entity(id: number, x: number, y: number, z: number): void;
-  /** Update the position monsters path toward. Call once per frame before tick(). */
+  /**
+   * Update the default goal — pathed toward by every monster without a
+   * per-entity override. Call once per frame before tick().
+   */
   update_monster_goal(gx: number, gz: number): void;
+  /** Give one monster its own goal, overriding the default until cleared. */
+  set_monster_goal(id: number, gx: number, gz: number): void;
+  /** Revert a monster to the default goal. */
+  clear_monster_goal(id: number): void;
   /**
    * Find a path from (startX, startY, startZ) to (goalX, goalZ).
    * Returns a waypoint array or null if no path exists.
    * canJump=false excludes step-up edges (monsters that cannot jump).
    */
   find_path(startX: number, startY: number, startZ: number, goalX: number, goalZ: number, canJump: boolean): JsWaypoint[] | null;
-  /** WASM-only: initialise WebRTC networking. */
-  init_networking?(session_id: string, signaling_url: string): void;
+  /**
+   * Transport bridge: the game layer owns the WebRTC connections (workers have
+   * no RTCPeerConnection) and drives these — connect/disconnect on data-channel
+   * events, ingest for inbound payloads, and take_outbound to drain what the
+   * engine wants sent ({ peer: null } = broadcast).
+   */
+  net_peer_connected(peer_id: string): void;
+  net_peer_disconnected(peer_id: string): void;
+  net_ingest(peer_id: string, payload: Uint8Array): void;
+  net_take_outbound(): { peer: string | null; data: Uint8Array }[];
 }
 
 export interface EngineClass {

@@ -2,11 +2,34 @@ use bitflags::bitflags;
 
 pub type EntityId = u32;
 
+// --- Entity networking profile flags (the `net_flags` bitmask) ---
+// Composable dimensions, not one enum: an entity's networking behavior is the
+// combination of its ownership, authority, type, predictability, and urgency.
+// TS mirrors these in @kikorin/adapter; the values are cross-boundary contract.
+
+/// Ownership: simulated on this client (physics body, HEALTH semantics).
+pub const NET_LOCAL: u8 = 0x01;
+/// Type: ballistic projectile — the engine integrates its trajectory.
+pub const NET_BULLET: u8 = 0x02;
+/// Type: monster — the engine owns its AI, separation, and hit detection.
+pub const NET_MONSTER: u8 = 0x04;
+/// Authority: this client broadcasts the entity's state to peers.
+pub const NET_REPLICATED: u8 = 0x08;
+/// Predictability: motion follows from velocity, so receivers extrapolate and
+/// the sender only ships periodic corrections plus discontinuities.
+pub const NET_PREDICTABLE: u8 = 0x10;
+/// Urgency: background actor — replicate on a slow stride, not every tick.
+pub const NET_LOW_URGENCY: u8 = 0x20;
+
+/// The flag dimensions that cross the wire when an entity spawns remotely:
+/// type + predictability (receivers style and extrapolate mirrors from them).
+/// Ownership/authority/urgency are sender-local and never transmitted.
+pub const NET_PUBLIC_MASK: u8 = NET_BULLET | NET_MONSTER | NET_PREDICTABLE;
+
 bitflags! {
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct DirtyFlags: u8 {
         const TRANSFORM = 0b0001;
-        const COLLIDER  = 0b0010;
         const HEALTH    = 0b0100;
         const NET       = 0b1000;
     }
@@ -21,8 +44,17 @@ pub struct ColliderConfig {
     pub half_depth: f32,
 }
 
+/// Below this, per-column Vec reallocations during early growth cost more than
+/// the memory saved; capacities are rounded up.
+const MIN_CAPACITY: usize = 256;
+
 /// Column-based (SoA) entity-component storage.
 /// Each component is a Vec<Option<T>> indexed by EntityId.
+///
+/// Adding a component column requires updating `new`, `grow_to`, and
+/// `destroy_entity` together — a missed `destroy_entity` clear leaks stale data
+/// into recycled entity IDs. `destroy_clears_every_component_column` and
+/// `grow_to_expands_all_columns` fail if a column is missed.
 pub struct World {
     next_id: u32,
     free_list: Vec<u32>,
@@ -47,7 +79,7 @@ pub struct World {
 
 impl World {
     pub fn new(capacity: usize) -> Self {
-        let cap = capacity.max(256);
+        let cap = capacity.max(MIN_CAPACITY);
         Self {
             next_id: 0,
             free_list: Vec::new(),
@@ -109,6 +141,10 @@ impl World {
         self.grounded[i] = None;
         self.is_floor[i] = false;
         self.dirty[i] = DirtyFlags::empty();
+        // A destroyed-while-dirty entity must also leave dirty_list: a recycled ID
+        // re-marked in the same tick would otherwise appear twice and emit
+        // duplicate patches.
+        self.dirty_list.retain(|&e| e != id);
         self.free_list.push(id);
     }
 
@@ -198,13 +234,14 @@ impl World {
 
     // --- dirty flags ---
     pub fn mark_dirty(&mut self, id: EntityId, flags: DirtyFlags) {
+        // Grows like the setters do — silently dropping an out-of-range mark
+        // would suppress the entity's patches.
+        self.grow_to(id);
         let i = id as usize;
-        if i < self.dirty.len() {
-            if self.dirty[i].is_empty() {
-                self.dirty_list.push(id);
-            }
-            self.dirty[i] |= flags;
+        if self.dirty[i].is_empty() {
+            self.dirty_list.push(id);
         }
+        self.dirty[i] |= flags;
     }
 
     pub fn dirty_flags(&self, id: EntityId) -> DirtyFlags {
@@ -224,38 +261,6 @@ impl World {
             }
         }
         self.dirty_list.clear();
-    }
-}
-
-/// Runs a fixed list of systems in registration order.
-type SystemFn = Box<dyn FnMut(&mut World, f32)>;
-type RegisteredSystem = (&'static str, SystemFn);
-
-pub struct SystemScheduler {
-    systems: Vec<RegisteredSystem>,
-}
-
-impl SystemScheduler {
-    pub fn new() -> Self {
-        Self {
-            systems: Vec::new(),
-        }
-    }
-
-    pub fn register(&mut self, name: &'static str, system: impl FnMut(&mut World, f32) + 'static) {
-        self.systems.push((name, Box::new(system)));
-    }
-
-    pub fn run(&mut self, world: &mut World, dt_secs: f32) {
-        for (_, sys) in &mut self.systems {
-            sys(world, dt_secs);
-        }
-    }
-}
-
-impl Default for SystemScheduler {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -292,7 +297,73 @@ mod tests {
     }
 
     #[test]
-    fn ten_thousand_entities_under_one_ms() {
+    fn destroy_is_idempotent_and_never_double_recycles() {
+        let mut w = World::new(16);
+        let e = w.create_entity();
+        w.destroy_entity(e);
+        w.destroy_entity(e); // second destroy must be a no-op
+
+        // A double free_list push would hand the same ID out twice.
+        let a = w.create_entity();
+        let b = w.create_entity();
+        assert_ne!(a, b, "double destroy must not recycle the same ID twice");
+    }
+
+    #[test]
+    fn destroy_clears_every_component_column() {
+        // Guards the add-a-component checklist: a column missed in
+        // destroy_entity leaks stale data into the recycled ID and fails here.
+        let mut w = World::new(16);
+        let e = w.create_entity();
+        w.set_position(e, [1.0, 1.0, 1.0]);
+        w.set_velocity(e, [1.0, 0.0, 0.0]);
+        w.set_rotation(e, [0.1, 0.2, 0.3]);
+        w.set_health(e, 50);
+        w.set_net_flags(e, 0x05);
+        w.set_collider(e, ColliderConfig { active: true, ..Default::default() });
+        w.set_grounded(e, true);
+        w.set_floor(e, true);
+        w.mark_dirty(e, DirtyFlags::TRANSFORM);
+
+        w.destroy_entity(e);
+        let e2 = w.create_entity();
+        assert_eq!(e2, e, "test assumes ID recycling");
+
+        assert_eq!(w.position(e2), None);
+        assert_eq!(w.velocity(e2), None);
+        assert_eq!(w.rotation(e2), None);
+        assert_eq!(w.health(e2), None);
+        assert_eq!(w.net_flags(e2), None);
+        assert!(w.collider(e2).is_none());
+        assert_eq!(w.is_grounded(e2), None);
+        assert!(!w.is_floor(e2));
+        assert!(w.dirty_flags(e2).is_empty());
+        assert_eq!(w.dirty_entities().count(), 0, "destroy must leave dirty_list");
+    }
+
+    #[test]
+    fn grow_to_expands_all_columns() {
+        // Set + read every component on an ID far past the initial capacity so a
+        // column missed in grow_to panics on index.
+        let mut w = World::new(16); // clamps to MIN_CAPACITY
+        let id = (MIN_CAPACITY * 4) as EntityId;
+        w.set_position(id, [1.0, 2.0, 3.0]);
+        w.set_velocity(id, [1.0, 0.0, 0.0]);
+        w.set_rotation(id, [0.1, 0.2, 0.3]);
+        w.set_health(id, 10);
+        w.set_net_flags(id, 0x01);
+        w.set_collider(id, ColliderConfig::default());
+        w.set_grounded(id, false);
+        w.set_floor(id, false);
+        w.mark_dirty(id, DirtyFlags::HEALTH);
+        assert_eq!(w.position(id), Some([1.0, 2.0, 3.0]));
+        assert_eq!(w.dirty_entities().count(), 1);
+    }
+
+    #[test]
+    fn ten_thousand_entity_movement_pass_stays_fast() {
+        // Perf pin for the SoA hot loop: iterate + read + write + mark 10k
+        // entities. Generous bound — this catches accidental O(n²), not jitter.
         let mut w = World::new(10_000);
         for _ in 0..10_000 {
             let e = w.create_entity();
@@ -300,28 +371,18 @@ mod tests {
             w.set_velocity(e, [1.0, 0.0, 0.0]);
         }
 
-        let mut sched = SystemScheduler::new();
-
-        sched.register("movement", |world, dt| {
-            let ids: Vec<EntityId> = world.entities().collect();
-            for id in ids {
-                if let (Some(pos), Some(vel)) = (world.position(id), world.velocity(id)) {
-                    world.set_position(id, [pos[0] + vel[0] * dt, pos[1], pos[2]]);
-                    world.mark_dirty(id, DirtyFlags::TRANSFORM);
-                }
-            }
-        });
-
-        sched.register("dirty_scan", |world, _dt| {
-            let _ = world.dirty_entities().count();
-        });
-
+        let dt = 1.0 / 60.0;
         let t0 = std::time::Instant::now();
-        sched.run(&mut w, 1.0 / 60.0);
-        let ms = t0.elapsed().as_millis();
+        let ids: Vec<EntityId> = w.entities().collect();
+        for id in ids {
+            if let (Some(pos), Some(vel)) = (w.position(id), w.velocity(id)) {
+                w.set_position(id, [pos[0] + vel[0] * dt, pos[1], pos[2]]);
+                w.mark_dirty(id, DirtyFlags::TRANSFORM);
+            }
+        }
+        let micros = t0.elapsed().as_micros();
 
-        assert!(ms < 1, "tick took {ms}ms, expected < 1ms");
-
+        assert!(micros < 5_000, "movement pass took {micros}µs, expected < 5000µs");
         w.clear_dirty();
     }
 }

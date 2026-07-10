@@ -1,18 +1,15 @@
 import mitt from "mitt";
 
-// These types were previously imported from @kikorin/ecs (now removed).
-export type Player = { name: string; experience: number; level: number };
-export type Position = { x: number; y: number; z: number };
 export type Time = { avgDelta: number; ticksPerSecond: number };
-export type ControlState = { controlId: string; phase: string; source: string };
 
+/**
+ * Only events with a live emitter belong here — a subscription to an event
+ * nobody emits is UI that silently never updates. Emitters today:
+ * `ui:timeMetricsUpdate` (useEngine patch handler), `ui:crosshairAimPoint`
+ * (game aim raycast).
+ */
 export type EventBusEvents = {
-  "ui:playerUpdate": { player: Player | null };
-  "ui:playerPositionUpdate": { playerPosition: Position | null };
-  "ui:healthChange": { health: number };
   "ui:timeMetricsUpdate": { timeMetrics: Time };
-  "ui:controlsUpdate": { controlStates: ControlState[] };
-  "ui:sprintStaminaUpdate": { stamina: number };
   "ui:crosshairAimPoint": { wx: number; wy: number; wz: number };
 };
 

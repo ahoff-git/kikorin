@@ -1,38 +1,16 @@
 import { expect, test } from "@playwright/test";
 import {
   attachJson,
-  computeTps,
+  buildMetricsRow,
   latestTick,
-  observedTps,
+  type MetricsRow,
   openGame,
   readState,
   recentSamplesAfterTick,
   spawnMonstersByButton,
-  summarizeSamples,
   waitForMonsterCount,
   waitForSamplesAfterTick,
 } from "./gameplayHarness";
-import type { E2EMetricSample as MetricSample, E2EState } from "../src/app/e2eMetrics";
-
-type StressRow = {
-  monsterCount: number;
-  observedTps: number;
-  computeTps: number;
-  sampleCount: number;
-  avgTickMs: number;
-  maxTickMs: number;
-  avgAiMs: number;
-  maxAiMs: number;
-  avgPhysicsMs: number;
-  maxPhysicsMs: number;
-  avgPathfindingMs: number;
-  maxPathfindingMs: number;
-  avgBoundaryMs: number;
-  maxBoundaryMs: number;
-  renderPatches: number;
-  semanticPatches: number;
-  lastTick: number;
-};
 
 type StressResult = {
   targetObservedTps: number;
@@ -40,7 +18,7 @@ type StressResult = {
   maxMonsters: number;
   sampleTarget: number;
   stoppedBecause: "below-target" | "max-monsters";
-  rows: StressRow[];
+  rows: MetricsRow[];
 };
 
 const TARGET_OBSERVED_TPS = 100;
@@ -48,7 +26,7 @@ const MONSTER_BATCH_SIZE = 50;
 const MAX_MONSTERS = 1_500;
 const SAMPLE_TARGET = 45;
 
-test("records TPS by monster count until observed TPS falls under 100", async ({ page }, testInfo) => {
+test("records TPS by monster count up to the TPS cliff or the monster cap", async ({ page }, testInfo) => {
   test.setTimeout(300_000);
 
   await openGame(page);
@@ -56,7 +34,7 @@ test("records TPS by monster count until observed TPS falls under 100", async ({
   await page.keyboard.down("w");
   await page.keyboard.down("d");
 
-  const rows: StressRow[] = [];
+  const rows: MetricsRow[] = [];
 
   try {
     while (true) {
@@ -70,11 +48,11 @@ test("records TPS by monster count until observed TPS falls under 100", async ({
 
       const state = await readState(page);
       const samples = recentSamplesAfterTick(state, startTick, SAMPLE_TARGET);
-      const row = buildStressRow(state, samples);
+      const row = buildMetricsRow(state, samples);
       rows.push(row);
 
       console.log(
-        `[kikorin:stress] monsters=${row.monsterCount} observedTps=${row.observedTps} computeTps=${row.computeTps} avgTickMs=${row.avgTickMs} maxTickMs=${row.maxTickMs}`,
+        `[kikorin:stress] monsters=${row.monsterCount} observedTps=${row.observedTps} capacityTps=${row.capacityTps} avgTickMs=${row.avgTickMs} maxTickMs=${row.maxTickMs}`,
       );
 
       if (row.observedTps < TARGET_OBSERVED_TPS) break;
@@ -98,29 +76,12 @@ test("records TPS by monster count until observed TPS falls under 100", async ({
   };
 
   await attachJson(testInfo, "monster-tps-stress.json", result);
-  expect(result.stoppedBecause).toBe("below-target");
-});
 
-function buildStressRow(state: E2EState, samples: MetricSample[]): StressRow {
-  const summary = summarizeSamples(state, samples);
-  const observed = observedTps(samples);
-  return {
-    monsterCount: state.monsterEids.length,
-    observedTps: observed,
-    computeTps: computeTps(summary.avg.tick_ms),
-    sampleCount: samples.length,
-    avgTickMs: summary.avg.tick_ms,
-    maxTickMs: summary.max.tick_ms,
-    avgAiMs: summary.avg.ai_ms,
-    maxAiMs: summary.max.ai_ms,
-    avgPhysicsMs: summary.avg.physics_ms,
-    maxPhysicsMs: summary.max.physics_ms,
-    avgPathfindingMs: summary.avg.pathfinding_ms,
-    maxPathfindingMs: summary.max.pathfinding_ms,
-    avgBoundaryMs: summary.avg.boundary_ms,
-    maxBoundaryMs: summary.max.boundary_ms,
-    renderPatches: summary.totalRenderPatches,
-    semanticPatches: summary.totalSemanticPatches,
-    lastTick: summary.lastTick,
-  };
-}
+  // Either stop reason is a pass: the sweep found the TPS cliff, or the engine
+  // held target TPS all the way to the monster cap. Faster hardware or engine
+  // perf improvements must never turn this suite red.
+  expect(rows.length).toBeGreaterThan(0);
+  for (const row of rows.slice(0, -1)) {
+    expect(row.observedTps).toBeGreaterThanOrEqual(TARGET_OBSERVED_TPS);
+  }
+});

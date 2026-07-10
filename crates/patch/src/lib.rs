@@ -9,24 +9,62 @@ pub struct PatchBundle {
     pub semantic: Vec<SemanticPatch>,
     pub net: Vec<NetPatch>,
     pub hits: Vec<HitPatch>,
+    pub lifecycle: Vec<LifecyclePatch>,
     pub metrics: MetricsPatch,
 }
 
+/// Local-entity lifecycle event: the engine created or destroyed an entity
+/// (fire, death, respawn, TTL, explicit spawn). The game creates/removes meshes
+/// from these instead of tracking spawn call sites — the engine is the source
+/// of truth for what exists. Terrain and remote mirrors are excluded (terrain
+/// comes from `load_map`'s return; mirrors ride `NetPatch`).
+#[derive(Clone, Debug, Encode, Decode)]
+pub struct LifecyclePatch {
+    pub entity: EntityId,
+    pub kind: LifecycleKind,
+    /// The entity's net-flag profile — the game styles meshes from it.
+    pub flags: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum LifecycleKind {
+    Spawned,
+    Despawned,
+}
+
 /// Peer-activity notification surfaced to the TypeScript layer. Deliberately thinner
-/// than netcode's wire-level patch type: the boundary only reports which entity was
-/// touched by which peer; wire detail (field updates, event kinds) stays inside
-/// `crates/netcode`, and the engine maps between the two.
+/// than netcode's wire events: `entity` is the LOCAL mirror id the engine created
+/// for the remote entity (so it lines up with render patches); field-level wire
+/// detail stays inside `crates/netcode`, and the engine maps between the two.
 #[derive(Clone, Debug, Encode, Decode)]
 pub struct NetPatch {
     pub peer_id: String,
+    /// Local mirror entity id; 0 for PeerLeft (no entity).
     pub entity: EntityId,
+    pub kind: NetEventKind,
+    /// The mirror's public net profile (type + predictability bits), present on
+    /// spawn events so the game can style the remote mesh.
+    pub flags: Option<u8>,
 }
 
-/// Bullet–target collision event. Emitted by the engine when a NET_BULLET entity
-/// overlaps a NET_MONSTER entity. TypeScript reads these to destroy entities and
-/// trigger game-level responses (respawn, score, etc.).
-/// `target_eid` is None when the bullet left the play area (y < -20) rather than
-/// hitting a monster.
+/// What happened to the remote entity (or peer). The game uses these to create
+/// and remove meshes for remote mirrors and to maintain its peer list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum NetEventKind {
+    EntitySpawned,
+    EntityUpdated,
+    EntityDespawned,
+    /// Transport-level connection opened (entity is 0) — emitted before any
+    /// entity data so the UI can show the peer immediately.
+    PeerJoined,
+    PeerLeft,
+}
+
+/// Bullet–target collision event — a pure UI/FX notification. The engine settles
+/// all consequences itself (bullet destruction, damage, death, respawn); the
+/// resulting entity churn reaches the game as LifecyclePatches.
+/// `target_eid` is None when the bullet expired without hitting anything (TTL ran
+/// out or it fell past the engine's kill plane).
 #[derive(Clone, Debug, Encode, Decode)]
 pub struct HitPatch {
     pub bullet_eid: EntityId,
@@ -78,6 +116,7 @@ impl PatchGenerator {
         world: &World,
         net: Vec<NetPatch>,
         hits: Vec<HitPatch>,
+        lifecycle: Vec<LifecyclePatch>,
         metrics: MetricsPatch,
     ) -> PatchBundle {
         let mut render = Vec::new();
@@ -126,6 +165,7 @@ impl PatchGenerator {
             semantic,
             net,
             hits,
+            lifecycle,
             metrics,
         }
     }
@@ -170,6 +210,7 @@ mod tests {
                 bullet_eid: 5,
                 target_eid: Some(3),
             }],
+            lifecycle: vec![LifecyclePatch { entity: 4, kind: LifecycleKind::Spawned, flags: 0x02 }],
             metrics: MetricsPatch {
                 tick_ms: 16.0,
                 ai_ms: 2.0,
@@ -204,7 +245,7 @@ mod tests {
         world.mark_dirty(e, DirtyFlags::TRANSFORM);
 
         let gen = PatchGenerator::new();
-        let bundle = gen.generate(&world, vec![], vec![], MetricsPatch::default());
+        let bundle = gen.generate(&world, vec![], vec![], vec![], MetricsPatch::default());
 
         assert_eq!(bundle.render.len(), 1);
         assert!((bundle.render[0].x - 10.0).abs() < 1e-6);
@@ -220,7 +261,7 @@ mod tests {
         world.mark_dirty(e, DirtyFlags::HEALTH);
 
         let gen = PatchGenerator::new();
-        let bundle = gen.generate(&world, vec![], vec![], MetricsPatch::default());
+        let bundle = gen.generate(&world, vec![], vec![], vec![], MetricsPatch::default());
 
         assert!(bundle.render.is_empty());
         assert_eq!(bundle.semantic.len(), 1);

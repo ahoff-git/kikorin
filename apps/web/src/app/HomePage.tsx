@@ -5,21 +5,16 @@ import type {
   RefObject,
 } from "react";
 import { useEffect, useRef, useState } from "react";
-import {
-  type ControlState,
-  type Player,
-  type Position,
-  type Time,
-  useKikorinEvent,
-} from "@kikorin/react";
+import { type Time, useKikorinEvent } from "@kikorin/react";
 import { eventBus } from "@kikorin/events";
+import { log, logLevels } from "@kikorin/util";
 import { getActiveCamera } from "@kikorin/system-rendering";
 import { Vector3 } from "three";
 import { setupGame } from "./kikorin";
 import { useNetworking, type ChatMessage } from "./useNetworking";
 import { useEngine } from "./useEngine";
 import { Box } from "@mui/material";
-import { PageLayout } from "./kikorinLayout";
+import { PageLayout, PAGE_COLUMN_TEMPLATE } from "./kikorinLayout";
 import {
   installE2EControls,
   markE2EGameReady,
@@ -134,22 +129,10 @@ const networkPeerItemStyle: CSSProperties = {
   color: "#ff44aa",
 };
 
+// The single description of the control scheme — rendered in both the header
+// and the left nav.
 const CONTROL_INSTRUCTIONS =
-  "W / S move forward and back, Q / E strafe, A / D or Left / Right turn, I / K pitch up and down, left click to fire, middle drag to orbit the camera, middle click to reset the camera, right drag to spin the player, and press Space to jump.";
-
-const LEFT_NAV_CONTROL_INSTRUCTIONS =
-  "Move forward and back with W and S, strafe with Q and E, turn with A and D or the left and right arrow keys, use I and K to pitch up and down, left click to fire a small block that can bounce off other blocks, middle-click drag to orbit the camera, middle click to reset the camera behind the player, right drag to spin the player, and press Space to jump.";
-
-const CONTROL_SYSTEM_NOTE =
-  "The React Boost Forward button in the header also feeds the same control system, so you can compare UI input with keyboard input.";
-
-type WorldUiState = {
-  player: Player | null;
-  playerPosition: Position | null;
-  timeMetrics: Time | null;
-  controlStates: ControlState[];
-  sprintStamina: number;
-};
+  "W / S move forward and back, Q / E strafe, A / D or Left / Right turn, I / K pitch up and down, left click to fire a bouncing block, middle drag to orbit the camera, middle click to reset it behind the player, right drag to spin the player, and press Space to jump.";
 
 type CameraDragController = {
   disconnect: () => void;
@@ -160,9 +143,9 @@ export default function Home() {
   const { engine, onFrameRef } = useEngine(canvasRef);
   const [playerEid, setPlayerEid] = useState<number | null>(null);
   const [ownedEids, setOwnedEids] = useState<readonly number[]>([]);
-  const uiState = useWorldUiState();
-  const spawnMonstersRef = useRef<((count: number) => Promise<void>) | null>(null);
-  const { localPeerId, connectedPeers, chatMessages, connect, sendChatMessage, addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity, setHitHandler } = useNetworking(
+  const timeMetrics = useTimeMetrics();
+  const spawnMonstersRef = useRef<((count: number) => void) | null>(null);
+  const { localPeerId, transportError, connectedPeers, chatMessages, connect, sendChatMessage, addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity, setHitHandler } = useNetworking(
     engine,
     playerEid,
     ownedEids,
@@ -197,7 +180,7 @@ export default function Home() {
           ? createCameraDragController(canvas, onCameraDrag, undefined, onCameraReset)
           : null;
       })
-      .catch(console.error);
+      .catch((err) => log(logLevels.error, "setupGame failed", ["game"], err));
 
     return () => {
       unmounted = true;
@@ -212,7 +195,8 @@ export default function Home() {
       setPlayerEid(null);
       setOwnedEids([]);
     };
-  // addOwnedEntity etc. are stable refs from useNetworking — safe to list.
+  // The useNetworking callbacks are stable no-op refs — intentionally omitted
+  // so scene setup re-runs only when the engine instance changes.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [engine]);
 
@@ -226,49 +210,26 @@ export default function Home() {
       left={<LeftNav />}
       right={
         <RightPanel
-          {...uiState}
+          timeMetrics={timeMetrics}
           localPeerId={localPeerId}
+          transportError={transportError}
           connectedPeers={connectedPeers}
           onConnect={connect}
           chatMessages={chatMessages}
           onSendChat={sendChatMessage}
         />
       }
-      footer={<Footer sprintStamina={uiState.sprintStamina} />}
+      footer={<Footer />}
     >
       <CanvasViewport canvasRef={canvasRef} />
     </PageLayout>
   );
 }
 
-const INITIAL_UI_STATE: WorldUiState = {
-  player: null,
-  playerPosition: null,
-  timeMetrics: null,
-  controlStates: [],
-  sprintStamina: 1,
-};
-
-function useWorldUiState(): WorldUiState {
-  const [state, setState] = useState<WorldUiState>(INITIAL_UI_STATE);
-
-  useKikorinEvent("ui:timeMetricsUpdate", ({ timeMetrics }) =>
-    setState(s => ({ ...s, timeMetrics })),
-  );
-  useKikorinEvent("ui:playerUpdate", ({ player }) =>
-    setState(s => ({ ...s, player })),
-  );
-  useKikorinEvent("ui:playerPositionUpdate", ({ playerPosition }) =>
-    setState(s => ({ ...s, playerPosition })),
-  );
-  useKikorinEvent("ui:controlsUpdate", ({ controlStates }) =>
-    setState(s => ({ ...s, controlStates })),
-  );
-  useKikorinEvent("ui:sprintStaminaUpdate", ({ stamina }) =>
-    setState(s => ({ ...s, sprintStamina: stamina })),
-  );
-
-  return state;
+function useTimeMetrics(): Time | null {
+  const [timeMetrics, setTimeMetrics] = useState<Time | null>(null);
+  useKikorinEvent("ui:timeMetricsUpdate", ({ timeMetrics }) => setTimeMetrics(timeMetrics));
+  return timeMetrics;
 }
 
 function createCameraDragController(
@@ -506,56 +467,41 @@ function LeftNav() {
   return (
     <div style={navStyle}>
       <div style={sectionLabelStyle}>Controls</div>
-      <div style={helperTextStyle}>
-        Everything now falls until it lands on the floor, but floor contact
-        alone will not trigger the orange touch highlight.{" "}
-        {LEFT_NAV_CONTROL_INSTRUCTIONS} {CONTROL_SYSTEM_NOTE}
-      </div>
+      <div style={helperTextStyle}>{CONTROL_INSTRUCTIONS}</div>
     </div>
   );
 }
 
 function RightPanel({
-  player,
-  playerPosition,
   timeMetrics,
   localPeerId,
+  transportError,
   connectedPeers,
   onConnect,
   chatMessages,
   onSendChat,
-}: Omit<WorldUiState, "controlStates"> & {
+}: {
+  timeMetrics: Time | null;
   localPeerId: string | null;
+  transportError: string | null;
   connectedPeers: string[];
   onConnect: (peerId: string) => void;
   chatMessages: ChatMessage[];
   onSendChat: (text: string) => void;
 }) {
-  const averageDelta = Math.round(timeMetrics?.avgDelta ?? 0);
+  // avgDelta = EMA of the Rust tick's execution cost; ticksPerSecond = actual
+  // ticks per wall-clock second measured from the bundle tick counter.
+  const tickCostMs = Math.round((timeMetrics?.avgDelta ?? 0) * 10) / 10;
   const ticksPerSecond = Math.round(timeMetrics?.ticksPerSecond ?? 0);
-  const playerName = player?.name ?? "No player";
-  const playerExperience = Math.round((player?.experience ?? 0) * 100) / 100;
-  const playerLevel = Math.round(player?.level ?? 0);
-  const positionLabel = formatPosition(playerPosition);
 
   return (
     <div>
-      <div>Tick: {averageDelta}ms</div>
+      <div>Tick cost: {tickCostMs} ms</div>
       <div>TPS: {ticksPerSecond}</div>
-      <div>
-        Player:
-        <div>Name: {playerName}</div>
-        <div>XP: {playerExperience}</div>
-        <div>Level: {playerLevel}</div>
-        <div>Position: {positionLabel}</div>
-      </div>
-      <ChatBox
-        messages={chatMessages}
-        localPeerId={localPeerId}
-        onSend={onSendChat}
-      />
+      <ChatBox messages={chatMessages} onSend={onSendChat} />
       <NetworkPanel
         localPeerId={localPeerId}
+        transportError={transportError}
         connectedPeers={connectedPeers}
         onConnect={onConnect}
       />
@@ -565,11 +511,9 @@ function RightPanel({
 
 function ChatBox({
   messages,
-  localPeerId,
   onSend,
 }: {
   messages: ChatMessage[];
-  localPeerId: string | null;
   onSend: (text: string) => void;
 }) {
   const [input, setInput] = useState("");
@@ -609,20 +553,19 @@ function ChatBox({
           ))
         )}
       </div>
+      {/* Chat send is not wired into the Rust netcode yet (useNetworking's
+          sendChatMessage is a no-op) — keep the input visibly disabled rather
+          than silently dropping typed messages. */}
       <div style={chatInputRowStyle}>
         <input
           style={chatInputStyle}
-          placeholder="Type a message…"
+          placeholder="Chat not wired up yet"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          disabled={!localPeerId}
+          disabled
         />
-        <button
-          type="button"
-          onClick={handleSend}
-          disabled={!localPeerId || !input.trim()}
-        >
+        <button type="button" onClick={handleSend} disabled>
           Send
         </button>
       </div>
@@ -632,21 +575,31 @@ function ChatBox({
 
 function NetworkPanel({
   localPeerId,
+  transportError,
   connectedPeers,
   onConnect,
 }: {
   localPeerId: string | null;
+  transportError: string | null;
   connectedPeers: string[];
   onConnect: (peerId: string) => void;
 }) {
   const [inputValue, setInputValue] = useState("");
   const [copied, setCopied] = useState(false);
+  const copiedTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current);
+    };
+  }, []);
 
   function handleCopy() {
     if (!localPeerId) return;
     void navigator.clipboard.writeText(localPeerId).then(() => {
       setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      if (copiedTimerRef.current !== null) clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = window.setTimeout(() => setCopied(false), 1500);
     });
   }
 
@@ -664,6 +617,12 @@ function NetworkPanel({
   return (
     <div style={networkPanelStyle}>
       <div style={sectionLabelStyle}>Multiplayer</div>
+
+      {transportError && (
+        <div style={{ marginTop: 6, fontSize: 11, color: "#f97316" }}>
+          Transport error: {transportError}
+        </div>
+      )}
 
       <div style={{ marginTop: 6 }}>
         <div style={{ fontSize: 11, color: "#555" }}>Your ID</div>
@@ -746,25 +705,13 @@ function useFps(): number {
   return fps;
 }
 
-const FOOTER_COLUMN_TEMPLATE = {
-  xs: "1fr",
-  md: "clamp(200px, 20%, 300px) minmax(0, 1fr) clamp(200px, 20%, 300px)",
-};
-
-const sprintBarTrackStyle: CSSProperties = {
-  height: 6,
-  background: "#1a1a1a",
-  borderRadius: 3,
-  overflow: "hidden",
-};
-
-function Footer({ sprintStamina }: { sprintStamina: number }) {
+function Footer() {
   const fps = useFps();
   return (
     <Box
       sx={{
         display: "grid",
-        gridTemplateColumns: FOOTER_COLUMN_TEMPLATE,
+        gridTemplateColumns: PAGE_COLUMN_TEMPLATE,
         columnGap: 2,
         px: 0,
         py: "6px",
@@ -782,33 +729,8 @@ function Footer({ sprintStamina }: { sprintStamina: number }) {
       >
         {fps} FPS
       </Box>
-      <Box sx={{ display: "flex", flexDirection: "column", gap: "4px", justifyContent: "center" }}>
-        <div style={sprintBarTrackStyle}>
-          <div
-            style={{
-              height: "100%",
-              width: `${sprintStamina * 100}%`,
-              background: sprintStamina > 0.3 ? "#4ade80" : "#f97316",
-              borderRadius: 3,
-              transition: "width 0.05s linear, background 0.2s",
-            }}
-          />
-        </div>
-      </Box>
+      <Box />
       <Box sx={{ display: { xs: "none", md: "block" } }} />
     </Box>
   );
-}
-
-function formatPosition(position: Position | null) {
-  if (!position) return "0, 0, 0";
-  return [
-    formatCoordinate(position.x),
-    formatCoordinate(position.y),
-    formatCoordinate(position.z),
-  ].join(", ");
-}
-
-function formatCoordinate(value: number) {
-  return Math.round(value * 100) / 100;
 }

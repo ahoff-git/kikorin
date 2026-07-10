@@ -62,13 +62,3 @@ export function lookCameraAt(x: number, y: number, z: number): boolean {
   return true;
 }
 
-export function readCameraPosition(out: { x: number; y: number; z: number }): boolean {
-  if (!camera) {
-    log(logLevels.debug, "[render] readCameraPosition failed: camera missing", ["render"]);
-    return false;
-  }
-  out.x = camera.position.x;
-  out.y = camera.position.y;
-  out.z = camera.position.z;
-  return true;
-}

@@ -3,10 +3,8 @@ import {
   renderFrame,
   setupRenderer,
   disposeRenderer,
-  upsertObjectByEid,
   removeObjectByEid,
   setObjectTransformByEid,
-  setObjectTouchingByEid,
   applyToObjectByEid,
 } from '../render'
 
@@ -29,10 +27,6 @@ describe('system-rendering exports', () => {
 
   it('setObjectTransformByEid returns false for unknown eid', () => {
     expect(setObjectTransformByEid(9999, 0, 0, 0, 0, 0, 0)).toBe(false)
-  })
-
-  it('setObjectTouchingByEid returns false for unknown eid', () => {
-    expect(setObjectTouchingByEid(9999, true)).toBe(false)
   })
 
   it('applyToObjectByEid returns false for unknown eid', () => {

@@ -1,4 +1,14 @@
 import { Box } from "@mui/material";
+
+/**
+ * Main three-column grid template. The footer reuses it so its columns align
+ * with the side panels — keep the two in sync by importing, not copying.
+ */
+export const PAGE_COLUMN_TEMPLATE = {
+  xs: "1fr",
+  md: "clamp(200px, 20%, 300px) minmax(0, 1fr) clamp(200px, 20%, 300px)",
+};
+
 type LayoutProps = {
   header?: React.ReactNode
   left?: React.ReactNode
@@ -36,10 +46,7 @@ export function PageLayout({
           minWidth: 0,
           minHeight: 0,
           overflow: "hidden",
-          gridTemplateColumns: {
-            xs: "1fr",
-            md: "clamp(200px, 20%, 300px) minmax(0, 1fr) clamp(200px, 20%, 300px)",
-          },
+          gridTemplateColumns: PAGE_COLUMN_TEMPLATE,
           columnGap: 2,
         }}
       >

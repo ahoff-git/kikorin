@@ -9,7 +9,7 @@ import { useEffect, useRef } from 'react'
  * without the subscription being torn down and re-created on every render.
  *
  * @example
- * useKikorinEvent('ui:healthChange', ({ health }) => setHealth(health))
+ * useKikorinEvent('ui:timeMetricsUpdate', ({ timeMetrics }) => setTps(timeMetrics.ticksPerSecond))
  */
 export function useKikorinEvent<K extends keyof EventBusEvents>(
   event: K,

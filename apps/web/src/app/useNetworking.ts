@@ -1,16 +1,19 @@
 "use client";
 
-// Networking wired to the Rust WASM engine via WorkerEngineProxy.init_networking().
-// The local peer ID is a UUID generated on mount — it's the wasm-peers session ID this
-// client joins on startup. "Connect" reinitialises networking with a remote peer's session
-// ID, joining their room so the two clients can exchange delta patches.
-//
-// Requires NEXT_PUBLIC_SIGNALING_URL to be set; without it the ID still displays but
-// networking won't connect (buttons remain enabled to surface the missing config clearly).
+// Peer-to-peer transport (IO layer). PeerJS brokers WebRTC over its free
+// public cloud (0.peerjs.com) — no self-hosted signaling server. The Rust
+// engine owns the protocol (wire events, mirrors, cadence, timeouts); this
+// hook only owns the connections and shuttles bytes:
+//   inbound   conn 'data'    → proxy.net_ingest(peer, bytes)
+//   outbound  proxy.onNetOut → conn.send(bytes)  (peer null = broadcast)
+//   presence  conn 'open'/'close' → proxy.net_peer_(dis)connected
+// The transport must live on the main thread: RTCPeerConnection does not
+// exist inside Web Workers.
 
 import { log, logLevels } from "@kikorin/util";
 import { netChannel } from "@kikorin/adapter";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { DataConnection, Peer } from "peerjs";
 import type { WorkerEngineProxy } from "../workers/WorkerEngineProxy";
 
 export type ChatMessage = {
@@ -20,7 +23,10 @@ export type ChatMessage = {
 };
 
 export interface UseNetworkingReturn {
+  /** This client's PeerJS id — share it so others can join. Null until the broker assigns one. */
   localPeerId: string | null;
+  /** Broker/connection failure surfaced to the UI; null when healthy. */
+  transportError: string | null;
   connectedPeers: string[];
   chatMessages: ChatMessage[];
   connect: (remotePeerId: string) => void;
@@ -32,54 +38,134 @@ export interface UseNetworkingReturn {
   setHitHandler: (handler: ((eid: number) => void) | null) => void;
 }
 
-const SIGNALING_URL = process.env.NEXT_PUBLIC_SIGNALING_URL ?? '';
-
 export function useNetworking(
   engine: WorkerEngineProxy | null,
   _playerEid: number | null,
   _ownedEids: readonly number[],
 ): UseNetworkingReturn {
-  const [localId] = useState<string>(() => crypto.randomUUID());
+  const [localPeerId, setLocalPeerId] = useState<string | null>(null);
+  const [transportError, setTransportError] = useState<string | null>(null);
   const [connectedPeers, setConnectedPeers] = useState<string[]>([]);
   const [chatMessages] = useState<ChatMessage[]>([]);
+  const peerRef = useRef<Peer | null>(null);
+  const connsRef = useRef<Map<string, DataConnection>>(new Map());
+  // Shared handler wiring for inbound and outgoing connections.
+  const wireConnectionRef = useRef<((conn: DataConnection) => void) | null>(null);
 
-  // Auto-initialise networking once the engine is ready.
+  // Bring the transport up once the engine is ready.
   useEffect(() => {
-    if (!engine || !SIGNALING_URL) return;
-    engine.init_networking(localId, SIGNALING_URL);
-  }, [engine, localId]);
+    if (!engine) return;
+    let disposed = false;
 
-  // Track peers reported by the Rust engine via net patches.
+    function wireConnection(conn: DataConnection) {
+      conn.on("open", () => {
+        log(logLevels.debug, "[transport] data channel open", ["network"], conn.peer);
+        connsRef.current.set(conn.peer, conn);
+        engine?.net_peer_connected(conn.peer);
+      });
+      conn.on("data", (data) => {
+        if (data instanceof ArrayBuffer) {
+          engine?.net_ingest(conn.peer, new Uint8Array(data));
+        } else if (data instanceof Uint8Array) {
+          engine?.net_ingest(conn.peer, data);
+        }
+      });
+      const drop = () => {
+        if (connsRef.current.delete(conn.peer)) {
+          engine?.net_peer_disconnected(conn.peer);
+        }
+      };
+      conn.on("close", drop);
+      conn.on("error", (err) => {
+        log(logLevels.warning, "[transport] connection error", ["network"], conn.peer, err);
+        drop();
+      });
+    }
+
+    wireConnectionRef.current = wireConnection;
+
+    // Dynamic import keeps peerjs (browser-only) out of the SSR bundle.
+    void import("peerjs").then(({ default: PeerCtor }) => {
+      if (disposed) return;
+      const peer = new PeerCtor(); // no options = the free public PeerJS cloud
+      peerRef.current = peer;
+
+      peer.on("open", (id) => {
+        log(logLevels.debug, "[transport] broker connected", ["network"], id);
+        setLocalPeerId(id);
+        setTransportError(null);
+      });
+      peer.on("connection", wireConnection);
+      peer.on("error", (err) => {
+        log(logLevels.error, "[transport] peer error", ["network"], err);
+        setTransportError(String(err));
+      });
+      peer.on("disconnected", () => {
+        // Broker link dropped (existing data channels survive); try to regain it.
+        peer.reconnect();
+      });
+    });
+
+    // Engine → wire: send whatever the engine queued since the last flush.
+    engine.onNetOut((items) => {
+      for (const item of items) {
+        if (item.peer === null) {
+          for (const conn of connsRef.current.values()) conn.send(item.data);
+        } else {
+          connsRef.current.get(item.peer)?.send(item.data);
+        }
+      }
+    });
+
+    return () => {
+      disposed = true;
+      wireConnectionRef.current = null;
+      engine.onNetOut(null);
+      for (const [peerId] of connsRef.current) engine.net_peer_disconnected(peerId);
+      connsRef.current.clear();
+      peerRef.current?.destroy();
+      peerRef.current = null;
+      setLocalPeerId(null);
+    };
+  }, [engine]);
+
+  // Live peer list from engine net events: peer_joined fires when the data
+  // channel opens (before any entity data), entity activity also marks a peer
+  // present, and peer_left (close or engine timeout) removes it.
   useEffect(() => {
     const unsub = netChannel.subscribe(() => {
       const patches = netChannel.getSnapshot();
-      const rustPeerIds = [...new Set(patches.map(p => p.peer_id))];
-      if (rustPeerIds.length > 0) {
-        setConnectedPeers(prev => {
-          const next = [...prev];
-          for (const id of rustPeerIds) {
-            if (!next.includes(id)) next.push(id);
+      if (patches.length === 0) return;
+      setConnectedPeers(prev => {
+        let next = prev;
+        for (const p of patches) {
+          if (p.kind === "peer_left") {
+            next = next.filter(id => id !== p.peer_id);
+          } else if (!next.includes(p.peer_id)) {
+            next = [...next, p.peer_id];
           }
-          return next.length === prev.length ? prev : next;
-        });
-      }
+        }
+        return next;
+      });
     });
     return unsub;
   }, []);
 
-  // Join another peer's wasm-peers session by reinitialising networking with their ID.
+  // Dial another client by its PeerJS id.
   const connect = useCallback((remotePeerId: string) => {
-    if (!engine) {
-      log(logLevels.debug, "[networking] connect: engine not ready", ["network"], { remotePeerId });
+    const peer = peerRef.current;
+    const wire = wireConnectionRef.current;
+    if (!peer || !wire) {
+      log(logLevels.debug, "[transport] connect: broker not ready", ["network"], remotePeerId);
       return;
     }
-    if (!SIGNALING_URL) {
-      log(logLevels.debug, "[networking] connect: NEXT_PUBLIC_SIGNALING_URL not configured", ["network"], { remotePeerId });
-      return;
-    }
-    engine.init_networking(remotePeerId, SIGNALING_URL);
-  }, [engine]);
+    wire(peer.connect(remotePeerId, { reliable: true }));
+  }, []);
 
+  // TODO: intentional no-op stubs from the TS→Rust netcode migration. Chat and
+  // the ownership/hit signalling pipeline are not wired into the wire protocol
+  // yet; these keep the setupGame contract stable until a Chat wire event lands
+  // (or the pipeline is deleted).
   const sendChatMessage = useCallback((_text: string) => {}, []);
   const addOwnedEntity = useCallback((_eid: number) => {}, []);
   const removeOwnedEntity = useCallback((_eid: number) => {}, []);
@@ -88,7 +174,8 @@ export function useNetworking(
   const setHitHandler = useCallback((_handler: ((eid: number) => void) | null) => {}, []);
 
   return {
-    localPeerId: localId,
+    localPeerId,
+    transportError,
     connectedPeers,
     chatMessages,
     connect,

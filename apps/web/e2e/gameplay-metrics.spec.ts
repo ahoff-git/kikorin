@@ -18,7 +18,15 @@ test("plays movement, jump, and fire while collecting engine metrics", async ({ 
   await page.keyboard.down("w");
   await page.waitForTimeout(900);
   await page.keyboard.up("w");
+
+  // Jump must actually leave the ground — 300 ms after takeoff the player is
+  // near mid-flight (~2.7 units up at JUMP_VEL=12, g=-20), far above jitter.
+  const beforeJump = await readPlayerRender(page);
   await page.keyboard.press("Space");
+  await page.waitForTimeout(300);
+  const airborne = await readPlayerRender(page);
+  expect(airborne.y).toBeGreaterThan(beforeJump.y + 0.5);
+
   await canvas.click({ position: { x: 500, y: 320 } });
   await page.waitForTimeout(800);
 

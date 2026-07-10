@@ -2,19 +2,19 @@ import { describe, it, expect, vi } from 'vitest'
 import { eventBus } from '../eventBus'
 
 describe('eventBus', () => {
-  it('emits and receives ui:playerUpdate', () => {
+  it('emits and receives ui:timeMetricsUpdate', () => {
     const handler = vi.fn()
-    eventBus.on('ui:playerUpdate', handler)
-    eventBus.emit('ui:playerUpdate', { player: null })
-    expect(handler).toHaveBeenCalledWith({ player: null })
-    eventBus.off('ui:playerUpdate', handler)
+    eventBus.on('ui:timeMetricsUpdate', handler)
+    eventBus.emit('ui:timeMetricsUpdate', { timeMetrics: { avgDelta: 4, ticksPerSecond: 250 } })
+    expect(handler).toHaveBeenCalledWith({ timeMetrics: { avgDelta: 4, ticksPerSecond: 250 } })
+    eventBus.off('ui:timeMetricsUpdate', handler)
   })
 
-  it('emits and receives ui:playerPositionUpdate', () => {
+  it('emits and receives ui:crosshairAimPoint', () => {
     const handler = vi.fn()
-    eventBus.on('ui:playerPositionUpdate', handler)
-    eventBus.emit('ui:playerPositionUpdate', { playerPosition: { x: 1, y: 2, z: 3 } })
-    expect(handler).toHaveBeenCalledWith({ playerPosition: { x: 1, y: 2, z: 3 } })
-    eventBus.off('ui:playerPositionUpdate', handler)
+    eventBus.on('ui:crosshairAimPoint', handler)
+    eventBus.emit('ui:crosshairAimPoint', { wx: 1, wy: 2, wz: 3 })
+    expect(handler).toHaveBeenCalledWith({ wx: 1, wy: 2, wz: 3 })
+    eventBus.off('ui:crosshairAimPoint', handler)
   })
 })

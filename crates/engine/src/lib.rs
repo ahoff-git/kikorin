@@ -1,26 +1,60 @@
-use bincode::Decode;
-use ecs::{ColliderConfig, DirtyFlags, World};
+use bincode::{Decode, Encode};
+use ecs::{
+    ColliderConfig, DirtyFlags, World, NET_BULLET, NET_LOCAL, NET_LOW_URGENCY, NET_MONSTER,
+    NET_PREDICTABLE, NET_PUBLIC_MASK, NET_REPLICATED,
+};
 
-const NET_LOCAL: u8 = 0x01;
-const NET_BULLET: u8 = 0x02;
-const NET_MONSTER: u8 = 0x04;
+// World gravity (m/s²). Bullets integrate the same constant so their arcs match
+// Rapier-simulated bodies.
+const GRAVITY: f32 = -20.0;
 
-// Bullet maximum lifetime before automatic despawn (~10 s at 60 fps).
-const PROJ_MAX_FRAMES: u32 = 600;
-// Sentinel stored in bullet_ages after a HitPatch has been emitted. Prevents
-// re-emitting the event on subsequent ticks while TS processes the HitPatch and
-// calls destroy_entity. The entity is NOT destroyed here — TS owns that step.
-const BULLET_DEAD: u32 = u32::MAX;
+// Bullet maximum lifetime in ticks (~2.4 s at the 4 ms sim step).
+const BULLET_MAX_FRAMES: u32 = 600;
+// Bullets below this Y are dead (fell out of the map).
+const BULLET_KILL_PLANE_Y: f32 = -20.0;
+// Post-bounce offset along the surface normal so the reflected bullet doesn't
+// start embedded in the surface it just hit.
+const BULLET_BOUNCE_OFFSET: f32 = 0.02;
 
-use netcode::{encode_patches, DeltaTracker, PeerSession};
-use patch::{HitPatch, MetricsPatch, NetPatch, PatchBundle, PatchGenerator};
+use netcode::{DeltaTracker, WireEvent};
+use patch::{
+    HitPatch, LifecycleKind, LifecyclePatch, MetricsPatch, NetEventKind, NetPatch, PatchBundle,
+    PatchGenerator,
+};
 use pathfinding::{NavMesh, NavMeshConfig, PathRequest, Waypoint};
 use physics::PhysicsWorld;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
-const PROJ_HIT_RADIUS_SQ: f32 = 1.2 * 1.2;
+const BULLET_HIT_RADIUS_SQ: f32 = 1.2 * 1.2;
+
+// Monster goal-reached epsilon: closer than this and the monster stops instead
+// of steering.
+const GOAL_REACHED_EPSILON: f32 = 0.001;
+// Initial replan cooldowns are staggered by entity ID across this many buckets
+// so a freshly spawned crowd doesn't request A* on the same tick.
+const REPLAN_STAGGER_BUCKETS: u32 = 30;
+// A vertical speed above this marks a jump frame — separation skips those so it
+// doesn't fight the impulse.
+const JUMP_FRAME_VY_THRESHOLD: f32 = 0.1;
+// Terrain layers scanned per navmesh column before giving up (stacked platforms).
+const MAX_TERRAIN_LAYERS_PER_COLUMN: usize = 8;
+
+// The WebRTC transport has no disconnect callback, so liveness is inferred from
+// traffic: a peer silent for longer than this (sim time) is dropped and its
+// mirrors despawned. Peers Ping when otherwise idle, so a healthy connection is
+// never silent for more than PING_INTERVAL_SECS.
+const PEER_TIMEOUT_SECS: f32 = 5.0;
+const PING_INTERVAL_SECS: f32 = 1.0;
+
+// Replication cadence by urgency/predictability, in ticks (~4 ms each).
+// Default (unpredictable, e.g. player input): every tick. NET_LOW_URGENCY
+// background actors: ~16 Hz. NET_PREDICTABLE entities ride receiver-side
+// extrapolation and only need drift corrections (~8 Hz) plus engine-forced
+// updates at discontinuities (bullet bounces).
+const LOW_URGENCY_STRIDE: u64 = 15;
+const PREDICTABLE_STRIDE: u64 = 30;
 
 // --- Game tuning configs ---
 // Defaults are engine-provided; games override them via set_ai_config / set_nav_config
@@ -32,6 +66,8 @@ const PROJ_HIT_RADIUS_SQ: f32 = 1.2 * 1.2;
 #[serde(default)]
 pub struct AiConfig {
     pub walk_speed: f32,
+    /// When false, monsters route around jump edges (or fail to path).
+    pub can_jump: bool,
     pub jump_speed: f32,
     pub jump_trigger_dist: f32,
     pub jump_cooldown: f32,
@@ -49,6 +85,7 @@ impl Default for AiConfig {
     fn default() -> Self {
         Self {
             walk_speed: 2.5,
+            can_jump: true,
             jump_speed: 13.0,
             jump_trigger_dist: 2.5,
             jump_cooldown: 0.9,
@@ -88,6 +125,107 @@ impl Default for NavConfig {
             corner_drop_tolerance: 0.25,
         }
     }
+}
+
+/// Player controller + combat tuning. Game-supplied like AiConfig; the engine
+/// owns the mechanics (movement, jumping, firing, damage), the game the numbers.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
+pub struct PlayerConfig {
+    pub walk_speed: f32,
+    /// Yaw rate for the turn axis, radians/second.
+    pub turn_speed: f32,
+    pub jump_speed: f32,
+    /// Jump budget between groundings (2 = double jump).
+    pub max_jumps: u32,
+    pub bullet_speed: f32,
+    /// Bullet muzzle offset from the player center, along facing / up.
+    pub bullet_spawn_forward: f32,
+    pub bullet_spawn_up: f32,
+    pub bullet_damage: i32,
+}
+
+impl Default for PlayerConfig {
+    fn default() -> Self {
+        Self {
+            walk_speed: 15.0,
+            turn_speed: 1.8,
+            jump_speed: 12.0,
+            max_jumps: 2,
+            bullet_speed: 40.0,
+            bullet_spawn_forward: 1.1,
+            bullet_spawn_up: 0.4,
+            bullet_damage: 50,
+        }
+    }
+}
+
+/// Monster population tuning: spawn template, ring placement, respawn policy.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
+pub struct MonsterConfig {
+    pub half_width: f32,
+    pub half_height: f32,
+    pub half_depth: f32,
+    pub health: i32,
+    pub net_flags: u8,
+    /// spawn_monsters ring placement: radius = base + (i % steps) * step.
+    pub spawn_y: f32,
+    pub ring_base_radius: f32,
+    pub ring_radius_step: f32,
+    pub ring_steps: u32,
+    /// When true, a killed monster respawns at a random ring position.
+    pub respawn: bool,
+    pub respawn_radius_min: f32,
+    pub respawn_radius_max: f32,
+    pub respawn_y: f32,
+}
+
+impl Default for MonsterConfig {
+    fn default() -> Self {
+        Self {
+            half_width: 0.4,
+            half_height: 0.9,
+            half_depth: 0.4,
+            health: 50,
+            net_flags: NET_LOCAL | NET_MONSTER | NET_REPLICATED | NET_LOW_URGENCY,
+            spawn_y: 5.0,
+            ring_base_radius: 10.0,
+            ring_radius_step: 4.0,
+            ring_steps: 3,
+            respawn: true,
+            respawn_radius_min: 30.0,
+            respawn_radius_max: 40.0,
+            respawn_y: 10.0,
+        }
+    }
+}
+
+/// Raw player input state, sent by the UI layer each frame; the engine consumes
+/// the latest every tick. TS owns only the key/mouse mapping that produces it.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct PlayerInput {
+    /// −1..1 forward/back axis, relative to the player's yaw.
+    pub forward: f32,
+    /// −1..1 strafe axis (positive = left).
+    pub strafe: f32,
+    /// −1..1 turn axis, integrated at turn_speed. Ignored while yaw_override set.
+    pub turn: f32,
+    /// Absolute yaw (radians) when the camera drives facing (pointer lock).
+    pub yaw_override: Option<f32>,
+    /// Held state; the engine edge-detects for the jump budget.
+    pub jump_held: bool,
+    /// Aim pitch (radians) — owned by the UI's look controls; used for firing.
+    pub aim_pitch: f32,
+}
+
+struct PlayerState {
+    eid: u32,
+    yaw: f32,
+    jumps_used: u32,
+    prev_jump_held: bool,
+    input: PlayerInput,
 }
 
 /// One static terrain block as supplied by the game's map data.
@@ -177,6 +315,9 @@ struct MonsterState {
     last_sample_x: f32,
     last_sample_z: f32,
     stuck_sample_timer: f32,
+    /// Per-monster goal override (set_monster_goal); None = the engine-wide
+    /// default goal (update_monster_goal).
+    goal: Option<[f32; 2]>,
 }
 
 impl MonsterState {
@@ -190,6 +331,122 @@ impl MonsterState {
             last_sample_x: f32::INFINITY,
             last_sample_z: f32::INFINITY,
             stuck_sample_timer: 0.0,
+            goal: None,
+        }
+    }
+
+    /// Decay cooldowns, run stuck sampling, and decide whether this monster
+    /// should replan this tick. A stuck escape (no movement across enough
+    /// samples) drops the path and zeroes the cooldown so the next check
+    /// replans immediately. When the shared per-tick A* budget is spent
+    /// (`replan_budget_available == false`), the cooldown is left untouched so
+    /// the monster retries next tick instead of losing its turn.
+    #[allow(clippy::too_many_arguments)]
+    fn update_stuck_and_replan(
+        &mut self,
+        ai: &AiConfig,
+        dt_secs: f32,
+        mx: f32,
+        mz: f32,
+        goal_x: f32,
+        goal_z: f32,
+        replan_budget_available: bool,
+    ) -> bool {
+        self.jump_cooldown = (self.jump_cooldown - dt_secs).max(0.0);
+
+        self.stuck_sample_timer += dt_secs;
+        if self.stuck_sample_timer >= ai.stuck_sample_interval {
+            self.stuck_sample_timer = 0.0;
+            let moved =
+                ((mx - self.last_sample_x).powi(2) + (mz - self.last_sample_z).powi(2)).sqrt();
+            if moved < ai.stuck_move_threshold {
+                self.stuck_timer += ai.stuck_sample_interval;
+                if self.stuck_timer >= ai.stuck_escape_after {
+                    self.path = None;
+                    self.replan_cooldown = 0.0;
+                    self.stuck_timer = 0.0;
+                }
+            } else {
+                self.stuck_timer = 0.0;
+            }
+            self.last_sample_x = mx;
+            self.last_sample_z = mz;
+        }
+
+        self.replan_cooldown = (self.replan_cooldown - dt_secs).max(0.0);
+
+        let path_stale = match self.path.as_ref().and_then(|p| p.last()) {
+            Some(wp) => {
+                ((goal_x - wp.x).powi(2) + (goal_z - wp.z).powi(2)).sqrt() > ai.replan_stale_dist
+            }
+            None => true,
+        };
+
+        if path_stale && self.replan_cooldown <= 0.0 && replan_budget_available {
+            self.replan_cooldown = ai.replan_cooldown;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Advance past reached waypoints, then return the desired XZ walk
+    /// direction and whether to jump this tick (starting the jump cooldown when
+    /// so). Falls back to the direct goal bearing when the path is exhausted.
+    fn follow_waypoints(
+        &mut self,
+        ai: &AiConfig,
+        mx: f32,
+        mz: f32,
+        foot_y: f32,
+        grounded: bool,
+        goal_dir: [f32; 2],
+    ) -> (f32, f32, bool) {
+        let path_len = self.path.as_ref().map_or(0, |p| p.len());
+
+        while self.waypoint_index < path_len {
+            let (wp_x, wp_z, wp_y, req_jump) = {
+                let wp = &self.path.as_ref().unwrap()[self.waypoint_index];
+                (wp.x, wp.z, wp.y, wp.requires_jump)
+            };
+            if (wp_x - mx).hypot(wp_z - mz) >= ai.waypoint_reach {
+                break;
+            }
+            if req_jump && foot_y < wp_y - ai.jump_height_tolerance {
+                break;
+            }
+            self.waypoint_index += 1;
+        }
+
+        if self.waypoint_index >= path_len {
+            // A real path fully walked → replan immediately for responsiveness.
+            // A None path (last search FAILED, e.g. unreachable goal) must keep
+            // its cooldown: zeroing it here turns one failed search into a
+            // per-tick storm of full-mesh A* explorations — each failure scans
+            // the whole graph, which is what tanks the tick budget in WASM.
+            if self.path.is_some() && path_len > 0 {
+                self.replan_cooldown = 0.0;
+            }
+            self.path = None;
+            (goal_dir[0], goal_dir[1], false)
+        } else {
+            let (wp_x, wp_z, req_jump) = {
+                let wp = &self.path.as_ref().unwrap()[self.waypoint_index];
+                (wp.x, wp.z, wp.requires_jump)
+            };
+            let wp_dx = wp_x - mx;
+            let wp_dz = wp_z - mz;
+            let wp_dist = (wp_dx * wp_dx + wp_dz * wp_dz).sqrt();
+            let dir_x = if wp_dist > 0.0 { wp_dx / wp_dist } else { goal_dir[0] };
+            let dir_z = if wp_dist > 0.0 { wp_dz / wp_dist } else { goal_dir[1] };
+            let wants_jump = req_jump
+                && self.jump_cooldown <= 0.0
+                && grounded
+                && wp_dist < ai.jump_trigger_dist;
+            if wants_jump {
+                self.jump_cooldown = ai.jump_cooldown;
+            }
+            (dir_x, dir_z, wants_jump)
         }
     }
 }
@@ -203,12 +460,35 @@ pub struct Engine {
     physics: PhysicsWorld,
     navmesh: Option<NavMesh>,
     delta_tracker: DeltaTracker,
-    peer_session: PeerSession,
     patch_gen: PatchGenerator,
+    // Transport bridge: the game layer (main thread) owns the actual WebRTC
+    // connections — RTCPeerConnection does not exist in workers — and shuttles
+    // bytes/peer events through these queues via the net_* API. The engine
+    // owns the protocol on top.
+    inbound_net: Vec<(String, Vec<u8>)>,
+    new_net_peers: Vec<String>,
+    dropped_net_peers: Vec<String>,
+    // (target, payload); target None = broadcast to every connected peer.
+    outbound_net: Vec<(Option<String>, Vec<u8>)>,
     last_metrics: MetricsPatch,
-    local_peer_id: String,
     // Pre-computed list of NET_LOCAL entity IDs — updated on spawn/destroy.
     local_entities: Vec<u32>,
+    // Remote-entity mirrors: (peer, remote eid) → local mirror eid, plus the
+    // reverse map for cleanup. Remote ids live in the SENDER's id space and
+    // would collide with local ids if applied directly.
+    remote_mirrors: HashMap<(String, u32), u32>,
+    mirror_owner: HashMap<u32, (String, u32)>,
+    // Public flag profile received with each mirror's Spawn (NET_PUBLIC_MASK
+    // bits only). Kept out of the world's net_flags so engine systems never
+    // treat mirrors as simulatable entities.
+    mirror_flags: HashMap<u32, u8>,
+    // Accumulated sim time (sum of tick dt) — drives peer timeouts/keepalive.
+    sim_time: f32,
+    peer_last_seen: HashMap<String, f32>,
+    last_broadcast_time: f32,
+    // Locally-owned entities destroyed since the last flush; announced to peers
+    // as Despawned events so their mirrors don't linger.
+    pending_despawns: Vec<u32>,
     // Per-monster AI state — populated when a NET_MONSTER entity is spawned.
     monster_states: HashMap<u32, MonsterState>,
     // Age counter (in ticks) for each NET_BULLET entity — used for TTL enforcement.
@@ -222,9 +502,17 @@ pub struct Engine {
     // update_monster_goal(). Stored so the engine owns the loop, not the caller.
     goal_x: f32,
     goal_z: f32,
-    // Game-supplied tuning; engine defaults until set_ai_config / set_nav_config.
+    // Game-supplied tuning; engine defaults until the set_*_config calls.
     ai: AiConfig,
     nav: NavConfig,
+    player_cfg: PlayerConfig,
+    monster_cfg: MonsterConfig,
+    // The controller-driven player (register_player); None = no local player.
+    player: Option<PlayerState>,
+    // Local-entity lifecycle events queued for the next PatchBundle.
+    pending_lifecycle: Vec<LifecyclePatch>,
+    // LCG state for respawn scatter — deterministic, dependency-free.
+    rng_state: u64,
     // Terrain entities whose top surface must not receive navmesh nodes (walls etc.).
     non_walkable_terrain: std::collections::HashSet<u32>,
     // Reusable scratch buffers for the per-tick hot loop. Cleared and refilled each tick
@@ -249,14 +537,23 @@ impl Engine {
 
         Engine {
             world: World::new(1024),
-            physics: PhysicsWorld::new(-20.0),
+            physics: PhysicsWorld::new(GRAVITY),
             navmesh: None,
             delta_tracker: DeltaTracker::new(),
-            peer_session: PeerSession::new(),
             patch_gen: PatchGenerator::new(),
+            inbound_net: Vec::new(),
+            new_net_peers: Vec::new(),
+            dropped_net_peers: Vec::new(),
+            outbound_net: Vec::new(),
             last_metrics: MetricsPatch::default(),
-            local_peer_id: "local".to_string(),
             local_entities: Vec::new(),
+            remote_mirrors: HashMap::new(),
+            mirror_owner: HashMap::new(),
+            mirror_flags: HashMap::new(),
+            sim_time: 0.0,
+            peer_last_seen: HashMap::new(),
+            last_broadcast_time: 0.0,
+            pending_despawns: Vec::new(),
             monster_states: HashMap::new(),
             bullet_ages: HashMap::new(),
             pending_jumps: HashMap::new(),
@@ -264,6 +561,11 @@ impl Engine {
             goal_z: 0.0,
             ai: AiConfig::default(),
             nav: NavConfig::default(),
+            player_cfg: PlayerConfig::default(),
+            monster_cfg: MonsterConfig::default(),
+            player: None,
+            pending_lifecycle: Vec::new(),
+            rng_state: 0x9E37_79B9_7F4A_7C15,
             non_walkable_terrain: std::collections::HashSet::new(),
             scratch_ids: Vec::new(),
             scratch_positions: Vec::new(),
@@ -271,54 +573,204 @@ impl Engine {
         }
     }
 
-    /// Update the position monsters path toward. Call once per frame before tick()
-    /// with the player's current world position.
+    /// Update the default goal — the position every monster without a
+    /// per-entity override paths toward. Call once per frame before tick()
+    /// (kikorin passes the player's position).
     pub fn update_monster_goal(&mut self, gx: f32, gz: f32) {
         self.goal_x = gx;
         self.goal_z = gz;
     }
 
+    /// Give one monster its own goal, overriding the default until cleared.
+    /// No-op for entities without monster AI state.
+    pub fn set_monster_goal(&mut self, id: u32, gx: f32, gz: f32) {
+        if let Some(state) = self.monster_states.get_mut(&id) {
+            state.goal = Some([gx, gz]);
+        }
+    }
+
+    /// Revert a monster to the default goal.
+    pub fn clear_monster_goal(&mut self, id: u32) {
+        if let Some(state) = self.monster_states.get_mut(&id) {
+            state.goal = None;
+        }
+    }
+
     /// Override monster AI tuning. Accepts a partial JS object; missing fields fall
-    /// back to engine defaults (not to previously set values). Invalid input is ignored.
+    /// back to engine defaults (not to previously set values). Invalid input is
+    /// ignored with a warning.
     pub fn set_ai_config(&mut self, cfg: JsValue) {
-        if let Ok(c) = serde_wasm_bindgen::from_value(cfg) {
-            self.ai = c;
+        match serde_wasm_bindgen::from_value(cfg) {
+            Ok(c) => self.ai = c,
+            Err(e) => log::warn!("set_ai_config: invalid config ignored: {e}"),
         }
     }
 
     /// Override navmesh build tuning (same partial-object semantics as set_ai_config).
     /// Takes effect on the next load_map / build_navmesh call.
     pub fn set_nav_config(&mut self, cfg: JsValue) {
-        if let Ok(c) = serde_wasm_bindgen::from_value(cfg) {
-            self.nav = c;
+        match serde_wasm_bindgen::from_value(cfg) {
+            Ok(c) => self.nav = c,
+            Err(e) => log::warn!("set_nav_config: invalid config ignored: {e}"),
+        }
+    }
+
+    /// Override player controller/combat tuning (partial-object semantics).
+    pub fn set_player_config(&mut self, cfg: JsValue) {
+        match serde_wasm_bindgen::from_value(cfg) {
+            Ok(c) => self.player_cfg = c,
+            Err(e) => log::warn!("set_player_config: invalid config ignored: {e}"),
+        }
+    }
+
+    /// Override monster spawn/respawn tuning (partial-object semantics).
+    pub fn set_monster_config(&mut self, cfg: JsValue) {
+        match serde_wasm_bindgen::from_value(cfg) {
+            Ok(c) => self.monster_cfg = c,
+            Err(e) => log::warn!("set_monster_config: invalid config ignored: {e}"),
+        }
+    }
+
+    /// Register the player entity. From then on the engine runs its controller
+    /// (facing, movement, jump budget) from set_player_input, fires its bullets
+    /// via player_fire, and aims the default monster goal at it every tick.
+    pub fn register_player(&mut self, eid: u32) {
+        self.player = Some(PlayerState {
+            eid,
+            yaw: 0.0,
+            jumps_used: 0,
+            prev_jump_held: false,
+            input: PlayerInput::default(),
+        });
+    }
+
+    /// Latest raw input state from the UI (call once per frame). Invalid input
+    /// is ignored with a warning.
+    pub fn set_player_input(&mut self, input: JsValue) {
+        match serde_wasm_bindgen::from_value(input) {
+            Ok(i) => {
+                if let Some(p) = self.player.as_mut() {
+                    p.input = i;
+                }
+            }
+            Err(e) => log::warn!("set_player_input: invalid input ignored: {e}"),
+        }
+    }
+
+    /// Fire one bullet from the player along its facing + aim pitch (tuning in
+    /// PlayerConfig). Ballistic, replicated, predictable; spawn and death reach
+    /// the game as lifecycle patches.
+    pub fn player_fire(&mut self) {
+        let cfg = self.player_cfg;
+        let Some((eid, yaw, aim_pitch)) = self
+            .player
+            .as_ref()
+            .map(|p| (p.eid, p.yaw, p.input.aim_pitch))
+        else {
+            return;
+        };
+        let Some(pos) = self.world.position(eid) else {
+            return;
+        };
+        let (sin_y, cos_y) = (yaw.sin(), yaw.cos());
+        let (sin_p, cos_p) = (aim_pitch.sin(), aim_pitch.cos());
+        self.spawn_bullet(
+            pos[0] + sin_y * cfg.bullet_spawn_forward,
+            pos[1] + cfg.bullet_spawn_up,
+            pos[2] + cos_y * cfg.bullet_spawn_forward,
+            sin_y * cos_p * cfg.bullet_speed,
+            sin_p * cfg.bullet_speed,
+            cos_y * cos_p * cfg.bullet_speed,
+            NET_REPLICATED | NET_PREDICTABLE,
+        );
+    }
+
+    /// Spawn `count` monsters on a ring around the origin (placement/template
+    /// from MonsterConfig). Each spawn surfaces as a lifecycle patch.
+    pub fn spawn_monsters(&mut self, count: u32) {
+        let cfg = self.monster_cfg;
+        for i in 0..count {
+            let angle = (i as f32 / count.max(1) as f32) * std::f32::consts::TAU;
+            let radius =
+                cfg.ring_base_radius + (i % cfg.ring_steps.max(1)) as f32 * cfg.ring_radius_step;
+            self.spawn_box_entity(
+                angle.cos() * radius,
+                cfg.spawn_y,
+                angle.sin() * radius,
+                cfg.half_width,
+                cfg.half_height,
+                cfg.half_depth,
+                cfg.health,
+                cfg.net_flags,
+            );
         }
     }
 
     /// Advance simulation by dt_ms milliseconds.
     /// Returns a PatchBundle as a JS object directly — no bincode round-trip.
+    /// Thin WASM wrapper: the simulation itself lives in `tick_core` so native
+    /// tests can execute full ticks without crossing the JsValue boundary.
     pub fn tick(&mut self, dt_ms: f64) -> JsValue {
         let tick_timer = Timer::new();
-        let dt_secs = (dt_ms / 1000.0) as f32;
-        log::debug!("tick {} — dt_ms={:.2}", self.world.tick_count(), dt_ms);
+        let mut bundle = self.tick_core((dt_ms / 1000.0) as f32);
 
-        // 1. Drain inbound peer messages, apply to world, and map the applied wire
-        // patches to the thinner boundary NetPatch that rides in the PatchBundle.
+        // tick_ms is stamped here so it covers the whole call; the JsValue
+        // conversion below cannot be self-timed — the worker measures it as
+        // boundary_ms (observed call time minus tick_ms).
+        bundle.metrics.tick_ms = tick_timer.elapsed_ms();
+        self.last_metrics = bundle.metrics.clone();
+        serde_wasm_bindgen::to_value(&JsPatch::from(bundle)).unwrap_or(JsValue::NULL)
+    }
+
+    /// One full simulation tick: net in → AI → separation → physics → bullets →
+    /// net out → PatchBundle. Native-callable (no wasm types).
+    fn tick_core(&mut self, dt_secs: f32) -> PatchBundle {
+        log::debug!("tick {} — dt_secs={:.4}", self.world.tick_count(), dt_secs);
+        self.sim_time += dt_secs;
+
+        // 1. Networking inbound: apply queued peer payloads to local mirror
+        // entities, greet newly connected peers with a full snapshot (late
+        // join), and drop disconnected or silent peers.
         let net_timer = Timer::new();
         let mut net_patches: Vec<NetPatch> = Vec::new();
-        for (_peer_id, bytes) in self.peer_session.drain_inbound() {
-            if let Ok(patches) = self.delta_tracker.apply_inbound(&bytes, &mut self.world) {
-                net_patches.extend(patches.into_iter().map(|p| NetPatch {
-                    peer_id: p.peer_id,
-                    entity: p.entity,
-                }));
+        for (peer_id, bytes) in std::mem::take(&mut self.inbound_net) {
+            self.ingest_peer_payload(&peer_id, &bytes, &mut net_patches);
+        }
+        let new_peers = std::mem::take(&mut self.new_net_peers);
+        if !new_peers.is_empty() {
+            let mut replicated = std::mem::take(&mut self.scratch_ids);
+            Self::collect_by_flag(&self.world, NET_REPLICATED, &mut replicated);
+            let events = self.delta_tracker.full_snapshot(&self.world, &replicated);
+            self.scratch_ids = replicated;
+            let payload = (!events.is_empty()).then(|| netcode::encode_events(&events));
+            for peer in new_peers {
+                log::info!("peer connected: {peer} — sending {} full-sync events", events.len());
+                self.peer_last_seen.insert(peer.clone(), self.sim_time);
+                if let Some(p) = &payload {
+                    self.outbound_net.push((Some(peer.clone()), p.clone()));
+                }
+                // Transport-level connection notice — lets the UI show the peer
+                // before (or without) any entity data arriving.
+                net_patches.push(NetPatch {
+                    peer_id: peer,
+                    entity: 0,
+                    kind: NetEventKind::PeerJoined,
+                    flags: None,
+                });
             }
         }
+        for peer in std::mem::take(&mut self.dropped_net_peers) {
+            self.drop_peer(peer, &mut net_patches);
+        }
+        self.prune_timed_out_peers(&mut net_patches);
+        self.extrapolate_predictable_mirrors(dt_secs);
         let mut net_ms = net_timer.elapsed_ms();
 
-        // 2. Monster AI: compute desired directions, handle stuck detection, replan paths.
-        // Runs before physics so the computed velocities feed into sync_from_world.
-        // Returns the time spent inside A* searches, reported separately as pathfinding_ms.
+        // 2. Player controller (raw input → facing/movement/jump, monster goal
+        // follows the player), then monster AI. Both run before physics so the
+        // computed velocities feed into sync_from_world.
         let ai_timer = Timer::new();
+        self.tick_player_controller(dt_secs);
         let pathfinding_ms = self.tick_monster_ai(dt_secs);
 
         // 2.25. Separation: adjust NET_MONSTER XZ velocities with soft repulsion forces so
@@ -335,30 +787,34 @@ impl Engine {
         // grounded/semantic delivery. Engine-owned system work — counted as AI time.
         let bullet_timer = Timer::new();
         let hits = self.tick_bullets(dt_secs);
+        // Local entities re-dirty HEALTH each tick so grounded rides the
+        // SemanticPatch (known workaround — see the engine spec).
         for &id in &self.local_entities {
             self.world.mark_dirty(id, DirtyFlags::HEALTH);
-            self.delta_tracker.mark_dirty(id);
         }
+        self.mark_replication_dirty();
         ai_ms += bullet_timer.elapsed_ms();
 
-        // 4. Flush outbound deltas to all peers.
-        // No clone needed: delta_tracker, world, and local_peer_id are disjoint fields.
+        // 4. Flush outbound deltas + despawns to all peers (plus a keepalive
+        // Ping when otherwise silent — see PEER_TIMEOUT_SECS).
         let flush_timer = Timer::new();
-        let outbound = self.delta_tracker.flush(&self.world, &self.local_peer_id);
+        let outbound = self.collect_outbound_events();
         if !outbound.is_empty() {
-            self.peer_session.broadcast(&encode_patches(&outbound));
+            self.outbound_net
+                .push((None, netcode::encode_events(&outbound)));
+            self.last_broadcast_time = self.sim_time;
         }
         net_ms += flush_timer.elapsed_ms();
 
-        // 5. Build PatchBundle and convert directly to JsValue. patch_ms and tick_ms are
-        // stamped into the bundle after generation so consumers receive real values.
-        // The JsValue conversion itself cannot be self-timed; the worker measures it as
-        // boundary_ms (observed call time minus tick_ms).
+        // 5. Build the PatchBundle. patch_ms is stamped after generation so
+        // consumers receive a real value; tick_ms is stamped by the wrapper.
         let patch_timer = Timer::new();
+        let lifecycle = std::mem::take(&mut self.pending_lifecycle);
         let mut bundle = self.patch_gen.generate(
             &self.world,
             net_patches,
             hits,
+            lifecycle,
             MetricsPatch {
                 tick_ms: 0.0,
                 ai_ms,
@@ -373,14 +829,7 @@ impl Engine {
         self.world.clear_dirty();
         self.world.advance_tick();
 
-        bundle.metrics.tick_ms = tick_timer.elapsed_ms();
-        self.last_metrics = bundle.metrics.clone();
-        serde_wasm_bindgen::to_value(&JsPatch::from(bundle)).unwrap_or(JsValue::NULL)
-    }
-
-    /// Apply a serialized input event or inbound peer message.
-    pub fn apply_input(&mut self, payload: &[u8]) {
-        let _ = self.delta_tracker.apply_inbound(payload, &mut self.world);
+        bundle
     }
 
     /// Deserialize a PatchBundle byte array into a JS object.
@@ -422,10 +871,43 @@ impl Engine {
     }
 
     /// Initialize WebRTC peer networking (WASM only).
+    // --- Transport bridge (net_*) ---
+    // The game layer owns the WebRTC connections (PeerJS on the main thread —
+    // workers have no RTCPeerConnection) and drives these.
+
+    /// A peer's data channel opened. Queues a late-join full sync + PeerJoined.
+    pub fn net_peer_connected(&mut self, peer_id: &str) {
+        self.new_net_peers.push(peer_id.to_string());
+    }
+
+    /// A peer's data channel closed. Its mirrors despawn next tick (the silent
+    /// timeout remains as a backstop for channels that die without closing).
+    pub fn net_peer_disconnected(&mut self, peer_id: &str) {
+        self.dropped_net_peers.push(peer_id.to_string());
+    }
+
+    /// Inbound payload from a peer; applied at the start of the next tick.
+    pub fn net_ingest(&mut self, peer_id: &str, payload: &[u8]) {
+        self.inbound_net.push((peer_id.to_string(), payload.to_vec()));
+    }
+
+    /// Everything the engine wants sent since the last call, as
+    /// `[{ peer: string | null, data: Uint8Array }]` — null peer = broadcast.
     #[cfg(target_arch = "wasm32")]
-    pub fn init_networking(&mut self, session_id: &str, signaling_url: &str) {
-        self.local_peer_id = session_id.to_string();
-        self.peer_session.connect(session_id, signaling_url);
+    pub fn net_take_outbound(&mut self) -> JsValue {
+        let items = js_sys::Array::new();
+        for (peer, bytes) in self.take_outbound() {
+            let obj = js_sys::Object::new();
+            let peer_val = peer.map_or(JsValue::NULL, JsValue::from);
+            let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("peer"), &peer_val);
+            let _ = js_sys::Reflect::set(
+                &obj,
+                &JsValue::from_str("data"),
+                &js_sys::Uint8Array::from(&bytes[..]).into(),
+            );
+            items.push(&obj);
+        }
+        items.into()
     }
 
     /// Spawn an entity from a bincode-encoded EntityBlueprint. Returns the new entity ID.
@@ -458,6 +940,7 @@ impl Engine {
                 },
             );
         }
+        self.register_spawned(id, bp.net_flags.unwrap_or(0));
         id
     }
 
@@ -472,11 +955,13 @@ impl Engine {
         let mut max_x = f32::NEG_INFINITY;
         let mut min_z = f32::INFINITY;
         let mut max_z = f32::NEG_INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
         for id in self.world.entities() {
             if !self.world.is_floor(id) {
                 continue;
             }
-            let Some([x, _, z]) = self.world.position(id) else {
+            let Some([x, y, z]) = self.world.position(id) else {
                 continue;
             };
             let Some(col) = self.world.collider(id) else {
@@ -489,6 +974,8 @@ impl Engine {
             max_x = max_x.max(x + col.half_width);
             min_z = min_z.min(z - col.half_depth);
             max_z = max_z.max(z + col.half_depth);
+            min_y = min_y.min(y - col.half_height);
+            max_y = max_y.max(y + col.half_height);
         }
         if !min_x.is_finite() {
             // No floor geometry loaded — nothing to walk on.
@@ -499,6 +986,10 @@ impl Engine {
         let max_x = max_x + cell_size;
         let min_z = min_z - cell_size;
         let max_z = max_z + cell_size;
+        // Vertical probe window: just above the highest floor top down to just
+        // below the lowest floor bottom — derived, like XZ, from the geometry.
+        let scan_top = max_y + 1.0;
+        let scan_bottom = min_y - 1.0;
 
         let cols = (((max_x - min_x) / cell_size).ceil() as usize).max(1);
         let rows = (((max_z - min_z) / cell_size).ceil() as usize).max(1);
@@ -506,13 +997,7 @@ impl Engine {
         self.physics.sync_from_world(&self.world);
         self.physics.prepare_queries();
 
-        let mut mesh = NavMesh::new(NavMeshConfig {
-            cell_size,
-            min_x,
-            max_x,
-            min_z,
-            max_z,
-        });
+        let mut mesh = NavMesh::new(NavMeshConfig { cell_size });
 
         let mut node_grid: Vec<Option<pathfinding::NodeId>> = vec![None; cols * rows];
         let mut node_ys: Vec<f32> = Vec::new();
@@ -521,7 +1006,7 @@ impl Engine {
             for col in 0..cols {
                 let x = min_x + (col as f32 + 0.5) * cell_size;
                 let z = min_z + (row as f32 + 0.5) * cell_size;
-                if let Some(y) = self.walkable_height_at(x, z) {
+                if let Some(y) = self.walkable_height_at(x, z, scan_top, scan_bottom) {
                     let id = mesh.add_node(x, y, z);
                     debug_assert_eq!(id as usize, node_ys.len());
                     node_ys.push(y);
@@ -654,6 +1139,27 @@ impl Engine {
 
     /// Destroy an entity and remove its Rapier physics body.
     pub fn destroy_entity(&mut self, id: u32) {
+        // NET_REPLICATED entities announce their destruction so remote mirrors
+        // don't linger.
+        if self.world.net_flags(id).is_some_and(|f| f & NET_REPLICATED != 0) {
+            self.pending_despawns.push(id);
+        }
+        // Lifecycle event for the game's mesh bookkeeping — terrain is excluded
+        // (load_map owns it) and mirrors report through NetPatch instead. The
+        // alive check keeps a double-destroy from emitting twice.
+        let is_mirror = self.mirror_owner.contains_key(&id);
+        if !is_mirror && !self.world.is_floor(id) && self.world.position(id).is_some() {
+            self.pending_lifecycle.push(LifecyclePatch {
+                entity: id,
+                kind: LifecycleKind::Despawned,
+                flags: self.world.net_flags(id).unwrap_or(0),
+            });
+        }
+        // A force-destroyed remote mirror drops its mapping too.
+        if let Some(key) = self.mirror_owner.remove(&id) {
+            self.remote_mirrors.remove(&key);
+        }
+        self.mirror_flags.remove(&id);
         self.world.destroy_entity(id);
         self.physics.remove_entity(id);
         self.local_entities.retain(|&e| e != id);
@@ -661,6 +1167,9 @@ impl Engine {
         self.bullet_ages.remove(&id);
         self.non_walkable_terrain.remove(&id);
         self.pending_jumps.remove(&id);
+        // Entity IDs are recycled: a stale delta snapshot would suppress the
+        // recycled entity's first outbound sync.
+        self.delta_tracker.forget(id);
     }
 
     /// Load a map from a JS array of `{ x, y, z, hw, hh, hd, kind }` blocks: spawns a
@@ -709,7 +1218,6 @@ impl Engine {
     ) -> u32 {
         let id = self.world.create_entity();
         self.world.set_position(id, [x, y, z]);
-        self.world.set_velocity(id, [0.0, 0.0, 0.0]);
         self.world.set_health(id, health);
         self.world.set_net_flags(id, net_flags);
         self.world.set_collider(
@@ -722,25 +1230,30 @@ impl Engine {
                 half_depth: hd,
             },
         );
-        if net_flags & NET_LOCAL != 0 {
-            self.local_entities.push(id);
-        }
-        if net_flags & NET_MONSTER != 0 {
-            // Stagger initial replan cooldowns using entity ID so monsters don't all
-            // request A* on the same tick at startup.
-            let stagger = (id % 30) as f32 / 30.0 * self.ai.replan_cooldown;
-            self.monster_states.insert(id, MonsterState::new(stagger));
-        }
+        self.register_spawned(id, net_flags);
         id
     }
 
-    /// Spawn a projectile. The engine integrates its ballistic trajectory each tick.
-    pub fn spawn_bullet(&mut self, x: f32, y: f32, z: f32, vx: f32, vy: f32, vz: f32) -> u32 {
+    /// Spawn a projectile. The engine integrates its ballistic trajectory each
+    /// tick. `net_flags` adds the game's networking profile (e.g. NET_REPLICATED
+    /// | NET_PREDICTABLE); NET_BULLET is always set.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_bullet(
+        &mut self,
+        x: f32,
+        y: f32,
+        z: f32,
+        vx: f32,
+        vy: f32,
+        vz: f32,
+        net_flags: u8,
+    ) -> u32 {
         let id = self.world.create_entity();
         self.world.set_position(id, [x, y, z]);
         self.world.set_velocity(id, [vx, vy, vz]);
-        self.world.set_net_flags(id, NET_BULLET);
+        self.world.set_net_flags(id, net_flags | NET_BULLET);
         self.world.mark_dirty(id, DirtyFlags::TRANSFORM);
+        self.register_spawned(id, net_flags | NET_BULLET);
         id
     }
 
@@ -804,15 +1317,120 @@ impl Engine {
         self.pending_jumps.clear();
     }
 
+    /// Post-spawn bookkeeping shared by every spawn path. Ensures the entity has
+    /// a velocity component (so movement/jump commands work), registers the
+    /// NET-flag driven state (local replication list, per-monster AI state), and
+    /// queues the lifecycle event the game builds its mesh from.
+    fn register_spawned(&mut self, id: u32, net_flags: u8) {
+        if self.world.velocity(id).is_none() {
+            self.world.set_velocity(id, [0.0, 0.0, 0.0]);
+        }
+        if net_flags & NET_LOCAL != 0 {
+            self.local_entities.push(id);
+        }
+        if net_flags & NET_MONSTER != 0 {
+            let stagger =
+                (id % REPLAN_STAGGER_BUCKETS) as f32 / REPLAN_STAGGER_BUCKETS as f32
+                    * self.ai.replan_cooldown;
+            self.monster_states.insert(id, MonsterState::new(stagger));
+        }
+        self.pending_lifecycle.push(LifecyclePatch {
+            entity: id,
+            kind: LifecycleKind::Spawned,
+            flags: net_flags,
+        });
+    }
+
+    /// Run the player controller: facing (turn axis or camera override), planar
+    /// movement, and the double-jump budget — all from the latest raw input.
+    /// Also aims the default monster goal at the player.
+    fn tick_player_controller(&mut self, dt_secs: f32) {
+        let cfg = self.player_cfg;
+        let Some(p) = self.player.as_mut() else {
+            return;
+        };
+        let eid = p.eid;
+
+        if let Some(yaw) = p.input.yaw_override {
+            p.yaw = yaw;
+        } else {
+            p.yaw += p.input.turn * cfg.turn_speed * dt_secs;
+        }
+
+        // Standing on the ground refills the jump budget. (grounded is served
+        // from the physics cache, so the refill can lag a jump by a few ticks —
+        // same tolerance the game always had.)
+        if self.world.is_grounded(eid).unwrap_or(false) {
+            p.jumps_used = 0;
+        }
+        let jump_edge = p.input.jump_held && !p.prev_jump_held;
+        p.prev_jump_held = p.input.jump_held;
+        let vy = if jump_edge && p.jumps_used < cfg.max_jumps {
+            p.jumps_used += 1;
+            cfg.jump_speed
+        } else {
+            0.0
+        };
+
+        let (sin_y, cos_y) = (p.yaw.sin(), p.yaw.cos());
+        let mut vx = p.input.forward * sin_y + p.input.strafe * cos_y;
+        let mut vz = p.input.forward * cos_y - p.input.strafe * sin_y;
+        let len = (vx * vx + vz * vz).sqrt();
+        if len > 1.0 {
+            vx /= len;
+            vz /= len;
+        }
+        let yaw = p.yaw;
+
+        self.set_entity_velocity(eid, vx * cfg.walk_speed, vy, vz * cfg.walk_speed);
+        self.world.set_rotation(eid, [yaw, 0.0, 0.0]);
+        self.world.mark_dirty(eid, DirtyFlags::TRANSFORM);
+
+        // Monsters chase the player by default (per-monster goals still win).
+        if let Some(pos) = self.world.position(eid) {
+            self.goal_x = pos[0];
+            self.goal_z = pos[2];
+        }
+    }
+
+    /// Respawn one monster at a random bearing on the respawn ring.
+    fn respawn_monster(&mut self) {
+        let cfg = self.monster_cfg;
+        let angle = self.next_rand() * std::f32::consts::TAU;
+        let radius = cfg.respawn_radius_min
+            + self.next_rand() * (cfg.respawn_radius_max - cfg.respawn_radius_min);
+        self.spawn_box_entity(
+            angle.cos() * radius,
+            cfg.respawn_y,
+            angle.sin() * radius,
+            cfg.half_width,
+            cfg.half_height,
+            cfg.half_depth,
+            cfg.health,
+            cfg.net_flags,
+        );
+    }
+
+    /// LCG in [0, 1) — deterministic and dependency-free; spawn scatter only.
+    fn next_rand(&mut self) -> f32 {
+        self.rng_state = self
+            .rng_state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.rng_state >> 33) as f32 / (u32::MAX as f32 + 1.0)
+    }
+
     /// Height of the topmost WALKABLE floor surface at (x, z), for navmesh node
     /// placement. Unlike physics.floor_height_at, this skips non-walkable terrain
     /// (walls) and non-floor entities, continuing the scan below them — so a cell
     /// whose column passes through a parapet top gets its node on the platform
     /// underneath instead of an unreachable node on the wall.
-    fn walkable_height_at(&self, x: f32, z: f32) -> Option<f32> {
-        let mut from_y = 200.0_f32;
-        for _ in 0..8 {
-            let (eid, toi) = self.physics.cast_ray([x, from_y, z], [x, -50.0, z])?;
+    /// The scan window (`scan_top` → `scan_bottom`) is derived by the caller from
+    /// the loaded floor geometry — never hardcoded, so maps at any altitude work.
+    fn walkable_height_at(&self, x: f32, z: f32, scan_top: f32, scan_bottom: f32) -> Option<f32> {
+        let mut from_y = scan_top;
+        for _ in 0..MAX_TERRAIN_LAYERS_PER_COLUMN {
+            let (eid, toi) = self.physics.cast_ray([x, from_y, z], [x, scan_bottom, z])?;
             let hit_y = from_y - toi;
             if self.world.is_floor(eid) && !self.non_walkable_terrain.contains(&eid) {
                 return Some(hit_y);
@@ -822,7 +1440,7 @@ impl Engine {
             let pos = self.world.position(eid)?;
             let col = self.world.collider(eid)?;
             from_y = pos[1] - col.half_height - 0.01;
-            if from_y <= -50.0 {
+            if from_y <= scan_bottom {
                 return None;
             }
         }
@@ -867,13 +1485,238 @@ impl Engine {
         );
     }
 
-    /// Run monster AI for one tick: stuck detection, path replanning, waypoint following.
-    /// Sets ECS velocity and rotation for each NET_MONSTER entity; physics picks them up
-    /// in the following sync_from_world call.
-    /// Returns the milliseconds spent inside A* searches (the pathfinding_ms metric).
+    /// Decode and apply one peer payload: Delta/FullSync events route to this
+    /// peer's local mirror entities (created on first sight), Despawned drops
+    /// the mirror, Ping only refreshes liveness. Emits one boundary NetPatch
+    /// per entity event so the game can manage remote meshes. A payload that
+    /// fails to decode is dropped whole.
+    fn ingest_peer_payload(&mut self, peer: &str, bytes: &[u8], out: &mut Vec<NetPatch>) {
+        self.peer_last_seen.insert(peer.to_string(), self.sim_time);
+        let Ok(events) = netcode::decode_events(bytes) else {
+            return;
+        };
+        for event in events {
+            match event {
+                WireEvent::Spawn { entity, flags, fields } => {
+                    let (mirror, is_new) = self.mirror_for(peer, entity);
+                    // A Spawn for a known mirror is a re-sync (e.g. late-join
+                    // snapshot after reconnect) — refresh its profile.
+                    let public = flags & NET_PUBLIC_MASK;
+                    self.mirror_flags.insert(mirror, public);
+                    netcode::apply_fields_to_entity(&mut self.world, mirror, &fields);
+                    self.world.mark_dirty(mirror, DirtyFlags::TRANSFORM);
+                    out.push(NetPatch {
+                        peer_id: peer.to_string(),
+                        entity: mirror,
+                        kind: if is_new {
+                            NetEventKind::EntitySpawned
+                        } else {
+                            NetEventKind::EntityUpdated
+                        },
+                        flags: Some(public),
+                    });
+                }
+                WireEvent::Delta { entity, fields } => {
+                    // A Delta for an unknown entity (e.g. its Spawn raced a
+                    // reconnect) still creates a mirror — profile flags arrive
+                    // with the next full sync.
+                    let (mirror, is_new) = self.mirror_for(peer, entity);
+                    netcode::apply_fields_to_entity(&mut self.world, mirror, &fields);
+                    self.world.mark_dirty(mirror, DirtyFlags::TRANSFORM);
+                    out.push(NetPatch {
+                        peer_id: peer.to_string(),
+                        entity: mirror,
+                        kind: if is_new {
+                            NetEventKind::EntitySpawned
+                        } else {
+                            NetEventKind::EntityUpdated
+                        },
+                        flags: if is_new { Some(0) } else { None },
+                    });
+                }
+                WireEvent::Despawned { entity } => {
+                    if let Some(mirror) = self.remote_mirrors.get(&(peer.to_string(), entity)).copied()
+                    {
+                        self.destroy_entity(mirror);
+                        out.push(NetPatch {
+                            peer_id: peer.to_string(),
+                            entity: mirror,
+                            kind: NetEventKind::EntityDespawned,
+                            flags: None,
+                        });
+                    }
+                }
+                WireEvent::Ping => {}
+            }
+        }
+    }
+
+    /// Look up (or create) the local mirror for a remote entity. Mirrors are
+    /// display-only: no collider, no world NET flags — engine systems (AI,
+    /// bullets, physics, replication) all ignore them; their public profile
+    /// lives in `mirror_flags`.
+    fn mirror_for(&mut self, peer: &str, remote: u32) -> (u32, bool) {
+        let key = (peer.to_string(), remote);
+        match self.remote_mirrors.get(&key) {
+            Some(&mirror) => (mirror, false),
+            None => {
+                let mirror = self.world.create_entity();
+                self.remote_mirrors.insert(key.clone(), mirror);
+                self.mirror_owner.insert(mirror, key);
+                self.mirror_flags.insert(mirror, 0);
+                (mirror, true)
+            }
+        }
+    }
+
+    /// Flag-driven replication cadence: queue each NET_REPLICATED entity for
+    /// the delta flush when its profile says it's due. Unpredictable entities
+    /// (default) go every tick; NET_PREDICTABLE ride receiver extrapolation and
+    /// only need periodic drift corrections (plus engine-forced updates at
+    /// discontinuities, e.g. bullet bounces); NET_LOW_URGENCY throttles
+    /// background actors.
+    fn mark_replication_dirty(&mut self) {
+        let tick = self.world.tick_count();
+        let mut ids = std::mem::take(&mut self.scratch_ids);
+        Self::collect_by_flag(&self.world, NET_REPLICATED, &mut ids);
+        for &id in &ids {
+            let flags = self.world.net_flags(id).unwrap_or(0);
+            // Unannounced entities flush immediately whatever their cadence —
+            // the Spawn event is what tells peers they exist.
+            let due = if !self.delta_tracker.is_tracked(id) {
+                true
+            } else if flags & NET_PREDICTABLE != 0 {
+                tick.is_multiple_of(PREDICTABLE_STRIDE)
+            } else if flags & NET_LOW_URGENCY != 0 {
+                tick.is_multiple_of(LOW_URGENCY_STRIDE)
+            } else {
+                true
+            };
+            if due {
+                self.delta_tracker.mark_dirty(id);
+            }
+        }
+        self.scratch_ids = ids;
+    }
+
+    /// Advance NET_PREDICTABLE mirrors between network updates: linear motion
+    /// from the last received velocity, plus gravity for ballistic (NET_BULLET)
+    /// mirrors so remote bullets arc like local ones. The owner's periodic
+    /// corrections (PREDICTABLE_STRIDE) rein in drift.
+    fn extrapolate_predictable_mirrors(&mut self, dt_secs: f32) {
+        for (&mirror, &flags) in &self.mirror_flags {
+            if flags & NET_PREDICTABLE == 0 {
+                continue;
+            }
+            let Some(pos) = self.world.position(mirror) else {
+                continue;
+            };
+            let Some(mut vel) = self.world.velocity(mirror) else {
+                continue;
+            };
+            if flags & NET_BULLET != 0 {
+                vel[1] += GRAVITY * dt_secs;
+                self.world.set_velocity(mirror, vel);
+            }
+            self.world.set_position(
+                mirror,
+                [
+                    pos[0] + vel[0] * dt_secs,
+                    pos[1] + vel[1] * dt_secs,
+                    pos[2] + vel[2] * dt_secs,
+                ],
+            );
+            self.world.mark_dirty(mirror, DirtyFlags::TRANSFORM);
+        }
+    }
+
+    /// Forget one peer: destroy its mirrors and report the departure.
+    fn drop_peer(&mut self, peer: String, out: &mut Vec<NetPatch>) {
+        self.peer_last_seen.remove(&peer);
+
+        let mirrors: Vec<u32> = self
+            .mirror_owner
+            .iter()
+            .filter(|(_, (owner, _))| *owner == peer)
+            .map(|(&mirror, _)| mirror)
+            .collect();
+        for mirror in mirrors {
+            self.destroy_entity(mirror);
+            out.push(NetPatch {
+                peer_id: peer.clone(),
+                entity: mirror,
+                kind: NetEventKind::EntityDespawned,
+                flags: None,
+            });
+        }
+        out.push(NetPatch {
+            peer_id: peer,
+            entity: 0,
+            kind: NetEventKind::PeerLeft,
+            flags: None,
+        });
+    }
+
+    /// Backstop for channels that die without a close event: peers silent past
+    /// PEER_TIMEOUT_SECS are dropped (healthy peers Ping when otherwise quiet).
+    fn prune_timed_out_peers(&mut self, out: &mut Vec<NetPatch>) {
+        let now = self.sim_time;
+        let dead: Vec<String> = self
+            .peer_last_seen
+            .iter()
+            .filter(|(_, &seen)| now - seen > PEER_TIMEOUT_SECS)
+            .map(|(peer, _)| peer.clone())
+            .collect();
+        for peer in dead {
+            self.drop_peer(peer, out);
+        }
+    }
+
+    /// Drain the queued outbound payloads for the transport layer.
+    fn take_outbound(&mut self) -> Vec<(Option<String>, Vec<u8>)> {
+        std::mem::take(&mut self.outbound_net)
+    }
+
+    /// Deltas for dirty local entities plus queued despawn announcements; when
+    /// there is nothing to say, a Ping past the keepalive interval so quiet
+    /// peers aren't timed out remotely. With no peers connected there is nobody
+    /// to talk to: announcements are dropped (the late-join full sync covers
+    /// state) and nothing is queued, so the outbound queue can't grow while the
+    /// transport is idle.
+    fn collect_outbound_events(&mut self) -> Vec<WireEvent> {
+        if self.peer_last_seen.is_empty() {
+            self.pending_despawns.clear();
+            return Vec::new();
+        }
+        let mut events = self.delta_tracker.flush(&self.world);
+        events.extend(
+            self.pending_despawns
+                .drain(..)
+                .map(|entity| WireEvent::Despawned { entity }),
+        );
+        if events.is_empty() && self.sim_time - self.last_broadcast_time >= PING_INTERVAL_SECS {
+            events.push(WireEvent::Ping);
+        }
+        events
+    }
+
+    /// The goal one monster paths toward: its per-entity override, else the
+    /// engine-wide default.
+    fn goal_for(&self, mid: u32) -> (f32, f32) {
+        self.monster_states
+            .get(&mid)
+            .and_then(|s| s.goal)
+            .map_or((self.goal_x, self.goal_z), |g| (g[0], g[1]))
+    }
+
+    /// Run monster AI for one tick. Orchestration only — the per-monster
+    /// mechanics live on MonsterState (`update_stuck_and_replan`,
+    /// `follow_waypoints`); this loop owns world reads/writes, the shared
+    /// per-tick A* budget, and the navmesh dispatch.
+    /// Sets ECS velocity and rotation for each NET_MONSTER entity; physics
+    /// picks them up in the following sync_from_world call.
+    /// Returns the milliseconds spent inside A* searches (pathfinding_ms).
     fn tick_monster_ai(&mut self, dt_secs: f32) -> f32 {
-        let goal_x = self.goal_x;
-        let goal_z = self.goal_z;
         let ai = self.ai;
         let mut pathfinding_ms = 0.0_f32;
 
@@ -881,7 +1724,7 @@ impl Engine {
         Self::collect_by_flag(&self.world, NET_MONSTER, &mut monster_ids);
 
         // At most one A* search per engine tick to bound the per-tick CPU spike.
-        // The per-monster cooldown (3 s) provides the primary throttle; this flag
+        // The per-monster cooldown provides the primary throttle; this flag
         // prevents two monsters with simultaneous cooldown expiry from stacking.
         let mut path_requested_this_tick = false;
 
@@ -891,72 +1734,45 @@ impl Engine {
                 None => continue,
             };
             let grounded = self.world.is_grounded(mid).unwrap_or(false);
+            // Foot height anchors navmesh lookups to the correct floor layer;
+            // monster dimensions are caller-supplied, so read the collider.
+            let foot_y = my - self.world.collider(mid).map_or(0.0, |c| c.half_height);
 
+            let (goal_x, goal_z) = self.goal_for(mid);
             let dx = goal_x - mx;
             let dz = goal_z - mz;
             let dist = (dx * dx + dz * dz).sqrt();
-            if dist < 0.001 {
+            if dist < GOAL_REACHED_EPSILON {
+                // Stop explicitly: physics reapplies the last XZ command every
+                // sync, so skipping the write would keep the monster walking.
+                self.world.set_velocity(mid, [0.0, 0.0, 0.0]);
                 continue;
             }
 
-            // --- Stuck detection & replanning (mutates state, no navmesh access) ---
-            let should_replan = {
-                let state = match self.monster_states.get_mut(&mid) {
-                    Some(s) => s,
-                    None => continue,
-                };
+            let should_replan = match self.monster_states.get_mut(&mid) {
+                Some(state) => state.update_stuck_and_replan(
+                    &ai,
+                    dt_secs,
+                    mx,
+                    mz,
+                    goal_x,
+                    goal_z,
+                    !path_requested_this_tick,
+                ),
+                None => continue,
+            };
 
-                state.jump_cooldown = (state.jump_cooldown - dt_secs).max(0.0);
-
-                state.stuck_sample_timer += dt_secs;
-                if state.stuck_sample_timer >= ai.stuck_sample_interval {
-                    state.stuck_sample_timer = 0.0;
-                    let moved = ((mx - state.last_sample_x).powi(2)
-                        + (mz - state.last_sample_z).powi(2))
-                    .sqrt();
-                    if moved < ai.stuck_move_threshold {
-                        state.stuck_timer += ai.stuck_sample_interval;
-                        if state.stuck_timer >= ai.stuck_escape_after {
-                            state.path = None;
-                            state.replan_cooldown = 0.0;
-                            state.stuck_timer = 0.0;
-                        }
-                    } else {
-                        state.stuck_timer = 0.0;
-                    }
-                    state.last_sample_x = mx;
-                    state.last_sample_z = mz;
-                }
-
-                state.replan_cooldown = (state.replan_cooldown - dt_secs).max(0.0);
-
-                let path_stale = match state.path.as_ref().and_then(|p| p.last()) {
-                    Some(wp) => {
-                        ((goal_x - wp.x).powi(2) + (goal_z - wp.z).powi(2)).sqrt()
-                            > ai.replan_stale_dist
-                    }
-                    None => true,
-                };
-
-                if path_stale && state.replan_cooldown <= 0.0 && !path_requested_this_tick {
-                    state.replan_cooldown = ai.replan_cooldown;
-                    true
-                } else {
-                    false
-                }
-            }; // state borrow dropped here
-
-            // --- Navmesh lookup (requires &self.navmesh, so must not hold state borrow) ---
+            // Navmesh lookup needs &self.navmesh, so it runs outside the state borrow.
             if should_replan {
                 path_requested_this_tick = true;
                 if let Some(navmesh) = &self.navmesh {
                     let path_timer = Timer::new();
                     let result = navmesh.find_path(PathRequest {
-                        start: [mx, my - 0.9, mz],
+                        start: [mx, foot_y, mz],
                         goal: [goal_x, 0.0, goal_z],
                         route_seed: None,
-                        can_jump: true,
-                        start_y: Some(my - 0.9),
+                        can_jump: ai.can_jump,
+                        start_y: Some(foot_y),
                     });
                     pathfinding_ms += path_timer.elapsed_ms();
                     if let Some(s) = self.monster_states.get_mut(&mid) {
@@ -966,94 +1782,29 @@ impl Engine {
                 }
             }
 
-            // --- Waypoint following: compute desired direction & jump intent ---
-            let (desired_x, desired_z, wants_jump) = {
-                let state = match self.monster_states.get_mut(&mid) {
-                    Some(s) => s,
-                    None => continue,
-                };
-
-                let path_len = state.path.as_ref().map_or(0, |p| p.len());
-
-                // Advance past reached waypoints.
-                while state.waypoint_index < path_len {
-                    let (wp_x, wp_z, wp_y, req_jump) = {
-                        let wp = &state.path.as_ref().unwrap()[state.waypoint_index];
-                        (wp.x, wp.z, wp.y, wp.requires_jump)
-                    };
-                    if (wp_x - mx).hypot(wp_z - mz) >= ai.waypoint_reach {
-                        break;
-                    }
-                    if req_jump && my - 0.9 < wp_y - ai.jump_height_tolerance {
-                        break;
-                    }
-                    state.waypoint_index += 1;
-                }
-
-                if state.waypoint_index >= path_len {
-                    // A real path fully walked → replan immediately for responsiveness.
-                    // A None path (last search FAILED, e.g. unreachable goal) must keep
-                    // its cooldown: zeroing it here turns one failed search into a
-                    // per-tick storm of full-mesh A* explorations — each failure scans
-                    // the whole graph, which is what tanks the tick budget in WASM.
-                    if state.path.is_some() && path_len > 0 {
-                        state.replan_cooldown = 0.0;
-                    }
-                    state.path = None;
-                    (dx / dist, dz / dist, false)
-                } else {
-                    let (wp_x, wp_z, wp_y, req_jump) = {
-                        let wp = &state.path.as_ref().unwrap()[state.waypoint_index];
-                        (wp.x, wp.z, wp.y, wp.requires_jump)
-                    };
-                    let wp_dx = wp_x - mx;
-                    let wp_dz = wp_z - mz;
-                    let wp_dist = (wp_dx * wp_dx + wp_dz * wp_dz).sqrt();
-                    let dir_x = if wp_dist > 0.0 {
-                        wp_dx / wp_dist
-                    } else {
-                        dx / dist
-                    };
-                    let dir_z = if wp_dist > 0.0 {
-                        wp_dz / wp_dist
-                    } else {
-                        dz / dist
-                    };
-                    let wants_jump = req_jump
-                        && state.jump_cooldown <= 0.0
-                        && grounded
-                        && wp_dist < ai.jump_trigger_dist;
-                    // Anchor the look-at: compare against wp_y rather than wp_y + half-height
-                    // so the monster faces the ledge edge it needs to jump onto.
-                    let _ = wp_y;
-                    (dir_x, dir_z, wants_jump)
-                }
-            }; // state borrow dropped here
+            let (desired_x, desired_z, wants_jump) = match self.monster_states.get_mut(&mid) {
+                Some(state) => state.follow_waypoints(
+                    &ai,
+                    mx,
+                    mz,
+                    foot_y,
+                    grounded,
+                    [dx / dist, dz / dist],
+                ),
+                None => continue,
+            };
 
             // Rotation: yaw faces the walk direction.
             let yaw = desired_x.atan2(desired_z);
             self.world.set_rotation(mid, [yaw, 0.0, 0.0]);
             self.world.mark_dirty(mid, DirtyFlags::TRANSFORM);
 
-            if wants_jump {
-                self.world.set_velocity(
-                    mid,
-                    [
-                        desired_x * ai.walk_speed,
-                        ai.jump_speed,
-                        desired_z * ai.walk_speed,
-                    ],
-                );
-                if let Some(s) = self.monster_states.get_mut(&mid) {
-                    s.jump_cooldown = ai.jump_cooldown;
-                }
-            } else {
-                // Desired direction stored as velocity; separation pass adjusts it below.
-                self.world.set_velocity(
-                    mid,
-                    [desired_x * ai.walk_speed, 0.0, desired_z * ai.walk_speed],
-                );
-            }
+            let vy = if wants_jump { ai.jump_speed } else { 0.0 };
+            // Desired direction stored as velocity; separation adjusts it below.
+            self.world.set_velocity(
+                mid,
+                [desired_x * ai.walk_speed, vy, desired_z * ai.walk_speed],
+            );
         }
 
         // Return the buffer so its capacity is reused next tick.
@@ -1092,7 +1843,7 @@ impl Engine {
                 None => continue,
             };
             // Skip jump frames so separation doesn't fight the vertical impulse.
-            if vel[1].abs() > 0.1 {
+            if vel[1].abs() > JUMP_FRAME_VY_THRESHOLD {
                 continue;
             }
 
@@ -1142,9 +1893,11 @@ impl Engine {
         self.scratch_ids = monster_ids;
     }
 
-    /// Integrate NET_BULLET positions (ballistic arc + wall bounce) and detect hits
-    /// against NET_MONSTER entities. Returns one HitPatch per collision and one per
-    /// bullet that leaves the play area (target_eid = None).
+    /// Integrate NET_BULLET positions (ballistic arc + wall bounce), detect hits
+    /// against NET_MONSTER entities, and settle the consequences: spent bullets
+    /// are destroyed, hit monsters take PlayerConfig::bullet_damage, and dead
+    /// monsters despawn (respawning per MonsterConfig). Returns one HitPatch per
+    /// collision and one per expiry (target_eid = None) as UI events.
     fn tick_bullets(&mut self, dt_secs: f32) -> Vec<HitPatch> {
         let mut bullet_ids = std::mem::take(&mut self.scratch_ids);
         Self::collect_by_flag(&self.world, NET_BULLET, &mut bullet_ids);
@@ -1172,24 +1925,21 @@ impl Engine {
         );
 
         let mut hits: Vec<HitPatch> = Vec::new();
+        let mut spent_bullets: Vec<u32> = Vec::new();
+        let mut damaged_monsters: Vec<u32> = Vec::new();
 
         for &id in &bullet_ids {
-            // TTL and dead-bullet gate.
-            // Use a block so the mutable borrow on bullet_ages is dropped before the
-            // rest of the loop body (which also needs &mut self).
+            // TTL gate. Use a block so the mutable borrow on bullet_ages is
+            // dropped before the rest of the loop body (which also needs &mut self).
             {
                 let age = self.bullet_ages.entry(id).or_insert(0);
-                if *age == BULLET_DEAD {
-                    // HitPatch already emitted; waiting for TS to call destroy_entity.
-                    continue;
-                }
                 *age += 1;
-                if *age > PROJ_MAX_FRAMES {
+                if *age > BULLET_MAX_FRAMES {
                     hits.push(HitPatch {
                         bullet_eid: id,
                         target_eid: None,
                     });
-                    *age = BULLET_DEAD;
+                    spent_bullets.push(id);
                     continue;
                 }
             }
@@ -1201,20 +1951,19 @@ impl Engine {
                 continue;
             };
 
-            // Bullet left the play area. Mark dead so we don't re-emit every tick
-            // while TS processes the HitPatch. TS owns the destroy_entity call.
-            if pos[1] < -20.0 {
+            // Bullet left the play area.
+            if pos[1] < BULLET_KILL_PLANE_Y {
                 hits.push(HitPatch {
                     bullet_eid: id,
                     target_eid: None,
                 });
-                self.bullet_ages.insert(id, BULLET_DEAD);
+                spent_bullets.push(id);
                 continue;
             }
 
             // Apply gravity before integration so it accumulates across ticks.
             // Shadow vel so the gravity-adjusted values are used for the ray and position.
-            let vel = [vel[0], vel[1] - 20.0 * dt_secs, vel[2]];
+            let vel = [vel[0], vel[1] + GRAVITY * dt_secs, vel[2]];
 
             let speed = (vel[0].powi(2) + vel[1].powi(2) + vel[2].powi(2)).sqrt();
             if speed > 1e-6 {
@@ -1234,12 +1983,18 @@ impl Engine {
                             vel[2] - 2.0 * dot * normal[2],
                         ],
                     );
+                    // Velocity discontinuity: remote mirrors extrapolate this
+                    // bullet, so force an immediate correction instead of
+                    // waiting for the next PREDICTABLE_STRIDE tick.
+                    if self.world.net_flags(id).is_some_and(|f| f & NET_REPLICATED != 0) {
+                        self.delta_tracker.mark_dirty(id);
+                    }
                     self.world.set_position(
                         id,
                         [
-                            pos[0] + dir[0] * toi + normal[0] * 0.02,
-                            pos[1] + dir[1] * toi + normal[1] * 0.02,
-                            pos[2] + dir[2] * toi + normal[2] * 0.02,
+                            pos[0] + dir[0] * toi + normal[0] * BULLET_BOUNCE_OFFSET,
+                            pos[1] + dir[1] * toi + normal[1] * BULLET_BOUNCE_OFFSET,
+                            pos[2] + dir[2] * toi + normal[2] * BULLET_BOUNCE_OFFSET,
                         ],
                     );
                 } else {
@@ -1270,15 +2025,13 @@ impl Engine {
                 let dx = bpos[0] - mpos[0];
                 let dy = bpos[1] - mpos[1];
                 let dz = bpos[2] - mpos[2];
-                if dx * dx + dy * dy + dz * dz < PROJ_HIT_RADIUS_SQ {
+                if dx * dx + dy * dy + dz * dz < BULLET_HIT_RADIUS_SQ {
                     hits.push(HitPatch {
                         bullet_eid: id,
                         target_eid: Some(mid),
                     });
-                    // Mark dead so subsequent ticks don't re-emit. TS calls destroy_entity
-                    // when it processes the HitPatch — Rust must not destroy the entity here
-                    // because the freed ID could be recycled before TS's destroy arrives.
-                    self.bullet_ages.insert(id, BULLET_DEAD);
+                    spent_bullets.push(id);
+                    damaged_monsters.push(mid);
                     break;
                 }
             }
@@ -1287,6 +2040,27 @@ impl Engine {
         // Return buffers so their capacity is reused next tick.
         self.scratch_snapshots = monster_snapshots;
         self.scratch_ids = bullet_ids;
+
+        // Settle consequences after the integration loop so entity destruction
+        // never invalidates the snapshots it iterated.
+        for id in spent_bullets {
+            self.destroy_entity(id);
+        }
+        for mid in damaged_monsters {
+            // Already destroyed this tick (two bullets, one monster) → skip.
+            let Some(hp) = self.world.health(mid) else {
+                continue;
+            };
+            let hp = hp - self.player_cfg.bullet_damage;
+            self.world.set_health(mid, hp);
+            self.world.mark_dirty(mid, DirtyFlags::HEALTH);
+            if hp <= 0 {
+                self.destroy_entity(mid);
+                if self.monster_cfg.respawn {
+                    self.respawn_monster();
+                }
+            }
+        }
 
         hits
     }
@@ -1300,7 +2074,7 @@ impl Default for Engine {
 
 // --- Blueprint types ---
 
-#[derive(Decode)]
+#[derive(Decode, Encode)]
 struct EntityBlueprint {
     position: Option<[f32; 3]>,
     net_flags: Option<u8>,
@@ -1308,7 +2082,7 @@ struct EntityBlueprint {
     collider: Option<ColliderBp>,
 }
 
-#[derive(Decode)]
+#[derive(Decode, Encode)]
 struct ColliderBp {
     active: bool,
     sensor: bool,
@@ -1359,7 +2133,22 @@ struct JsPatch {
     semantic: Vec<JsSemantic>,
     net: Vec<JsNet>,
     hits: Vec<JsHit>,
+    lifecycle: Vec<JsLifecycle>,
     metrics: JsMetrics,
+}
+
+#[derive(Serialize)]
+struct JsLifecycle {
+    entity: u32,
+    kind: &'static str,
+    flags: u8,
+}
+
+fn js_lifecycle_kind(kind: LifecycleKind) -> &'static str {
+    match kind {
+        LifecycleKind::Spawned => "spawned",
+        LifecycleKind::Despawned => "despawned",
+    }
 }
 
 #[derive(Serialize)]
@@ -1385,6 +2174,18 @@ struct JsSemantic {
 struct JsNet {
     peer_id: String,
     entity: u32,
+    kind: &'static str,
+    flags: Option<u8>,
+}
+
+fn js_net_kind(kind: NetEventKind) -> &'static str {
+    match kind {
+        NetEventKind::EntitySpawned => "spawned",
+        NetEventKind::EntityUpdated => "updated",
+        NetEventKind::EntityDespawned => "despawned",
+        NetEventKind::PeerJoined => "peer_joined",
+        NetEventKind::PeerLeft => "peer_left",
+    }
 }
 
 #[derive(Serialize)]
@@ -1426,6 +2227,8 @@ impl From<PatchBundle> for JsPatch {
                 .map(|n| JsNet {
                     peer_id: n.peer_id,
                     entity: n.entity,
+                    kind: js_net_kind(n.kind),
+                    flags: n.flags,
                 })
                 .collect(),
             hits: b
@@ -1434,6 +2237,15 @@ impl From<PatchBundle> for JsPatch {
                 .map(|h| JsHit {
                     bullet_eid: h.bullet_eid,
                     target_eid: h.target_eid,
+                })
+                .collect(),
+            lifecycle: b
+                .lifecycle
+                .into_iter()
+                .map(|l| JsLifecycle {
+                    entity: l.entity,
+                    kind: js_lifecycle_kind(l.kind),
+                    flags: l.flags,
                 })
                 .collect(),
             metrics: JsMetrics {
@@ -1791,5 +2603,754 @@ mod tests {
                 && (pos[2] + 6.0).abs() < 0.001,
             "dynamic body should be moved through Rapier, got {pos:?}",
         );
+    }
+
+    #[test]
+    fn blueprint_spawn_gets_velocity_and_flag_registries() {
+        // Regression: the blueprint path used to skip all NET-flag bookkeeping,
+        // leaving blueprint monsters without AI state and without a velocity
+        // component (so movement commands silently no-oped).
+        let mut engine = Engine::new();
+        let bp = EntityBlueprint {
+            position: Some([0.0, 1.0, 0.0]),
+            net_flags: Some(NET_LOCAL | NET_MONSTER),
+            health: Some(30),
+            collider: Some(ColliderBp {
+                active: true,
+                sensor: false,
+                hw: 0.4,
+                hh: 0.9,
+                hd: 0.4,
+            }),
+        };
+        let payload = bincode::encode_to_vec(&bp, bincode::config::standard()).unwrap();
+
+        let id = engine.spawn_entity(&payload);
+        assert_ne!(id, u32::MAX, "blueprint must decode");
+        assert!(engine.local_entities.contains(&id));
+        assert!(engine.monster_states.contains_key(&id));
+
+        engine.set_entity_velocity(id, 1.0, 0.0, 2.0);
+        assert_eq!(
+            engine.world.velocity(id),
+            Some([1.0, 0.0, 2.0]),
+            "movement commands must work on blueprint-spawned entities",
+        );
+    }
+
+    #[test]
+    fn bullet_ttl_expiry_emits_exactly_one_hitpatch() {
+        let mut engine = engine_with_flat_floor();
+        let b = engine.spawn_bullet(0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0);
+
+        let mut expiries = 0;
+        for _ in 0..(BULLET_MAX_FRAMES + 20) {
+            let bundle = engine.tick_core(0.004);
+            expiries += bundle
+                .hits
+                .iter()
+                .filter(|h| h.bullet_eid == b && h.target_eid.is_none())
+                .count();
+        }
+        assert_eq!(expiries, 1, "TTL expiry must emit exactly one HitPatch");
+        assert_eq!(
+            engine.world.position(b),
+            None,
+            "the engine owns bullet destruction — spent bullets must be gone",
+        );
+    }
+
+    #[test]
+    fn player_controller_moves_turns_and_jumps() {
+        let mut engine = engine_with_flat_floor();
+        let eid = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        engine.register_player(eid);
+        for _ in 0..10 {
+            engine.tick_core(0.004); // settle onto the floor
+        }
+        let y0 = engine.world.position(eid).expect("player")[1];
+
+        // Full forward + jump held at yaw 0 (facing +z).
+        if let Some(p) = engine.player.as_mut() {
+            p.input = PlayerInput {
+                forward: 1.0,
+                jump_held: true,
+                ..PlayerInput::default()
+            };
+        }
+        for _ in 0..50 {
+            engine.tick_core(0.004);
+        }
+
+        let pos = engine.world.position(eid).expect("player");
+        assert!(pos[2] > 1.0, "forward input must move the player +z, got {pos:?}");
+        assert!(pos[1] > y0 + 0.5, "held jump must lift the player, got {pos:?}");
+        // Yaw faces movement and the monster goal follows the player (the goal
+        // is stamped pre-physics, so it may lag by one tick of movement).
+        assert_eq!(engine.world.rotation(eid).map(|r| r[0]), Some(0.0));
+        assert!(
+            (engine.goal_x - pos[0]).abs() < 0.1 && (engine.goal_z - pos[2]).abs() < 0.1,
+            "default monster goal must track the player",
+        );
+    }
+
+    #[test]
+    fn held_jump_fires_exactly_one_impulse() {
+        // The budget spends on press edges, not held state: one press held
+        // forever = one jump. A single jump at 12 m/s peaks ~3.6 above start;
+        // a re-triggered impulse would push the apex well past that.
+        let mut engine = engine_with_flat_floor();
+        let eid = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        engine.register_player(eid);
+        for _ in 0..10 {
+            engine.tick_core(0.004);
+        }
+        let y0 = engine.world.position(eid).expect("player")[1];
+
+        if let Some(p) = engine.player.as_mut() {
+            p.input.jump_held = true;
+        }
+        let mut apex = f32::MIN;
+        for _ in 0..400 {
+            engine.tick_core(0.004);
+            apex = apex.max(engine.world.position(eid).expect("player")[1]);
+        }
+        assert!(apex > y0 + 2.0, "the press edge must jump, apex={apex}");
+        assert!(
+            apex < y0 + 4.5,
+            "holding jump must not re-trigger the impulse, apex={apex}",
+        );
+    }
+
+    #[test]
+    fn player_fire_spawns_a_ballistic_replicated_bullet() {
+        let mut engine = engine_with_flat_floor();
+        let eid = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        engine.register_player(eid);
+        engine.pending_lifecycle.clear(); // ignore setup spawns
+
+        engine.player_fire();
+
+        let spawned: Vec<_> = engine
+            .pending_lifecycle
+            .iter()
+            .filter(|l| l.kind == LifecycleKind::Spawned)
+            .collect();
+        assert_eq!(spawned.len(), 1, "fire must spawn exactly one bullet");
+        let bullet = spawned[0];
+        assert_ne!(bullet.flags & NET_BULLET, 0);
+        assert_ne!(bullet.flags & NET_REPLICATED, 0);
+        assert_ne!(bullet.flags & NET_PREDICTABLE, 0);
+
+        // Facing +z at yaw 0: muzzle offset forward/up, velocity along +z.
+        let pos = engine.world.position(bullet.entity).expect("bullet");
+        assert!((pos[2] - 1.1).abs() < 0.01 && (pos[1] - 1.3).abs() < 0.01, "muzzle offset, got {pos:?}");
+        let vel = engine.world.velocity(bullet.entity).expect("bullet velocity");
+        assert!(vel[2] > 39.0, "bullet must fly along facing, got {vel:?}");
+    }
+
+    #[test]
+    fn bullet_kill_despawns_monster_and_respawns_replacement() {
+        let mut engine = engine_with_flat_floor();
+        let monster = engine.spawn_box_entity(5.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.update_monster_goal(5.0, 0.0); // hold position
+        let b = engine.spawn_bullet(0.0, 0.9, 0.0, 20.0, 0.0, 0.0, 0);
+        engine.pending_lifecycle.clear();
+
+        let mut lifecycle: Vec<LifecyclePatch> = Vec::new();
+        for _ in 0..200 {
+            let bundle = engine.tick_core(0.004);
+            lifecycle.extend(bundle.lifecycle);
+        }
+
+        // Engine settles everything itself: monster despawned, bullet despawned,
+        // replacement spawned on the respawn ring. (Position asserts on the old
+        // eids would be meaningless — destroyed ids are recycled immediately.)
+        assert!(lifecycle.iter().any(|l| l.kind == LifecycleKind::Despawned && l.entity == monster));
+        assert!(lifecycle.iter().any(|l| l.kind == LifecycleKind::Despawned && l.entity == b));
+        let respawn = lifecycle
+            .iter()
+            .find(|l| l.kind == LifecycleKind::Spawned && l.flags & NET_MONSTER != 0)
+            .expect("a replacement monster must respawn");
+        let rpos = engine.world.position(respawn.entity).expect("respawned monster");
+        let dist = (rpos[0] * rpos[0] + rpos[2] * rpos[2]).sqrt();
+        assert!(
+            (30.0..=40.0).contains(&dist),
+            "respawn must land on the configured ring, got {rpos:?}",
+        );
+    }
+
+    #[test]
+    fn spawn_monsters_places_a_ring_with_lifecycle_events() {
+        let mut engine = engine_with_flat_floor();
+        engine.pending_lifecycle.clear();
+
+        engine.spawn_monsters(10);
+
+        let spawns: Vec<_> = engine
+            .pending_lifecycle
+            .iter()
+            .filter(|l| l.kind == LifecycleKind::Spawned && l.flags & NET_MONSTER != 0)
+            .collect();
+        assert_eq!(spawns.len(), 10);
+        assert_eq!(engine.monster_states.len(), 10, "monsters must get AI state");
+        for l in spawns {
+            let pos = engine.world.position(l.entity).expect("monster");
+            let radius = (pos[0] * pos[0] + pos[2] * pos[2]).sqrt();
+            assert!(
+                (10.0..=18.1).contains(&radius),
+                "ring placement radius out of range: {pos:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn bullet_below_kill_plane_emits_exactly_one_hitpatch() {
+        // No terrain: the bullet free-falls past the kill plane.
+        let mut engine = Engine::new();
+        let b = engine.spawn_bullet(0.0, 1.0, 0.0, 0.0, -30.0, 0.0, 0);
+
+        let mut deaths = 0;
+        for _ in 0..400 {
+            let bundle = engine.tick_core(0.004);
+            deaths += bundle
+                .hits
+                .iter()
+                .filter(|h| h.bullet_eid == b && h.target_eid.is_none())
+                .count();
+        }
+        assert_eq!(deaths, 1, "kill plane must emit exactly one HitPatch");
+    }
+
+    #[test]
+    fn bullet_hits_monster_exactly_once() {
+        let mut engine = engine_with_flat_floor();
+        let monster = engine.spawn_box_entity(5.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.update_monster_goal(5.0, 0.0); // monster is already at its goal — stays put
+        let b = engine.spawn_bullet(0.0, 0.9, 0.0, 20.0, 0.0, 0.0, 0);
+
+        let mut monster_hits = 0;
+        for _ in 0..200 {
+            let bundle = engine.tick_core(0.004);
+            monster_hits += bundle
+                .hits
+                .iter()
+                .filter(|h| h.bullet_eid == b && h.target_eid == Some(monster))
+                .count();
+        }
+        assert_eq!(monster_hits, 1, "one flight through the monster = one hit event");
+    }
+
+    #[test]
+    fn separation_pushes_clustered_monsters_apart() {
+        let mut engine = engine_with_flat_floor();
+        let a = engine.spawn_box_entity(-0.5, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        let b = engine.spawn_box_entity(0.5, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        // Both marching straight +z, well inside each other's separation radius.
+        engine.world.set_velocity(a, [0.0, 0.0, 2.5]);
+        engine.world.set_velocity(b, [0.0, 0.0, 2.5]);
+
+        engine.apply_monster_separation();
+
+        let va = engine.world.velocity(a).unwrap();
+        let vb = engine.world.velocity(b).unwrap();
+        assert!(va[0] < 0.0, "left monster must be pushed left, got {va:?}");
+        assert!(vb[0] > 0.0, "right monster must be pushed right, got {vb:?}");
+    }
+
+    #[test]
+    fn monster_stops_when_goal_reached() {
+        // Physics reapplies the last XZ command every sync, so reaching the goal
+        // must write a zero velocity, not just skip the steering update.
+        let mut engine = engine_with_flat_floor();
+        let m = engine.spawn_box_entity(3.0, 0.9, 3.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.world.set_velocity(m, [2.5, 0.0, 0.0]); // stale walk command
+        engine.update_monster_goal(3.0, 3.0); // already there
+
+        engine.tick_monster_ai(0.004);
+
+        assert_eq!(
+            engine.world.velocity(m),
+            Some([0.0, 0.0, 0.0]),
+            "goal reached must stop the monster",
+        );
+    }
+
+    fn waypoint(x: f32, y: f32, z: f32, requires_jump: bool) -> Waypoint {
+        Waypoint {
+            x,
+            y,
+            z,
+            requires_jump,
+            is_ledge_drop: false,
+        }
+    }
+
+    /// Inject a hand-built path so steering is tested against known waypoints
+    /// instead of whatever A* produces.
+    fn inject_path(engine: &mut Engine, mid: u32, path: Vec<Waypoint>) {
+        let state = engine.monster_states.get_mut(&mid).expect("monster state");
+        state.path = Some(path);
+        state.waypoint_index = 0;
+    }
+
+    #[test]
+    fn monster_steers_toward_waypoints_not_the_goal_bearing() {
+        let mut engine = engine_with_flat_floor();
+        let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        // Goal matches the path's last waypoint so the path is not stale.
+        engine.update_monster_goal(20.0, 5.0);
+        inject_path(
+            &mut engine,
+            m,
+            vec![waypoint(0.0, 0.0, 5.0, false), waypoint(20.0, 0.0, 5.0, false)],
+        );
+
+        engine.tick_monster_ai(0.004);
+
+        // Direct goal bearing is mostly +x; the first waypoint is straight +z.
+        let v = engine.world.velocity(m).expect("velocity");
+        assert!(
+            v[2] > 0.0 && v[2] > v[0].abs() * 10.0,
+            "must walk toward the first waypoint (+z), got {v:?}",
+        );
+        // Yaw faces the walk direction: atan2(dir_x=0, dir_z=1) = 0.
+        let yaw = engine.world.rotation(m).expect("rotation")[0];
+        assert!(yaw.abs() < 0.01, "yaw must face +z, got {yaw}");
+    }
+
+    #[test]
+    fn monster_advances_past_reached_waypoints() {
+        let mut engine = engine_with_flat_floor();
+        let m = engine.spawn_box_entity(0.0, 0.9, 4.5, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.update_monster_goal(20.0, 5.0);
+        inject_path(
+            &mut engine,
+            m,
+            vec![waypoint(0.0, 0.0, 5.0, false), waypoint(20.0, 0.0, 5.0, false)],
+        );
+
+        engine.tick_monster_ai(0.004);
+
+        let state = engine.monster_states.get(&m).expect("state");
+        assert_eq!(state.waypoint_index, 1, "first waypoint is within reach → advance");
+        let v = engine.world.velocity(m).expect("velocity");
+        assert!(v[0] > 2.0, "must now steer toward the second waypoint (+x), got {v:?}");
+    }
+
+    #[test]
+    fn monster_jumps_at_a_close_jump_waypoint() {
+        let mut engine = engine_with_flat_floor();
+        let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.world.set_grounded(m, true);
+        engine.update_monster_goal(2.0, 0.0);
+        // Single elevated jump waypoint at the goal, inside jump_trigger_dist.
+        inject_path(&mut engine, m, vec![waypoint(2.0, 1.5, 0.0, true)]);
+
+        engine.tick_monster_ai(0.004);
+
+        let v = engine.world.velocity(m).expect("velocity");
+        assert_eq!(v[1], engine.ai.jump_speed, "grounded + close jump waypoint → jump, got {v:?}");
+        let state = engine.monster_states.get(&m).expect("state");
+        assert_eq!(
+            state.jump_cooldown, engine.ai.jump_cooldown,
+            "jumping must start the jump cooldown",
+        );
+    }
+
+    #[test]
+    fn stuck_monster_clears_its_path_and_replans() {
+        let mut engine = engine_with_flat_floor();
+        // Zero walk speed pins the monster in place so the stuck sampler fires;
+        // tight intervals keep the test fast.
+        engine.ai.walk_speed = 0.0;
+        engine.ai.stuck_sample_interval = 0.01;
+        engine.ai.stuck_escape_after = 0.02;
+
+        let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.update_monster_goal(10.0, 0.5);
+        // Sentinel path ending at the goal (not stale) with a recognizable first
+        // waypoint, plus a huge cooldown that only a stuck-escape can bypass.
+        inject_path(&mut engine, m, vec![waypoint(0.0, 0.0, 42.0, false), waypoint(10.0, 0.0, 0.5, false)]);
+        engine.monster_states.get_mut(&m).expect("state").replan_cooldown = 100.0;
+
+        for _ in 0..100 {
+            engine.tick_monster_ai(0.004);
+        }
+
+        let state = engine.monster_states.get(&m).expect("state");
+        assert!(
+            state.replan_cooldown < 50.0,
+            "stuck escape must zero the cooldown so a replan happens, got {}",
+            state.replan_cooldown,
+        );
+        let first = state.path.as_ref().and_then(|p| p.first()).expect("replanned path");
+        assert_ne!(first.z, 42.0, "the sentinel path must have been replaced by a replan");
+    }
+
+    #[test]
+    fn per_monster_goal_overrides_the_default() {
+        let mut engine = engine_with_flat_floor();
+        let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.update_monster_goal(-10.0, 0.0); // default: -x
+        engine.set_monster_goal(m, 10.0, 0.0); // override: +x
+
+        assert_eq!(engine.goal_for(m), (10.0, 0.0));
+
+        // Enough ticks to clear the initial replan stagger and plan a path.
+        for _ in 0..1_500 {
+            engine.tick_monster_ai(0.004);
+        }
+        let v = engine.world.velocity(m).expect("velocity");
+        assert!(v[0] > 0.0, "must walk toward its own goal (+x), got {v:?}");
+    }
+
+    #[test]
+    fn clearing_a_monster_goal_reverts_to_the_default() {
+        let mut engine = engine_with_flat_floor();
+        let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.update_monster_goal(-10.0, 0.0);
+        engine.set_monster_goal(m, 10.0, 0.0);
+        for _ in 0..1_500 {
+            engine.tick_monster_ai(0.004);
+        }
+        assert!(engine.world.velocity(m).expect("velocity")[0] > 0.0);
+
+        engine.clear_monster_goal(m);
+        assert_eq!(engine.goal_for(m), (-10.0, 0.0));
+        // The stale path (ending at +10) forces a replan toward the default
+        // goal once the cooldown allows; the stationary monster's stuck escape
+        // shortcuts that wait.
+        for _ in 0..2_000 {
+            engine.tick_monster_ai(0.004);
+        }
+        let v = engine.world.velocity(m).expect("velocity");
+        assert!(v[0] < 0.0, "must revert to the default goal (-x), got {v:?}");
+    }
+
+    fn delta_payload(entity: u32, pos: [f32; 3]) -> Vec<u8> {
+        let fields = (0..3)
+            .map(|axis| netcode::FieldUpdate {
+                component_id: netcode::COMP_POSITION,
+                field_id: axis as u8,
+                value: pos[axis] as f64,
+            })
+            .collect();
+        netcode::encode_events(&[WireEvent::Delta { entity, fields }])
+    }
+
+    #[test]
+    fn inbound_delta_creates_a_mirror_not_an_id_collision() {
+        let mut engine = Engine::new();
+        let player = engine.spawn_box_entity(0.0, 5.0, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+
+        // The remote peer's entity id happens to equal our player's id — applying
+        // it directly would stomp the local player.
+        let mut out = Vec::new();
+        engine.ingest_peer_payload("peer-a", &delta_payload(player, [9.0, 9.0, 9.0]), &mut out);
+
+        assert_eq!(
+            engine.world.position(player),
+            Some([0.0, 5.0, 0.0]),
+            "local entity must be untouched by a remote peer's id space",
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, NetEventKind::EntitySpawned);
+        let mirror = out[0].entity;
+        assert_ne!(mirror, player);
+        assert_eq!(engine.world.position(mirror), Some([9.0, 9.0, 9.0]));
+        assert!(
+            engine.world.dirty_flags(mirror).contains(DirtyFlags::TRANSFORM),
+            "mirror must be render-dirty so the game sees it move",
+        );
+    }
+
+    #[test]
+    fn repeat_deltas_update_the_same_mirror() {
+        let mut engine = Engine::new();
+        let mut out = Vec::new();
+        engine.ingest_peer_payload("peer-a", &delta_payload(7, [1.0, 0.0, 0.0]), &mut out);
+        engine.ingest_peer_payload("peer-a", &delta_payload(7, [2.0, 0.0, 0.0]), &mut out);
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].kind, NetEventKind::EntitySpawned);
+        assert_eq!(out[1].kind, NetEventKind::EntityUpdated);
+        assert_eq!(out[0].entity, out[1].entity, "same remote entity → same mirror");
+        assert_eq!(engine.world.position(out[1].entity), Some([2.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn same_remote_id_from_two_peers_gets_two_mirrors() {
+        let mut engine = Engine::new();
+        let mut out = Vec::new();
+        engine.ingest_peer_payload("peer-a", &delta_payload(7, [1.0, 0.0, 0.0]), &mut out);
+        engine.ingest_peer_payload("peer-b", &delta_payload(7, [2.0, 0.0, 0.0]), &mut out);
+
+        assert_ne!(
+            out[0].entity, out[1].entity,
+            "entity ids are per-sender; two peers' id 7 are different entities",
+        );
+    }
+
+    #[test]
+    fn despawn_event_removes_the_mirror() {
+        let mut engine = Engine::new();
+        let mut out = Vec::new();
+        engine.ingest_peer_payload("peer-a", &delta_payload(7, [1.0, 0.0, 0.0]), &mut out);
+        let mirror = out[0].entity;
+
+        out.clear();
+        let despawn = netcode::encode_events(&[WireEvent::Despawned { entity: 7 }]);
+        engine.ingest_peer_payload("peer-a", &despawn, &mut out);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, NetEventKind::EntityDespawned);
+        assert_eq!(out[0].entity, mirror);
+        assert_eq!(engine.world.position(mirror), None, "mirror must be destroyed");
+        assert!(engine.remote_mirrors.is_empty() && engine.mirror_owner.is_empty());
+    }
+
+    #[test]
+    fn silent_peer_times_out_and_its_mirrors_despawn() {
+        let mut engine = Engine::new();
+        let mut out = Vec::new();
+        engine.ingest_peer_payload("peer-a", &delta_payload(7, [1.0, 0.0, 0.0]), &mut out);
+        let mirror = out[0].entity;
+
+        // Run past PEER_TIMEOUT_SECS of sim time with no further traffic.
+        let ticks = ((PEER_TIMEOUT_SECS / 0.004) as usize) + 100;
+        let mut despawned = false;
+        let mut peer_left = false;
+        for _ in 0..ticks {
+            let bundle = engine.tick_core(0.004);
+            for p in &bundle.net {
+                despawned |= p.kind == NetEventKind::EntityDespawned && p.entity == mirror;
+                peer_left |= p.kind == NetEventKind::PeerLeft && p.peer_id == "peer-a";
+            }
+        }
+
+        assert!(despawned, "timed-out peer's mirror must despawn");
+        assert!(peer_left, "the game must learn the peer left");
+        assert_eq!(engine.world.position(mirror), None);
+        assert!(engine.peer_last_seen.is_empty());
+    }
+
+    #[test]
+    fn destroying_a_replicated_entity_broadcasts_despawned() {
+        let mut engine = Engine::new();
+        let player =
+            engine.spawn_box_entity(0.0, 5.0, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL | NET_REPLICATED);
+        // Un-replicated local entities are nobody's business on the wire.
+        let private = engine.spawn_box_entity(1.0, 5.0, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+
+        engine.destroy_entity(player);
+        engine.destroy_entity(private);
+
+        // Announcements only exist for an audience.
+        engine.peer_last_seen.insert("peer-x".to_string(), 0.0);
+        let events = engine.collect_outbound_events();
+        assert!(
+            events.contains(&WireEvent::Despawned { entity: player }),
+            "peers must be told the replicated entity is gone, got {events:?}",
+        );
+        assert!(
+            !events.contains(&WireEvent::Despawned { entity: private }),
+            "non-replicated entities must not leak onto the wire",
+        );
+    }
+
+    #[test]
+    fn replication_cadence_follows_urgency_flags() {
+        let mut engine = Engine::new();
+        // Flushing needs an audience.
+        engine.peer_last_seen.insert("peer-x".to_string(), 0.0);
+        let urgent =
+            engine.spawn_box_entity(0.0, 5.0, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL | NET_REPLICATED);
+        let lazy = engine.spawn_box_entity(
+            1.0,
+            5.0,
+            0.0,
+            0.4,
+            0.9,
+            0.4,
+            100,
+            NET_LOCAL | NET_REPLICATED | NET_LOW_URGENCY,
+        );
+
+        // Move both every tick; count how many wire events each produces over
+        // two low-urgency strides. The first flush is the Spawn announcement.
+        let mut urgent_events = 0;
+        let mut lazy_events = 0;
+        for i in 0..(LOW_URGENCY_STRIDE * 2) {
+            let t = i as f32;
+            engine.world.set_position(urgent, [t, 5.0, 0.0]);
+            engine.world.set_position(lazy, [t, 5.0, 1.0]);
+            engine.mark_replication_dirty();
+            for ev in engine.collect_outbound_events() {
+                match ev {
+                    WireEvent::Spawn { entity, .. } | WireEvent::Delta { entity, .. } => {
+                        if entity == urgent {
+                            urgent_events += 1;
+                        } else if entity == lazy {
+                            lazy_events += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            engine.world.advance_tick();
+        }
+
+        assert_eq!(
+            urgent_events,
+            LOW_URGENCY_STRIDE * 2,
+            "default urgency replicates every tick",
+        );
+        assert_eq!(lazy_events, 2, "low urgency replicates once per stride");
+    }
+
+    #[test]
+    fn predictable_mirrors_extrapolate_between_updates() {
+        let mut engine = Engine::new();
+        // Remote ballistic bullet: one Spawn with position + velocity.
+        let mut fields = Vec::new();
+        for (axis, v) in [0.0, 10.0, 0.0].iter().enumerate() {
+            fields.push(netcode::FieldUpdate {
+                component_id: netcode::COMP_POSITION,
+                field_id: axis as u8,
+                value: *v,
+            });
+        }
+        for (axis, v) in [20.0, 0.0, 0.0].iter().enumerate() {
+            fields.push(netcode::FieldUpdate {
+                component_id: netcode::COMP_VELOCITY,
+                field_id: axis as u8,
+                value: *v,
+            });
+        }
+        let payload = netcode::encode_events(&[WireEvent::Spawn {
+            entity: 7,
+            flags: NET_BULLET | NET_PREDICTABLE,
+            fields,
+        }]);
+        let mut out = Vec::new();
+        engine.ingest_peer_payload("peer-a", &payload, &mut out);
+        assert_eq!(out[0].flags, Some(NET_BULLET | NET_PREDICTABLE));
+        let mirror = out[0].entity;
+
+        // No further network traffic: the mirror must fly on its own — forward
+        // with the received velocity, arcing down under gravity.
+        for _ in 0..50 {
+            engine.tick_core(0.004);
+        }
+        let pos = engine.world.position(mirror).expect("mirror exists");
+        assert!(pos[0] > 3.0, "mirror must extrapolate forward, got {pos:?}");
+        assert!(pos[1] < 10.0, "ballistic mirror must arc down, got {pos:?}");
+    }
+
+    #[test]
+    fn unpredictable_mirrors_stay_put_between_updates() {
+        let mut engine = Engine::new();
+        let mut out = Vec::new();
+        engine.ingest_peer_payload("peer-a", &delta_payload(7, [1.0, 2.0, 3.0]), &mut out);
+        let mirror = out[0].entity;
+
+        for _ in 0..50 {
+            engine.tick_core(0.004);
+        }
+        assert_eq!(
+            engine.world.position(mirror),
+            Some([1.0, 2.0, 3.0]),
+            "non-predictable mirrors move only on network updates",
+        );
+    }
+
+    /// End-to-end loopback: two full engines wired through the same transport
+    /// bridge the browser uses (net_peer_connected / take_outbound / net_ingest).
+    /// Proves the whole replication pipeline — cadence marking, Spawn
+    /// announcements, mirror creation, boundary events, live positions — with
+    /// no browser transport involved.
+    #[test]
+    fn loopback_replicates_player_monsters_and_bullets_between_engines() {
+        let mut a = engine_with_flat_floor();
+        let mut b = engine_with_flat_floor();
+
+        let player =
+            a.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL | NET_REPLICATED);
+        a.register_player(player);
+        a.spawn_monsters(3);
+        a.player_fire();
+
+        // Both data channels open (what the transport reports on connect).
+        a.net_peer_connected("peer-b");
+        b.net_peer_connected("peer-a");
+
+        let mut b_net: Vec<NetPatch> = Vec::new();
+        for _ in 0..(PREDICTABLE_STRIDE * 2) {
+            a.tick_core(0.004);
+            for (_target, bytes) in a.take_outbound() {
+                b.net_ingest("peer-a", &bytes);
+            }
+            // B's tick applies the queued payloads; its bundle carries the
+            // boundary events the way useEngine would see them.
+            let bundle = b.tick_core(0.004);
+            b_net.extend(bundle.net);
+            b.take_outbound();
+        }
+
+        let spawned: Vec<&NetPatch> = b_net
+            .iter()
+            .filter(|p| p.kind == NetEventKind::EntitySpawned)
+            .collect();
+        assert_eq!(
+            spawned.len(),
+            5,
+            "player + 3 monsters + bullet must all appear on B, got {spawned:#?}",
+        );
+        let by_flag =
+            |mask: u8| spawned.iter().filter(|p| p.flags.unwrap_or(0) & mask != 0).count();
+        assert_eq!(by_flag(NET_MONSTER), 3, "monster mirrors must carry the monster profile");
+        assert_eq!(by_flag(NET_BULLET), 1, "the bullet mirror must carry the bullet profile");
+        assert_eq!(
+            spawned.iter().filter(|p| p.flags == Some(0)).count(),
+            1,
+            "the player's public profile is empty (ownership bits don't travel)",
+        );
+        for p in &spawned {
+            assert!(
+                b.world.position(p.entity).is_some(),
+                "every mirror must have a live position on B",
+            );
+        }
+    }
+
+    #[test]
+    fn navmesh_builds_at_any_altitude() {
+        // Regression: the node-sampling scan window used to be hardcoded to
+        // y ∈ [200, −50]; floors outside it silently produced no navmesh nodes.
+        let mut engine = Engine::new();
+        engine.load_map_blocks(&[MapBlock {
+            x: 0.0,
+            y: 300.0,
+            z: 0.0,
+            hw: 20.0,
+            hh: 1.0,
+            hd: 20.0,
+            kind: "floor".into(),
+            walkable: true,
+        }]);
+
+        let navmesh = engine
+            .navmesh
+            .as_ref()
+            .expect("floor at y=300 must produce a navmesh");
+        let path = navmesh.find_path(PathRequest {
+            start: [-10.0, 0.0, -10.0],
+            goal: [10.0, 0.0, 10.0],
+            route_seed: None,
+            can_jump: true,
+            start_y: Some(301.0),
+        });
+        assert!(path.is_some(), "path must exist on a high-altitude floor");
     }
 }

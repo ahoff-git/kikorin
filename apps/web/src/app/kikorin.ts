@@ -1,4 +1,11 @@
-import { hudChannel, hitsChannel } from "@kikorin/adapter";
+import {
+  lifecycleChannel,
+  netChannel,
+  NET_BULLET,
+  NET_LOCAL,
+  NET_MONSTER,
+  NET_REPLICATED,
+} from "@kikorin/adapter";
 import type { WorkerEngineProxy } from "../workers/WorkerEngineProxy";
 import { KIKORIN_MAP } from "./kikorinMap";
 import { eventBus } from "@kikorin/events";
@@ -25,16 +32,13 @@ import {
 } from "three";
 import { recordE2EEntitySpawn } from "./e2eMetrics";
 
-// NET_LOCAL flag: entity is simulated locally, included in render patches every tick.
-const NET_LOCAL = 0x01;
-// NET_MONSTER flag: entity is a monster; engine owns AI, separation, and hit detection.
-const NET_MONSTER = 0x04;
+// This file is UI + IO only: it captures raw input, forwards it to the Rust
+// engine (which owns all movement/combat/spawn rules), and renders what the
+// engine's lifecycle/render patches say exists. Gameplay tuning lives in the
+// engine's PlayerConfig/MonsterConfig/AiConfig (engine defaults = kikorin's
+// values; override via set_*_config).
 
-const WALK_SPEED = 15;
-const TURN_SPEED = 1.8; // radians / second
-const JUMP_VEL = 12;
-
-// Camera orbit — spherical coords around the player
+// Camera orbit — spherical coords around the player (view concern, TS-owned).
 const CAM_DISTANCE = 9.5;
 const DEFAULT_CAM_PITCH = Math.atan2(5, 8); // ≈ 0.56 rad
 const CAM_PITCH_MIN = 0.15;
@@ -47,8 +51,10 @@ const AIM_PITCH_MAX = +0.6;
 const CAM_RESTORE_SPEED = 6.0;
 const CAM_WALL_SEPARATION = 0.3;
 
-const PROJ_SPEED = 40;
-const PROJ_HIT_RADIUS_SQ = 1.2 * 1.2; // for crosshair aim-assist only
+// Crosshair aim-assist visuals (mirror of the engine's muzzle/hit tuning).
+const AIM_ORIGIN_FORWARD = 1.1;
+const AIM_ORIGIN_UP = 0.4;
+const AIM_ASSIST_RADIUS_SQ = 1.2 * 1.2;
 const AIM_FAR = 50;
 
 // Pre-allocated for per-frame aim raycasting — avoids GC churn in the hot path.
@@ -103,6 +109,20 @@ function makeProjectileMesh(): Object3D {
   return mesh;
 }
 
+/** Mesh for an engine-owned local entity, styled by its net-flag profile. */
+function makeLocalMesh(flags: number): Object3D {
+  if (flags & NET_BULLET) return makeProjectileMesh();
+  if (flags & NET_MONSTER) return makePersonMesh(0xcc4444, 0xff8800);
+  return makePersonMesh(0x4488cc, 0xffe082); // the player
+}
+
+/** Mesh for a remote peer's mirror, styled by its public profile. */
+function makeRemoteMesh(flags: number): Object3D {
+  if (flags & NET_BULLET) return makeProjectileMesh();
+  if (flags & NET_MONSTER) return makePersonMesh(0x8e4444, 0xd88a8a);
+  return makePersonMesh(0x9c27b0, 0xe1bee7);
+}
+
 // ---- Ownership / networking callback shape ----
 
 type OwnershipCallbacks = {
@@ -116,7 +136,7 @@ export type SetupGameResult = {
   playerEid: number;
   ownedEids: number[];
   onRemoteEntityHit: (eid: number) => void;
-  spawnMonsters: (count: number) => Promise<void>;
+  spawnMonsters: (count: number) => void;
   /** Called every frame by useEngine after the tick command and before renderFrame. */
   onFrame: () => void;
   /** Pass middle-button drag deltas to orbit the camera. */
@@ -127,17 +147,15 @@ export type SetupGameResult = {
 };
 
 /**
- * Spawns terrain, player, and wires keyboard + mouse controls.
- * Returns onFrame (injected into useEngine's RAF loop) and a cleanup function.
- * Async because entity spawning crosses the worker boundary.
+ * Loads terrain, spawns and registers the player, and wires keyboard + mouse
+ * capture. Raw input is forwarded to the engine once per frame; meshes are
+ * created and removed from the engine's lifecycle events.
  */
 export async function setupGame(
   engine: WorkerEngineProxy,
   ownership: OwnershipCallbacks,
   canvas?: HTMLCanvasElement,
 ): Promise<SetupGameResult> {
-  const ownedEids: number[] = [];
-
   // --- Terrain ---
   // The game owns the map data; Rust spawns the bodies and builds the navmesh.
   const terrainLayout = await engine.load_map(KIKORIN_MAP);
@@ -152,23 +170,52 @@ export async function setupGame(
   }
 
   // --- Player ---
-  const playerEid = await engine.spawn_box_entity(0, 5, 0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
-  upsertObjectByEid(playerEid, () => makePersonMesh(0x4488cc, 0xffe082));
+  // Spawn the body (game data: position/size/health), then hand it to the
+  // engine's controller — movement, jumping, and firing rules live in Rust.
+  const playerEid = await engine.spawn_box_entity(0, 5, 0, 0.4, 0.9, 0.4, 100, NET_LOCAL | NET_REPLICATED);
+  engine.register_player(playerEid);
   recordE2EEntitySpawn("player", playerEid);
   ownership.addOwnedEntity(playerEid);
-  ownedEids.push(playerEid);
+  const ownedEids: number[] = [playerEid];
 
-  // --- Monsters (populated by spawnMonsters) ---
+  // Monster eids (for crosshair aim assist) — maintained from lifecycle events.
   const monsterEids: number[] = [];
 
-  // --- Input state ---
-  const heldKeys = new Set<string>();
-  let yaw = 0;
-  let jumpRequested = false;
-  let prevSpaceHeld = false;
-  let jumpsUsed = 0;
+  // --- Meshes follow the engine's lifecycle events ---
+  const unsubLifecycle = lifecycleChannel.subscribe(() => {
+    for (const l of lifecycleChannel.getSnapshot()) {
+      if (l.kind === "spawned") {
+        upsertObjectByEid(l.entity, () => makeLocalMesh(l.flags));
+        if (l.flags & NET_MONSTER) {
+          monsterEids.push(l.entity);
+          recordE2EEntitySpawn("monster", l.entity);
+        } else if (l.flags & NET_BULLET) {
+          recordE2EEntitySpawn("bullet", l.entity);
+        }
+      } else {
+        removeObjectByEid(l.entity, { dispose: true });
+        const idx = monsterEids.indexOf(l.entity);
+        if (idx >= 0) monsterEids.splice(idx, 1);
+      }
+    }
+  });
 
-  // --- Camera orbit state ---
+  // --- Remote peers ---
+  // The engine mirrors each remote entity into a local eid and reports its
+  // lifecycle here; mirror positions then flow through the render channel.
+  const unsubNet = netChannel.subscribe(() => {
+    for (const p of netChannel.getSnapshot()) {
+      if (p.kind === "spawned") {
+        const flags = p.flags ?? 0;
+        upsertObjectByEid(p.entity, () => makeRemoteMesh(flags));
+      } else if (p.kind === "despawned") {
+        removeObjectByEid(p.entity, { dispose: true });
+      }
+    }
+  });
+
+  // --- Raw input capture ---
+  const heldKeys = new Set<string>();
   let camYaw = Math.PI;
   let camPitch = DEFAULT_CAM_PITCH;
   let camOrbitActive = false;
@@ -179,47 +226,6 @@ export async function setupGame(
   camRaycaster.near = 0.5;
   const camLookAtVec = new Vector3();
   const camRayDirVec = new Vector3();
-
-  // Grounded state for the player — used for double-jump tracking.
-  const unsubHud = hudChannel.subscribe(() => {
-    const patches = hudChannel.getSnapshot();
-    for (const p of patches) {
-      if (p.entity === playerEid && p.grounded !== undefined) {
-        if (p.grounded && jumpsUsed > 0) jumpsUsed = 0;
-      }
-    }
-  });
-
-  // --- Hit events from the engine ---
-  // Engine reports bullet–monster collisions via hitsChannel; TS handles respawn.
-  const unsubHits = hitsChannel.subscribe(() => {
-    const hits = hitsChannel.getSnapshot();
-    for (const hit of hits) {
-      // Rust already destroyed the entity; call through so the proxy stays consistent.
-      engine.destroy_entity(hit.bullet_eid);
-      removeObjectByEid(hit.bullet_eid);
-
-      if (hit.target_eid != null) {
-        // Monster was hit — remove it and spawn a replacement at a random map edge.
-        engine.destroy_entity(hit.target_eid);
-        removeObjectByEid(hit.target_eid, { dispose: true });
-        const idx = monsterEids.indexOf(hit.target_eid);
-        if (idx >= 0) monsterEids.splice(idx, 1);
-
-        const angle = Math.random() * Math.PI * 2;
-        const radius = 30 + Math.random() * 10;
-        const rx = Math.cos(angle) * radius;
-        const rz = Math.sin(angle) * radius;
-        void engine.spawn_box_entity(rx, 10, rz, 0.4, 0.9, 0.4, 50, NET_LOCAL | NET_MONSTER).then((newEid) => {
-          const newObj = upsertObjectByEid(newEid, () => makePersonMesh(0xcc4444, 0xff8800));
-          newObj.position.set(rx, 10, rz);
-          monsterEids.push(newEid);
-          ownedEids.push(newEid);
-          ownership.addOwnedEntity(newEid);
-        });
-      }
-    }
-  });
 
   function onKeyDown(e: KeyboardEvent) { heldKeys.add(e.code); }
   function onKeyUp(e: KeyboardEvent) { heldKeys.delete(e.code); }
@@ -237,28 +243,7 @@ export async function setupGame(
     if (canvas && e.target === canvas && document.pointerLockElement !== canvas) {
       void canvas.requestPointerLock();
     }
-
-    const sinY = Math.sin(yaw);
-    const cosY = Math.cos(yaw);
-    let spawnX = 0, spawnY = 0, spawnZ = 0;
-    applyToObjectByEid(playerEid, (obj) => {
-      spawnX = obj.position.x + sinY * 1.1;
-      spawnY = obj.position.y + 0.4;
-      spawnZ = obj.position.z + cosY * 1.1;
-    });
-
-    const aimCos = Math.cos(aimPitch);
-    const aimSin = Math.sin(aimPitch);
-    void engine.spawn_bullet(
-      spawnX, spawnY, spawnZ,
-      sinY * aimCos * PROJ_SPEED,
-      aimSin * PROJ_SPEED,
-      cosY * aimCos * PROJ_SPEED,
-    ).then((eid) => {
-      const obj = upsertObjectByEid(eid, makeProjectileMesh);
-      obj.position.set(spawnX, spawnY, spawnZ);
-      recordE2EEntitySpawn("bullet", eid);
-    });
+    engine.player_fire();
   }
   window.addEventListener("mousedown", onMouseDown);
 
@@ -269,7 +254,9 @@ export async function setupGame(
   }
 
   function onCameraReset() {
-    camYaw = yaw + Math.PI;
+    applyToObjectByEid(playerEid, (obj) => {
+      camYaw = obj.rotation.y + Math.PI;
+    });
     camPitch = DEFAULT_CAM_PITCH;
     camOrbitActive = false;
   }
@@ -289,68 +276,54 @@ export async function setupGame(
   }
   document.addEventListener("pointerlockchange", onPointerLockChange);
 
-  // --- Per-frame game logic ---
+  // --- Per-frame: forward raw input, then drive the camera + crosshair ---
   function onFrame() {
     const now = performance.now();
     const dt = Math.min((now - lastFrameTime) / 1000, 0.1);
     lastFrameTime = now;
 
     const inPointerLock = Boolean(canvas && document.pointerLockElement === canvas);
-    if (inPointerLock) {
-      yaw = camYaw - Math.PI;
-    } else {
-      const turnDir =
-        (heldKeys.has("ArrowRight") || heldKeys.has("KeyD") ? 1 : 0) -
-        (heldKeys.has("ArrowLeft")  || heldKeys.has("KeyA") ? 1 : 0);
-      yaw += turnDir * TURN_SPEED * dt;
-    }
 
-    const sinY = Math.sin(yaw);
-    const cosY = Math.cos(yaw);
-
-    const fwd =
-      (heldKeys.has("KeyW") || heldKeys.has("ArrowUp")   ? 1 : 0) -
-      (heldKeys.has("KeyS") || heldKeys.has("ArrowDown")  ? 1 : 0);
+    // Key/mouse mapping is the only input logic TS keeps; the engine owns what
+    // the axes mean (speeds, jump budget, facing integration).
+    const forward =
+      (heldKeys.has("KeyW") || heldKeys.has("ArrowUp") ? 1 : 0) -
+      (heldKeys.has("KeyS") || heldKeys.has("ArrowDown") ? 1 : 0);
     const strafe = inPointerLock
       ? (heldKeys.has("KeyA") || heldKeys.has("KeyQ") ? 1 : 0) - (heldKeys.has("KeyD") || heldKeys.has("KeyE") ? 1 : 0)
       : (heldKeys.has("KeyQ") ? 1 : 0) - (heldKeys.has("KeyE") ? 1 : 0);
+    const turn = inPointerLock
+      ? 0
+      : (heldKeys.has("ArrowRight") || heldKeys.has("KeyD") ? 1 : 0) -
+        (heldKeys.has("ArrowLeft") || heldKeys.has("KeyA") ? 1 : 0);
 
-    let vx = fwd * sinY + strafe * cosY;
-    let vz = fwd * cosY - strafe * sinY;
-
-    const hlen = Math.sqrt(vx * vx + vz * vz);
-    if (hlen > 1) { vx /= hlen; vz /= hlen; }
-    vx *= WALK_SPEED;
-    vz *= WALK_SPEED;
-
-    const spaceHeld = heldKeys.has("Space");
-    if (spaceHeld && !prevSpaceHeld && jumpsUsed < 2) {
-      jumpRequested = true;
-      jumpsUsed++;
-    }
-    prevSpaceHeld = spaceHeld;
-
-    const vy = jumpRequested ? JUMP_VEL : 0;
-    jumpRequested = false;
-
-    engine.set_entity_velocity(playerEid, vx, vy, vz);
-
-    // --- Tell the engine where monsters should be heading ---
-    applyToObjectByEid(playerEid, (obj) => {
-      engine.update_monster_goal(obj.position.x, obj.position.z);
+    engine.set_player_input({
+      forward,
+      strafe,
+      turn,
+      yaw_override: inPointerLock ? camYaw - Math.PI : null,
+      jump_held: heldKeys.has("Space"),
+      aim_pitch: aimPitch,
     });
 
-    // --- Camera orbit follow ---
+    // Facing for camera/crosshair: camera-driven in pointer lock, otherwise the
+    // engine-authored mesh rotation (render patches carry the player's yaw).
+    let yaw = camYaw - Math.PI;
+    if (!inPointerLock) {
+      applyToObjectByEid(playerEid, (obj) => { yaw = obj.rotation.y; });
+    }
+    const sinY = Math.sin(yaw);
+    const cosY = Math.cos(yaw);
+
+    // --- Crosshair + camera follow ---
     applyToObjectByEid(playerEid, (obj) => {
       const px = obj.position.x;
       const py = obj.position.y;
       const pz = obj.position.z;
 
-      obj.rotation.y = yaw;
-
       const aimCos = Math.cos(aimPitch);
       const aimSin = Math.sin(aimPitch);
-      aimOriginVec.set(px + sinY * 1.1, py + 0.4, pz + cosY * 1.1);
+      aimOriginVec.set(px + sinY * AIM_ORIGIN_FORWARD, py + AIM_ORIGIN_UP, pz + cosY * AIM_ORIGIN_FORWARD);
       aimDirVec.set(sinY * aimCos, aimSin, cosY * aimCos);
       aimRaycaster.set(aimOriginVec, aimDirVec);
 
@@ -373,7 +346,7 @@ export async function setupGame(
           const cx = aimOriginVec.x + aimDirVec.x * t - mObj.position.x;
           const cy = aimOriginVec.y + aimDirVec.y * t - mObj.position.y;
           const cz = aimOriginVec.z + aimDirVec.z * t - mObj.position.z;
-          if (cx * cx + cy * cy + cz * cz < PROJ_HIT_RADIUS_SQ) {
+          if (cx * cx + cy * cy + cz * cz < AIM_ASSIST_RADIUS_SQ) {
             aimDist = t;
           }
         });
@@ -423,23 +396,8 @@ export async function setupGame(
     });
   }
 
-  // --- Spawn monsters ---
-  async function spawnMonsters(count: number): Promise<void> {
-    await Promise.all(
-      Array.from({ length: count }, async (_, i) => {
-        const angle = (i / count) * Math.PI * 2;
-        const radius = 10 + (i % 3) * 4;
-        const x = Math.cos(angle) * radius;
-        const z = Math.sin(angle) * radius;
-        const eid = await engine.spawn_box_entity(x, 5, z, 0.4, 0.9, 0.4, 50, NET_LOCAL | NET_MONSTER);
-        const mObj = upsertObjectByEid(eid, () => makePersonMesh(0xcc4444, 0xff8800));
-        mObj.position.set(x, 5, z);
-        monsterEids.push(eid);
-        recordE2EEntitySpawn("monster", eid);
-        ownedEids.push(eid);
-        ownership.addOwnedEntity(eid);
-      }),
-    );
+  function spawnMonsters(count: number): void {
+    engine.spawn_monsters(count);
   }
 
   function onRemoteEntityHit(_eid: number) {}
@@ -452,8 +410,8 @@ export async function setupGame(
     document.removeEventListener("pointerlockchange", onPointerLockChange);
     document.removeEventListener("contextmenu", onContextMenu);
     if (canvas && document.pointerLockElement === canvas) document.exitPointerLock();
-    unsubHud();
-    unsubHits();
+    unsubLifecycle();
+    unsubNet();
   }
 
   return { playerEid, ownedEids, onRemoteEntityHit, spawnMonsters, onFrame, onCameraDrag, onCameraReset, cleanup };

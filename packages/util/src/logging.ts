@@ -12,7 +12,7 @@ export const currentLogLevel = { value: logLevels.off };
 // filterKeywords: when non-empty, only messages tagged with one of these pass through.
 // blockKeywords: messages tagged with any of these are always suppressed.
 export const filterKeywords: string[] = [];
-export const blockKeywords: string[] = ["getRandomWord", "applyCooldowns", "calculateBoundingBox", "rollingAverage"];
+export const blockKeywords: string[] = [];
 
 export function log(
     level: number = logLevels.debug,

@@ -28,8 +28,6 @@ const SHADOW_UPDATE_EVERY = 3;
 const SUN_TEXEL_SIZE = (SUN_FRUSTUM_HALF * 2) / SHADOW_MAP_SIZE;
 
 const objectsByEid = new Map<number, Object3D>();
-const poolsByKey = new Map<string, Object3D[]>();
-const DEFAULT_POOL_MAX = 256;
 const RENDER_DEBUG_FRAME_INTERVAL = 30;
 
 let renderFrameCount = 0;
@@ -149,7 +147,6 @@ function disposeObject3D(root: Object3D) {
 function clearRenderState() {
   logRenderDebug("clearing render state", {
     activeObjects: objectsByEid.size,
-    poolKeys: poolsByKey.size,
   });
 
   for (const obj of objectsByEid.values()) {
@@ -157,11 +154,6 @@ function clearRenderState() {
     disposeObject3D(obj);
   }
   objectsByEid.clear();
-
-  for (const pool of poolsByKey.values()) {
-    for (const obj of pool) disposeObject3D(obj);
-  }
-  poolsByKey.clear();
 
   scene?.clear();
   scene = null;
@@ -234,7 +226,8 @@ export function setupRenderer(canvas: HTMLCanvasElement | null) {
     powerPreference: "high-performance",
   });
 
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+  const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+  renderer.setPixelRatio(pixelRatio);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = PCFShadowMap;
   renderer.shadowMap.autoUpdate = false;
@@ -248,7 +241,6 @@ export function setupRenderer(canvas: HTMLCanvasElement | null) {
   sunLight = new DirectionalLight(0xfff5e0, 2.5);
   sunLight.position.set(50, 100, 30);
   sunLight.castShadow = true;
-  // 4096 map over a tight 50-unit frustum → ~82 texels/unit vs the previous ~11
   sunLight.shadow.mapSize.width = SHADOW_MAP_SIZE;
   sunLight.shadow.mapSize.height = SHADOW_MAP_SIZE;
   sunLight.shadow.camera.near = 0.5;
@@ -269,7 +261,7 @@ export function setupRenderer(canvas: HTMLCanvasElement | null) {
       y: cam.position.y,
       z: cam.position.z,
     },
-    pixelRatio: Math.min(window.devicePixelRatio || 1, 2),
+    pixelRatio,
   });
 }
 
@@ -295,7 +287,6 @@ export function upsertObjectByEid(
     obj = typeof objOrFactory === "function" ? objOrFactory() : objOrFactory;
     objectsByEid.set(eid, obj);
     obj.userData.eid = eid;
-    delete obj.userData.poolKey;
     s.add(obj);
   }
 
@@ -310,38 +301,6 @@ export function applyToObjectByEid(
   if (!obj) return false;
   fn(obj);
   return true;
-}
-
-export function setObjectTouchingByEid(
-  eid: number,
-  touching: boolean,
-): boolean {
-  const obj = objectsByEid.get(eid);
-  if (!obj) return false;
-
-  let applied = false;
-  obj.traverse((node) => {
-    const candidate = node as Object3D & {
-      material?: Material | Material[];
-      userData: {
-        baseMaterial?: Material | Material[];
-        touchMaterial?: Material | Material[];
-      };
-    };
-
-    if (candidate.material === undefined) return;
-
-    const nextMaterial = touching
-      ? candidate.userData.touchMaterial
-      : candidate.userData.baseMaterial;
-
-    if (!nextMaterial || candidate.material === nextMaterial) return;
-
-    candidate.material = nextMaterial;
-    applied = true;
-  });
-
-  return applied;
 }
 
 export function setObjectTransformByEid(
@@ -374,90 +333,5 @@ export function removeObjectByEid(
   delete obj.userData.eid;
 
   if (opts.dispose) disposeObject3D(obj);
-  return true;
-}
-
-export function addToScene(obj: Object3D) {
-  assertScene().add(obj);
-  return obj;
-}
-
-export function removeFromScene(obj: Object3D) {
-  obj.parent?.remove(obj);
-}
-
-type PoolOpts = {
-  onAcquire?: (obj: Object3D) => void;
-  onRelease?: (obj: Object3D) => void;
-  maxPerKey?: number;
-};
-
-function getPool(key: string): Object3D[] {
-  let pool = poolsByKey.get(key);
-  if (!pool) {
-    pool = [];
-    poolsByKey.set(key, pool);
-  }
-  return pool;
-}
-
-function resetPooledObject(obj: Object3D) {
-  obj.visible = false;
-  obj.position.set(0, 0, 0);
-  obj.rotation.order = "YXZ";
-  obj.rotation.set(0, 0, 0);
-  obj.scale.set(1, 1, 1);
-  delete obj.userData.eid;
-}
-
-export function upsertPooledByEid(
-  eid: number,
-  key: string,
-  factory: () => Object3D,
-  opts: PoolOpts = {},
-): Object3D {
-  const existing = objectsByEid.get(eid);
-  if (existing) return existing;
-
-  const pool = getPool(key);
-  const obj = pool.pop() ?? factory();
-
-  objectsByEid.set(eid, obj);
-  obj.userData.eid = eid;
-  obj.userData.poolKey = key;
-  obj.visible = true;
-
-  opts.onAcquire?.(obj);
-  addToScene(obj);
-
-  return obj;
-}
-
-export function removePooledByEid(eid: number, opts: PoolOpts = {}): boolean {
-  const obj = objectsByEid.get(eid);
-  if (!obj) return false;
-
-  objectsByEid.delete(eid);
-  removeFromScene(obj);
-
-  opts.onRelease?.(obj);
-  resetPooledObject(obj);
-
-  const key = obj.userData.poolKey as string | undefined;
-  if (!key) {
-    disposeObject3D(obj);
-    return true;
-  }
-
-  const pool = getPool(key);
-  const max = opts.maxPerKey ?? DEFAULT_POOL_MAX;
-
-  if (pool.length < max) {
-    pool.push(obj);
-  } else {
-    delete obj.userData.poolKey;
-    disposeObject3D(obj);
-  }
-
   return true;
 }

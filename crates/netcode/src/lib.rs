@@ -1,8 +1,6 @@
 mod delta;
-mod session;
 
 pub use delta::{
-    apply_patch_to_world, encode_patches, DeltaTracker, FieldUpdate, NetEventKind, NetPatch,
-    COMP_NET_FLAGS, COMP_POSITION, COMP_ROTATION,
+    apply_fields_to_entity, decode_events, encode_events, DeltaTracker, FieldUpdate, WireEvent,
+    COMP_POSITION, COMP_ROTATION, COMP_VELOCITY,
 };
-pub use session::PeerSession;

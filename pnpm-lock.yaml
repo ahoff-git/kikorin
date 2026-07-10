@@ -54,7 +54,7 @@ importers:
         specifier: 16.1.6
         version: 16.1.6(@babel/core@7.29.0)(@playwright/test@1.61.1)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
       peerjs:
-        specifier: ^1.5.4
+        specifier: ^1.5.5
         version: 1.5.5
       react:
         specifier: 19.2.3

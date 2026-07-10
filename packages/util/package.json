@@ -2,27 +2,14 @@
   "name": "@kikorin/util",
   "version": "3.0.0",
   "type": "module",
-  "files": [
-    "dist"
-  ],
+  "private": true,
   "exports": {
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     }
   },
-  "publishConfig": {
-    "access": "public",
-    "exports": {
-      ".": {
-        "types": "./dist/index.d.ts",
-        "import": "./dist/index.mjs",
-        "require": "./dist/index.cjs"
-      }
-    }
-  },
   "scripts": {
-    "build": "tsup",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

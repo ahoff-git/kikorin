@@ -1,16 +1,10 @@
 import { expect, type Page, type TestInfo } from "@playwright/test";
-import type { RenderPatch } from "@kikorin/adapter";
+import type { MetricsPatch, RenderPatch } from "@kikorin/adapter";
+import { METRIC_FIELDS } from "@kikorin/adapter";
 import type { E2EMetricSample as MetricSample, E2EState } from "../src/app/e2eMetrics";
 import { writeFile } from "node:fs/promises";
 
-export type MetricField =
-  | "tick_ms"
-  | "ai_ms"
-  | "physics_ms"
-  | "pathfinding_ms"
-  | "net_ms"
-  | "patch_ms"
-  | "boundary_ms";
+export type MetricField = keyof MetricsPatch;
 
 export type MetricsSummary = {
   sampleCount: number;
@@ -33,16 +27,6 @@ export type PlayerLocation = {
   y: number;
   z: number;
 };
-
-const METRIC_FIELDS: readonly MetricField[] = [
-  "tick_ms",
-  "ai_ms",
-  "physics_ms",
-  "pathfinding_ms",
-  "net_ms",
-  "patch_ms",
-  "boundary_ms",
-];
 
 const SAMPLE_TIMEOUT_MS = 6_000;
 
@@ -183,9 +167,58 @@ export function observedTps(samples: readonly MetricSample[]): number {
   return roundMetric(((last.tick - first.tick) * 1000) / (last.atMs - first.atMs));
 }
 
-export function computeTps(avgTickMs: number): number {
+/**
+ * Theoretical max throughput if ticks ran back-to-back with no idle time — a
+ * CPU-headroom metric derived from tick cost. This is NOT the actual tick rate;
+ * use observedTps (tick-counter delta over wall clock) for that.
+ */
+export function capacityTps(avgTickMs: number): number {
   if (avgTickMs <= 0) return 0;
   return roundMetric(1000 / avgTickMs);
+}
+
+/** One row of a perf sweep — shared by the stress and location metric specs. */
+export type MetricsRow = {
+  monsterCount: number;
+  observedTps: number;
+  capacityTps: number;
+  sampleCount: number;
+  avgTickMs: number;
+  maxTickMs: number;
+  avgAiMs: number;
+  maxAiMs: number;
+  avgPhysicsMs: number;
+  maxPhysicsMs: number;
+  avgPathfindingMs: number;
+  maxPathfindingMs: number;
+  avgBoundaryMs: number;
+  maxBoundaryMs: number;
+  renderPatches: number;
+  semanticPatches: number;
+  lastTick: number;
+};
+
+export function buildMetricsRow(state: E2EState, samples: MetricSample[]): MetricsRow {
+  const summary = summarizeSamples(state, samples);
+  return {
+    monsterCount: state.monsterEids.length,
+    observedTps: observedTps(samples),
+    capacityTps: capacityTps(summary.avg.tick_ms),
+    sampleCount: samples.length,
+    avgTickMs: summary.avg.tick_ms,
+    maxTickMs: summary.max.tick_ms,
+    avgAiMs: summary.avg.ai_ms,
+    maxAiMs: summary.max.ai_ms,
+    avgPhysicsMs: summary.avg.physics_ms,
+    maxPhysicsMs: summary.max.physics_ms,
+    avgPathfindingMs: summary.avg.pathfinding_ms,
+    maxPathfindingMs: summary.max.pathfinding_ms,
+    avgBoundaryMs: summary.avg.boundary_ms,
+    maxBoundaryMs: summary.max.boundary_ms,
+    renderPatches: summary.totalRenderPatches,
+    semanticPatches: summary.totalSemanticPatches,
+    lastTick: summary.lastTick,
+  };
 }
 
 export function expectHealthyMetrics(summary: MetricsSummary): void {
@@ -219,15 +252,9 @@ function metricValue(sample: MetricSample, field: MetricField): number {
 }
 
 function emptyMetricRecord(value: number): Record<MetricField, number> {
-  return {
-    tick_ms: value,
-    ai_ms: value,
-    physics_ms: value,
-    pathfinding_ms: value,
-    net_ms: value,
-    patch_ms: value,
-    boundary_ms: value,
-  };
+  return Object.fromEntries(
+    METRIC_FIELDS.map((field) => [field, value]),
+  ) as Record<MetricField, number>;
 }
 
 function roundMetric(value: number): number {
