@@ -20,6 +20,15 @@ importers:
 
   apps/web:
     dependencies:
+      '@awari/core':
+        specifier: ^0.0.3
+        version: 0.0.3
+      '@awari/protocol':
+        specifier: ^0.0.3
+        version: 0.0.3
+      '@awari/transport-peerjs':
+        specifier: ^0.0.3
+        version: 0.0.3
       '@emotion/react':
         specifier: ^11.14.0
         version: 11.14.0(@types/react@19.2.14)(react@19.2.3)
@@ -53,9 +62,6 @@ importers:
       next:
         specifier: 16.1.6
         version: 16.1.6(@babel/core@7.29.0)(@playwright/test@1.61.1)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
-      peerjs:
-        specifier: ^1.5.5
-        version: 1.5.5
       react:
         specifier: 19.2.3
         version: 19.2.3
@@ -195,6 +201,15 @@ packages:
 
   '@asamuzakjp/css-color@3.2.0':
     resolution: {integrity: sha512-K1A6z8tS3XsmCMM86xoWdn7Fkdn9m6RSVtocUrJYIwZnFVkng/PvkEoWtOWmP+Scc6saYWHWZYbndEEXxl24jw==}
+
+  '@awari/core@0.0.3':
+    resolution: {integrity: sha512-KyHQ6FDpmxffjI8dCRq4gFtMiKtG14RzoAmMCc1GQ02Dsa1uvHjccd9fX1awko8Gxc2dcfsa5iLBi7FEw1PV2Q==}
+
+  '@awari/protocol@0.0.3':
+    resolution: {integrity: sha512-uHODi1v6pl4QPURPmN8vzPjsaaeLk7G+ze6I59m8qfJ4FTZvyrm4EkJ8YTy0xUTYMGTmP+/7dArqBMFyrMtkOQ==}
+
+  '@awari/transport-peerjs@0.0.3':
+    resolution: {integrity: sha512-nia1WXtM92FIBikJJZRetQKMrFCTqkBml9UpmXf2G2QLEN+MTC4A7jbDK43Y1skj5+5X/aVPRr08ytxWjBL3JA==}
 
   '@babel/code-frame@7.29.0':
     resolution: {integrity: sha512-9NhCeYjq9+3uxgdtp20LSiJXJvN0FeCtNGpJxuMFZ1Kv3cWUNb6DOhJwUvcVCzKGR66cw4njwM6hrJLqgOwbcw==}
@@ -3222,6 +3237,18 @@ snapshots:
       '@csstools/css-tokenizer': 3.0.4
       lru-cache: 10.4.3
 
+  '@awari/core@0.0.3':
+    dependencies:
+      '@awari/protocol': 0.0.3
+
+  '@awari/protocol@0.0.3': {}
+
+  '@awari/transport-peerjs@0.0.3':
+    dependencies:
+      '@awari/core': 0.0.3
+      '@awari/protocol': 0.0.3
+      peerjs: 1.5.5
+
   '@babel/code-frame@7.29.0':
     dependencies:
       '@babel/helper-validator-identifier': 7.28.5
@@ -4828,7 +4855,7 @@ snapshots:
       eslint: 9.39.2
       eslint-import-resolver-node: 0.3.9
       eslint-import-resolver-typescript: 3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.56.0(eslint@9.39.2)(typescript@5.9.3))(eslint@9.39.2))(eslint@9.39.2)
-      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.56.0(eslint@9.39.2)(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.2)
+      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.56.0(eslint@9.39.2)(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.56.0(eslint@9.39.2)(typescript@5.9.3))(eslint@9.39.2))(eslint@9.39.2))(eslint@9.39.2)
       eslint-plugin-jsx-a11y: 6.10.2(eslint@9.39.2)
       eslint-plugin-react: 7.37.5(eslint@9.39.2)
       eslint-plugin-react-hooks: 7.0.1(eslint@9.39.2)
@@ -4861,7 +4888,7 @@ snapshots:
       tinyglobby: 0.2.15
       unrs-resolver: 1.11.1
     optionalDependencies:
-      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.56.0(eslint@9.39.2)(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.2)
+      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.56.0(eslint@9.39.2)(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.56.0(eslint@9.39.2)(typescript@5.9.3))(eslint@9.39.2))(eslint@9.39.2))(eslint@9.39.2)
     transitivePeerDependencies:
       - supports-color
 
@@ -4876,7 +4903,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.56.0(eslint@9.39.2)(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.2):
+  eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.56.0(eslint@9.39.2)(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.56.0(eslint@9.39.2)(typescript@5.9.3))(eslint@9.39.2))(eslint@9.39.2))(eslint@9.39.2):
     dependencies:
       '@rtsao/scc': 1.1.0
       array-includes: 3.1.9

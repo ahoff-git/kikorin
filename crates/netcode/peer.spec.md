@@ -15,18 +15,22 @@ Entity ids are in the **sender's id space**; the receiving engine maps them to l
 ### Cadence vs Content
 The **engine owns cadence** — which entities get marked dirty each tick (every tick by default, urgency/predictability strides, forced marks at discontinuities, and *always immediately* for entities the tracker hasn't announced yet — the Spawn is what tells peers they exist; `is_tracked` exposes that state). The **tracker owns content** — a marked entity ships only components that differ from its snapshot; one with no snapshot ships a `Spawn`. With **no peers connected the engine skips flushing entirely** so its outbound queue cannot grow while the transport is idle; the late-join full sync covers state for whoever arrives.
 
-### Transport — game layer, main thread, public broker
-`RTCPeerConnection` does not exist in Web Workers, so the transport lives on the **main thread in TypeScript** (`useNetworking`): PeerJS over its free public cloud broker (`0.peerjs.com`) — no self-hosted signaling server, no environment configuration. Your PeerJS id is your shareable address; "Connect to peer" dials it directly. The engine exposes a four-call bridge the transport drives:
-- `net_peer_connected(peer)` / `net_peer_disconnected(peer)` on data-channel open/close,
-- `net_ingest(peer, bytes)` for inbound payloads,
-- `net_take_outbound()` drained by the worker each flush → `{peer: string | null, data}[]` (null = broadcast), sent by the main thread.
+### Transport — game layer, main thread, awari room session
+`RTCPeerConnection` does not exist in Web Workers, so the transport lives on the **main thread in TypeScript** (`useNetworking`), riding on `@awari/core`'s room/topology session instead of raw pairwise dialing. PeerJS is now reached only through `@awari/transport-peerjs` (its free public broker, `0.peerjs.com` — no self-hosted signaling server); the engine never sees PeerJS at all, only the four-call bridge below, driven by an awari `RoomSession`:
+- `net_peer_connected(peer)` / `net_peer_disconnected(peer)` on the session's `onPeerJoined`/`onPeerLeft` (see "Room model" below),
+- `net_ingest(peer, bytes)` on the session's `onMessage`, keyed by `message.sender.peerId`,
+- `net_take_outbound()` drained by the worker each flush → `{peer: string | null, data}[]`, published by the main thread via `session.publish({type: "room"}, data)` regardless of the `peer` field — awari v0 floods every room-routed publish to all direct connections rather than addressing a single peer, so a full-sync originally aimed at one newly-joined peer reaches everyone. Harmless: `Spawn` events are idempotent for peers who already hold that state.
+
+#### Room model
+Each client's own PeerJS id doubles as an awari room id: on start, a client self-hosts a room keyed by its own id (the direct analog of "already listening for incoming connections"); "Connect to peer" joins the room keyed by the pasted id instead, replacing whatever room this client was previously in. With 3+ players all connecting to the same host id, awari's room-leader backbone relays broadcasts to everyone through the leader, resolving the old pairwise-only transport's main limitation (2 players worked; 3+ required every client to dial everyone).
 
 ### Disconnect Model
-Explicit: data-channel close/error events call `net_peer_disconnected` — mirrors despawn and `PeerLeft` reaches the UI next tick. Backstop: peers silent past `PEER_TIMEOUT_SECS` are dropped the same way (healthy peers `Ping` when otherwise quiet for `PING_INTERVAL_SECS`).
+Explicit: awari's `onPeerLeft` (the room leader detecting a member's connection closing and broadcasting it, or this client's own leader connection dropping) calls `net_peer_disconnected` — mirrors despawn and `PeerLeft` reaches the UI next tick. Backstop: peers silent past `PEER_TIMEOUT_SECS` are dropped the same way (healthy peers `Ping` when otherwise quiet for `PING_INTERVAL_SECS`) — this covers a leader that's alive but silently partitioned, which awari v0's reactive-only failover (no phi-accrual yet) wouldn't otherwise catch.
 
 ### Known Gaps
-- Connections are pairwise: joining one peer does not mesh you with peers *they* know (fine for 2 players; 3+ requires each client to dial everyone).
+- No bootstrap-service is deployed: peer discovery is still manual id-sharing (a `ManualBootstrapClient` seeds a contact hint directly from a pasted id instead of resolving one from a shared directory). A deployed bootstrap-service would remove the copy/paste step and would let a client other than the one who typed the original id recover after a leader is lost.
 - The public PeerJS broker is best-effort third-party infrastructure; a hosted PeerServer is the drop-in upgrade if it ever degrades.
+- `@awari/core`'s failover (leadership handoff on room-leader loss) is reactive and room-scope only in v0 — no hub scope, no phi-accrual suspicion, backups ordered by join order rather than ranked.
 
 ### Dependencies
 `ecs` (World reads/writes), `bincode`. Nothing else — no wasm, no transport.

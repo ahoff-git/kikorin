@@ -1,19 +1,24 @@
 "use client";
 
-// Peer-to-peer transport (IO layer). PeerJS brokers WebRTC over its free
-// public cloud (0.peerjs.com) — no self-hosted signaling server. The Rust
-// engine owns the protocol (wire events, mirrors, cadence, timeouts); this
-// hook only owns the connections and shuttles bytes:
-//   inbound   conn 'data'    → proxy.net_ingest(peer, bytes)
-//   outbound  proxy.onNetOut → conn.send(bytes)  (peer null = broadcast)
-//   presence  conn 'open'/'close' → proxy.net_peer_(dis)connected
-// The transport must live on the main thread: RTCPeerConnection does not
-// exist inside Web Workers.
+// Peer-to-peer transport (IO layer), riding on @awari/core's room/topology
+// session instead of ad hoc pairwise PeerJS dialing (see
+// crates/netcode/peer.spec.md's Transport section). The Rust engine still
+// owns the wire protocol and delta tracking unchanged — this hook only
+// bridges an awari RoomSession to the engine's net_* bridge:
+//   inbound   session.onMessage        → proxy.net_ingest(sender.peerId, bytes)
+//   outbound  proxy.onNetOut           → session.publish({type:"room"}, bytes)
+//   presence  session.onPeerJoined/Left → proxy.net_peer_(dis)connected
+// The transport must still live on the main thread: RTCPeerConnection does
+// not exist inside Web Workers. There is no bootstrap-service deployed yet —
+// see manualBootstrap.ts for the manual-sharing stand-in.
 
 import { log, logLevels } from "@kikorin/util";
 import { netChannel } from "@kikorin/adapter";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DataConnection, Peer } from "peerjs";
+import { createAwari } from "@awari/core";
+import type { PeerRef, RoomSession } from "@awari/protocol";
+import { createPeerJsTransport, readPeerJsId } from "@awari/transport-peerjs";
+import { createManualBootstrapClient, type ManualBootstrapClient } from "./manualBootstrap";
 import type { WorkerEngineProxy } from "../workers/WorkerEngineProxy";
 
 export type ChatMessage = {
@@ -47,91 +52,117 @@ export function useNetworking(
   const [transportError, setTransportError] = useState<string | null>(null);
   const [connectedPeers, setConnectedPeers] = useState<string[]>([]);
   const [chatMessages] = useState<ChatMessage[]>([]);
-  const peerRef = useRef<Peer | null>(null);
-  const connsRef = useRef<Map<string, DataConnection>>(new Map());
-  // Shared handler wiring for inbound and outgoing connections.
-  const wireConnectionRef = useRef<((conn: DataConnection) => void) | null>(null);
+  const sessionRef = useRef<RoomSession | null>(null);
+  const awariRef = useRef<ReturnType<typeof createAwari> | null>(null);
+  const bootstrapRef = useRef<ManualBootstrapClient | null>(null);
+  // Wiring shared between the initial self-hosted session and any session
+  // `connect()` joins later — set inside the effect so it closes over the
+  // current `engine`, called from the stable `connect` callback via the ref.
+  const attachSessionRef = useRef<((session: RoomSession) => void) | null>(null);
+  // One identity for this running app instance, across however many rooms it
+  // joins in turn (self-hosted, then whichever `connect()` targets).
+  const sessionIdRef = useRef<string>(crypto.randomUUID());
 
   // Bring the transport up once the engine is ready.
   useEffect(() => {
     if (!engine) return;
+    // Aliased so nested closures below type-narrow to non-null — `engine` the
+    // parameter stays `WorkerEngineProxy | null` inside them otherwise.
+    const activeEngine = engine;
     let disposed = false;
 
-    function wireConnection(conn: DataConnection) {
-      conn.on("open", () => {
-        log(logLevels.debug, "[transport] data channel open", ["network"], conn.peer);
-        connsRef.current.set(conn.peer, conn);
-        engine?.net_peer_connected(conn.peer);
-      });
-      conn.on("data", (data) => {
-        if (data instanceof ArrayBuffer) {
-          engine?.net_ingest(conn.peer, new Uint8Array(data));
-        } else if (data instanceof Uint8Array) {
-          engine?.net_ingest(conn.peer, data);
+    const transport = createPeerJsTransport();
+    const bootstrap = createManualBootstrapClient();
+    bootstrapRef.current = bootstrap;
+
+    function attachSession(session: RoomSession) {
+      sessionRef.current = session;
+
+      // Only the bridge call happens here — the UI's peer list comes from
+      // the engine's own NetPatch (PeerJoined/PeerLeft) stream via
+      // netChannel below, same as every other piece of entity state.
+      session.onPeerJoined((peer: PeerRef) => activeEngine.net_peer_connected(peer.peerId));
+      session.onPeerLeft((peer: PeerRef) => activeEngine.net_peer_disconnected(peer.peerId));
+      session.onMessage((message) => {
+        if (message.payload instanceof Uint8Array) {
+          activeEngine.net_ingest(message.sender.peerId, message.payload);
         }
       });
-      const drop = () => {
-        if (connsRef.current.delete(conn.peer)) {
-          engine?.net_peer_disconnected(conn.peer);
-        }
-      };
-      conn.on("close", drop);
-      conn.on("error", (err) => {
-        log(logLevels.warning, "[transport] connection error", ["network"], conn.peer, err);
-        drop();
+      session.onDisconnected((reason: Error) => {
+        log(logLevels.warning, "[transport] room disconnected", ["network"], reason);
+        setTransportError(reason.message);
       });
     }
+    attachSessionRef.current = attachSession;
 
-    wireConnectionRef.current = wireConnection;
-
-    // Dynamic import keeps peerjs (browser-only) out of the SSR bundle.
-    void import("peerjs").then(({ default: PeerCtor }) => {
-      if (disposed) return;
-      const peer = new PeerCtor(); // no options = the free public PeerJS cloud
-      peerRef.current = peer;
-
-      peer.on("open", (id) => {
-        log(logLevels.debug, "[transport] broker connected", ["network"], id);
-        setLocalPeerId(id);
-        setTransportError(null);
-      });
-      peer.on("connection", wireConnection);
-      peer.on("error", (err) => {
+    async function start() {
+      let selfId: string;
+      try {
+        selfId = await transport.selfId;
+      } catch (err) {
+        if (disposed) return;
         log(logLevels.error, "[transport] peer error", ["network"], err);
         setTransportError(String(err));
-      });
-      peer.on("disconnected", () => {
-        // Broker link dropped (existing data channels survive); try to regain it.
-        peer.reconnect();
-      });
-    });
+        return;
+      }
+      if (disposed) return;
+
+      log(logLevels.debug, "[transport] broker connected", ["network"], selfId);
+      setLocalPeerId(selfId);
+      setTransportError(null);
+
+      const awari = createAwari({ transport, bootstrap, resolveConnectionId: readPeerJsId, peerId: selfId });
+      awariRef.current = awari;
+
+      // Self-host a room keyed by our own id — the direct analog of the old
+      // "already listening for incoming connections" posture, since nobody
+      // else can name this room without us sharing that same id out of band.
+      try {
+        const session = await awari.join({ roomId: selfId, sessionId: sessionIdRef.current });
+        if (disposed) {
+          void session.close();
+          return;
+        }
+        attachSession(session);
+      } catch (err) {
+        if (disposed) return;
+        log(logLevels.error, "[transport] failed to host room", ["network"], err);
+        setTransportError(String(err));
+      }
+    }
+
+    void start();
 
     // Engine → wire: send whatever the engine queued since the last flush.
-    engine.onNetOut((items) => {
+    // awari v0 floods every room-routed publish to all direct connections
+    // regardless of a per-peer target, so a full-sync originally aimed at
+    // one newly-joined peer reaches everyone — harmless, since Spawn events
+    // are idempotent for peers who already have that state.
+    activeEngine.onNetOut((items) => {
+      const session = sessionRef.current;
+      if (!session) return;
       for (const item of items) {
-        if (item.peer === null) {
-          for (const conn of connsRef.current.values()) conn.send(item.data);
-        } else {
-          connsRef.current.get(item.peer)?.send(item.data);
-        }
+        void session.publish({ type: "room" }, item.data);
       }
     });
 
     return () => {
       disposed = true;
-      wireConnectionRef.current = null;
-      engine.onNetOut(null);
-      for (const [peerId] of connsRef.current) engine.net_peer_disconnected(peerId);
-      connsRef.current.clear();
-      peerRef.current?.destroy();
-      peerRef.current = null;
+      attachSessionRef.current = null;
+      awariRef.current = null;
+      bootstrapRef.current = null;
+      activeEngine.onNetOut(null);
+      void sessionRef.current?.close();
+      sessionRef.current = null;
+      void transport.destroy();
       setLocalPeerId(null);
     };
   }, [engine]);
 
-  // Live peer list from engine net events: peer_joined fires when the data
-  // channel opens (before any entity data), entity activity also marks a peer
-  // present, and peer_left (close or engine timeout) removes it.
+  // Live peer list from engine net events: peer_joined fires when the room
+  // session bridge reports a new peer (before any entity data), entity
+  // activity also marks a peer present, and peer_left (bridge report or
+  // engine timeout) removes it.
   useEffect(() => {
     const unsub = netChannel.subscribe(() => {
       const patches = netChannel.getSnapshot();
@@ -151,15 +182,30 @@ export function useNetworking(
     return unsub;
   }, []);
 
-  // Dial another client by its PeerJS id.
+  // Join another client's self-hosted room by its PeerJS id, replacing
+  // whatever room we were previously in (self-hosted or otherwise).
   const connect = useCallback((remotePeerId: string) => {
-    const peer = peerRef.current;
-    const wire = wireConnectionRef.current;
-    if (!peer || !wire) {
-      log(logLevels.debug, "[transport] connect: broker not ready", ["network"], remotePeerId);
+    const awari = awariRef.current;
+    const bootstrap = bootstrapRef.current;
+    const attach = attachSessionRef.current;
+    if (!awari || !bootstrap || !attach) {
+      log(logLevels.debug, "[transport] connect: not ready", ["network"], remotePeerId);
       return;
     }
-    wire(peer.connect(remotePeerId, { reliable: true }));
+
+    bootstrap.seedContact(remotePeerId, remotePeerId);
+
+    void (async () => {
+      try {
+        const previous = sessionRef.current;
+        const session = await awari.join({ roomId: remotePeerId, sessionId: sessionIdRef.current });
+        await previous?.close();
+        attach(session);
+      } catch (err) {
+        log(logLevels.error, "[transport] connect failed", ["network"], remotePeerId, err);
+        setTransportError(String(err));
+      }
+    })();
   }, []);
 
   // TODO: intentional no-op stubs from the TS→Rust netcode migration. Chat and
