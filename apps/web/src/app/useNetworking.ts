@@ -9,16 +9,20 @@
 //   outbound  proxy.onNetOut           → session.publish({type:"room"}, bytes)
 //   presence  session.onPeerJoined/Left → proxy.net_peer_(dis)connected
 // The transport must still live on the main thread: RTCPeerConnection does
-// not exist inside Web Workers. There is no bootstrap-service deployed yet —
-// see manualBootstrap.ts for the manual-sharing stand-in.
+// not exist inside Web Workers. On mount, every client tries to join the
+// same shared game room (see gameRoom.ts) via a well-known anchor peer id —
+// no bootstrap-service, no pasted id required; see the anchor-claim-or-
+// fallback dance in start() below. `connect()` remains as a manual override
+// for a private ad hoc session outside the shared room.
 
 import { log, logLevels } from "@kikorin/util";
 import { netChannel } from "@kikorin/adapter";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createAwari } from "@awari/core";
+import { createAwari, type Transport } from "@awari/core";
 import type { PeerRef, RoomSession } from "@awari/protocol";
 import { createPeerJsTransport, readPeerJsId } from "@awari/transport-peerjs";
 import { createManualBootstrapClient, type ManualBootstrapClient } from "./manualBootstrap";
+import { GAME_ROOM_ANCHOR_PEER_ID, GAME_ROOM_ID } from "./gameRoom";
 import type { WorkerEngineProxy } from "../workers/WorkerEngineProxy";
 
 export type ChatMessage = {
@@ -55,12 +59,13 @@ export function useNetworking(
   const sessionRef = useRef<RoomSession | null>(null);
   const awariRef = useRef<ReturnType<typeof createAwari> | null>(null);
   const bootstrapRef = useRef<ManualBootstrapClient | null>(null);
-  // Wiring shared between the initial self-hosted session and any session
-  // `connect()` joins later — set inside the effect so it closes over the
-  // current `engine`, called from the stable `connect` callback via the ref.
+  // Wiring shared between the initial shared-game-room session and any
+  // session `connect()` joins later — set inside the effect so it closes
+  // over the current `engine`, called from the stable `connect` callback via
+  // the ref.
   const attachSessionRef = useRef<((session: RoomSession) => void) | null>(null);
   // One identity for this running app instance, across however many rooms it
-  // joins in turn (self-hosted, then whichever `connect()` targets).
+  // joins in turn (the shared game room, then whichever `connect()` targets).
   const sessionIdRef = useRef<string>(crypto.randomUUID());
 
   // Bring the transport up once the engine is ready.
@@ -71,9 +76,10 @@ export function useNetworking(
     const activeEngine = engine;
     let disposed = false;
 
-    const transport = createPeerJsTransport();
-    const bootstrap = createManualBootstrapClient();
-    bootstrapRef.current = bootstrap;
+    // Which physical connection ends up backing this session is decided
+    // inside start() (anchor-claim-or-fallback below); tracked here so
+    // cleanup can always destroy whichever one that turned out to be.
+    let transport: Transport | null = null;
 
     function attachSession(session: RoomSession) {
       sessionRef.current = session;
@@ -84,8 +90,15 @@ export function useNetworking(
       session.onPeerJoined((peer: PeerRef) => activeEngine.net_peer_connected(peer.peerId));
       session.onPeerLeft((peer: PeerRef) => activeEngine.net_peer_disconnected(peer.peerId));
       session.onMessage((message) => {
-        if (message.payload instanceof Uint8Array) {
-          activeEngine.net_ingest(message.sender.peerId, message.payload);
+        // PeerJS's default serialization normalizes a sent Uint8Array back to
+        // a plain ArrayBuffer on arrival, not the original TypedArray class —
+        // net_ingest needs a real Uint8Array, so it's rewrapped here rather
+        // than checking `instanceof Uint8Array` (which this payload never is).
+        const payload = message.payload;
+        if (payload instanceof Uint8Array) {
+          activeEngine.net_ingest(message.sender.peerId, payload);
+        } else if (payload instanceof ArrayBuffer) {
+          activeEngine.net_ingest(message.sender.peerId, new Uint8Array(payload));
         }
       });
       session.onDisconnected((reason: Error) => {
@@ -96,29 +109,52 @@ export function useNetworking(
     attachSessionRef.current = attachSession;
 
     async function start() {
+      // Auto-discovery with no separate directory service: try to claim a
+      // well-known PeerJS id derived from the shared game room (see
+      // gameRoom.ts). Whoever gets there first becomes the room's anchor
+      // (genesis leader); everyone after that fails to claim it — that
+      // failure itself is the discovery signal — and dials it directly
+      // instead of needing a pasted id.
+      let isAnchor = true;
+      let transportAttempt = createPeerJsTransport({ id: GAME_ROOM_ANCHOR_PEER_ID });
       let selfId: string;
       try {
-        selfId = await transport.selfId;
-      } catch (err) {
-        if (disposed) return;
-        log(logLevels.error, "[transport] peer error", ["network"], err);
-        setTransportError(String(err));
+        selfId = await transportAttempt.selfId;
+      } catch {
+        isAnchor = false;
+        void transportAttempt.destroy();
+        transportAttempt = createPeerJsTransport();
+        try {
+          selfId = await transportAttempt.selfId;
+        } catch (err) {
+          if (disposed) return;
+          log(logLevels.error, "[transport] peer error", ["network"], err);
+          setTransportError(String(err));
+          return;
+        }
+      }
+      if (disposed) {
+        void transportAttempt.destroy();
         return;
       }
-      if (disposed) return;
+      transport = transportAttempt;
 
-      log(logLevels.debug, "[transport] broker connected", ["network"], selfId);
+      log(logLevels.debug, "[transport] broker connected", ["network"], selfId, { isAnchor });
       setLocalPeerId(selfId);
       setTransportError(null);
+
+      const bootstrap = createManualBootstrapClient();
+      bootstrapRef.current = bootstrap;
+      if (!isAnchor) {
+        // We're not the anchor, so someone else already is — dial them.
+        bootstrap.seedContact(GAME_ROOM_ID, GAME_ROOM_ANCHOR_PEER_ID);
+      }
 
       const awari = createAwari({ transport, bootstrap, resolveConnectionId: readPeerJsId, peerId: selfId });
       awariRef.current = awari;
 
-      // Self-host a room keyed by our own id — the direct analog of the old
-      // "already listening for incoming connections" posture, since nobody
-      // else can name this room without us sharing that same id out of band.
       try {
-        const session = await awari.join({ roomId: selfId, sessionId: sessionIdRef.current });
+        const session = await awari.join({ roomId: GAME_ROOM_ID, sessionId: sessionIdRef.current });
         if (disposed) {
           void session.close();
           return;
@@ -126,7 +162,7 @@ export function useNetworking(
         attachSession(session);
       } catch (err) {
         if (disposed) return;
-        log(logLevels.error, "[transport] failed to host room", ["network"], err);
+        log(logLevels.error, "[transport] failed to join game room", ["network"], err);
         setTransportError(String(err));
       }
     }
@@ -154,7 +190,7 @@ export function useNetworking(
       activeEngine.onNetOut(null);
       void sessionRef.current?.close();
       sessionRef.current = null;
-      void transport.destroy();
+      void transport?.destroy();
       setLocalPeerId(null);
     };
   }, [engine]);
@@ -182,8 +218,10 @@ export function useNetworking(
     return unsub;
   }, []);
 
-  // Join another client's self-hosted room by its PeerJS id, replacing
-  // whatever room we were previously in (self-hosted or otherwise).
+  // Manual override: join a private ad hoc room keyed by a pasted PeerJS id,
+  // replacing whatever room we were previously in (the shared game room, by
+  // default, or another private room). Useful for testing or a session
+  // deliberately kept off the shared game room.
   const connect = useCallback((remotePeerId: string) => {
     const awari = awariRef.current;
     const bootstrap = bootstrapRef.current;
