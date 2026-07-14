@@ -70,11 +70,20 @@ export function useEngine(canvasRef: RefObject<HTMLCanvasElement | null>): UseEn
       // Route physics patches from the worker to the channel system.
       proxy.onPatches((bundle: PatchBundle | null) => {
         if (!bundle) return;
+        // lifecycle/net must be applied before render: they're what creates
+        // an entity's Object3D (upsertObjectByEid); a render patch only
+        // moves an existing one (setObjectTransformByEid no-ops silently if
+        // it doesn't exist yet). Render-before-creation meant a brand-new
+        // entity's first position update was dropped — it rendered at
+        // Three.js's default (0,0,0) until the next update, or forever if
+        // there never was one (e.g. a stationary remote player's mirror,
+        // which only moves on a Delta and gets none while its owner stands
+        // still) — see crates/patch/patch.spec.md.
+        if (bundle.lifecycle.length > 0) lifecycleChannel.emit(bundle.lifecycle);
+        if (bundle.net.length > 0) netChannel.emit(bundle.net);
         if (bundle.render.length > 0) renderChannel.emit(bundle.render);
         if (bundle.semantic.length > 0) hudChannel.emit(bundle.semantic);
-        if (bundle.net.length > 0) netChannel.emit(bundle.net);
         if (bundle.hits.length > 0) hitsChannel.emit(bundle.hits);
-        if (bundle.lifecycle.length > 0) lifecycleChannel.emit(bundle.lifecycle);
         metricsChannel.emit(bundle.metrics);
         recordE2EPatch(bundle);
 

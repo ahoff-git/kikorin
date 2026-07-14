@@ -19,6 +19,7 @@ Scans the world's dirty entities each tick and produces the `PatchBundle` — th
 ### Invariants
 - `generate` does not call `World::clear_dirty`; the caller (engine) clears dirty after generation.
 - `generate` receives `tick_ms`/`patch_ms` as zero; the engine stamps both into `bundle.metrics` after generation so consumers receive real values.
+- **Consumption order**: a consumer must apply `lifecycle` and `net` (entity creation — `LifecycleKind::Spawned` / `NetEventKind::EntitySpawned`) before `render` (entity positioning) for entities that appear in the same bundle. A brand-new entity's first `RenderPatch` targets an object the consumer hasn't created yet; applying render first silently drops it, leaving the entity at whatever default position the consumer's renderer uses until its next `RenderPatch` — which may never come (e.g. a stationary remote mirror only updates on a `Delta`, and gets none while its owner doesn't move).
 
 ### Dependencies
 `ecs` (World, DirtyFlags, EntityId), `bincode`. No sibling crate deps beyond `ecs`.

@@ -573,9 +573,11 @@ impl Engine {
         }
     }
 
-    /// Update the default goal — the position every monster without a
-    /// per-entity override paths toward. Call once per frame before tick()
-    /// (kikorin passes the player's position).
+    /// Update the fallback goal for monsters without a per-entity override,
+    /// used only when no player exists yet to chase (no local player
+    /// registered, no peers connected) — once at least one does, every such
+    /// monster targets whichever player (local or a remote mirror) is
+    /// currently closest to it instead. See `closest_player_position`.
     pub fn update_monster_goal(&mut self, gx: f32, gz: f32) {
         self.goal_x = gx;
         self.goal_z = gz;
@@ -1700,13 +1702,48 @@ impl Engine {
         events
     }
 
-    /// The goal one monster paths toward: its per-entity override, else the
-    /// engine-wide default.
-    fn goal_for(&self, mid: u32) -> (f32, f32) {
-        self.monster_states
-            .get(&mid)
-            .and_then(|s| s.goal)
-            .map_or((self.goal_x, self.goal_z), |g| (g[0], g[1]))
+    /// The position of whichever player — the locally simulated one, or a
+    /// remote player's mirror — is closest to (x, z). A mirror counts as a
+    /// player when its public profile is neither NET_BULLET nor NET_MONSTER
+    /// (the only two typed profiles that cross the wire); see `mirror_flags`.
+    /// None only when nobody is playing yet: no local player registered, no
+    /// peers connected.
+    fn closest_player_position(&self, x: f32, z: f32) -> Option<(f32, f32)> {
+        let mut best: Option<(f32, f32, f32)> = None; // (dist_sq, px, pz)
+
+        if let Some(player) = &self.player {
+            if let Some([px, _, pz]) = self.world.position(player.eid) {
+                best = Some(((px - x) * (px - x) + (pz - z) * (pz - z), px, pz));
+            }
+        }
+
+        for (&mirror, &flags) in &self.mirror_flags {
+            if flags & (NET_BULLET | NET_MONSTER) != 0 {
+                continue;
+            }
+            let Some([px, _, pz]) = self.world.position(mirror) else {
+                continue;
+            };
+            let dist_sq = (px - x) * (px - x) + (pz - z) * (pz - z);
+            if best.is_none_or(|(best_dist, ..)| dist_sq < best_dist) {
+                best = Some((dist_sq, px, pz));
+            }
+        }
+
+        best.map(|(_, px, pz)| (px, pz))
+    }
+
+    /// The goal one monster paths toward: its per-entity override; else
+    /// whichever player (local or a remote mirror) is currently closest to
+    /// it; else the JS-set engine-wide default, used only when no player
+    /// exists yet to chase (e.g. before `register_player`, or tests that
+    /// drive goals directly without spawning a player).
+    fn goal_for(&self, mid: u32, mx: f32, mz: f32) -> (f32, f32) {
+        if let Some(g) = self.monster_states.get(&mid).and_then(|s| s.goal) {
+            return (g[0], g[1]);
+        }
+        self.closest_player_position(mx, mz)
+            .unwrap_or((self.goal_x, self.goal_z))
     }
 
     /// Run monster AI for one tick. Orchestration only — the per-monster
@@ -1738,7 +1775,7 @@ impl Engine {
             // monster dimensions are caller-supplied, so read the collider.
             let foot_y = my - self.world.collider(mid).map_or(0.0, |c| c.half_height);
 
-            let (goal_x, goal_z) = self.goal_for(mid);
+            let (goal_x, goal_z) = self.goal_for(mid, mx, mz);
             let dx = goal_x - mx;
             let dz = goal_z - mz;
             let dist = (dx * dx + dz * dz).sqrt();
@@ -2995,7 +3032,7 @@ mod tests {
         engine.update_monster_goal(-10.0, 0.0); // default: -x
         engine.set_monster_goal(m, 10.0, 0.0); // override: +x
 
-        assert_eq!(engine.goal_for(m), (10.0, 0.0));
+        assert_eq!(engine.goal_for(m, 0.0, 0.0), (10.0, 0.0));
 
         // Enough ticks to clear the initial replan stagger and plan a path.
         for _ in 0..1_500 {
@@ -3017,7 +3054,7 @@ mod tests {
         assert!(engine.world.velocity(m).expect("velocity")[0] > 0.0);
 
         engine.clear_monster_goal(m);
-        assert_eq!(engine.goal_for(m), (-10.0, 0.0));
+        assert_eq!(engine.goal_for(m, 0.0, 0.0), (-10.0, 0.0));
         // The stale path (ending at +10) forces a replan toward the default
         // goal once the cooldown allows; the stationary monster's stuck escape
         // shortcuts that wait.
@@ -3026,6 +3063,77 @@ mod tests {
         }
         let v = engine.world.velocity(m).expect("velocity");
         assert!(v[0] < 0.0, "must revert to the default goal (-x), got {v:?}");
+    }
+
+    #[test]
+    fn monster_without_an_override_targets_whichever_player_is_closest() {
+        let mut engine = engine_with_flat_floor();
+        let local_player = engine.spawn_box_entity(-10.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        engine.register_player(local_player);
+        let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+
+        // Only the local player exists — it's the target even with no JS-set default goal.
+        assert_eq!(engine.goal_for(m, 0.0, 0.0), (-10.0, 0.0));
+
+        // A remote player's mirror appears closer than the local player.
+        let mut out = Vec::new();
+        engine.ingest_peer_payload("peer-a", &delta_payload(1, [5.0, 0.9, 0.0]), &mut out);
+        assert_eq!(
+            engine.goal_for(m, 0.0, 0.0),
+            (5.0, 0.0),
+            "must switch to the closer remote player",
+        );
+
+        // The remote player moves away; the local player becomes closest again.
+        engine.ingest_peer_payload("peer-a", &delta_payload(1, [50.0, 0.9, 0.0]), &mut out);
+        assert_eq!(
+            engine.goal_for(m, 0.0, 0.0),
+            (-10.0, 0.0),
+            "must switch back once the local player is closer",
+        );
+    }
+
+    #[test]
+    fn per_entity_goal_override_still_wins_over_closest_player() {
+        let mut engine = engine_with_flat_floor();
+        let local_player = engine.spawn_box_entity(-1.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        engine.register_player(local_player);
+        let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+
+        engine.set_monster_goal(m, 30.0, 0.0);
+        assert_eq!(
+            engine.goal_for(m, 0.0, 0.0),
+            (30.0, 0.0),
+            "an explicit per-monster goal must win over the closest-player default",
+        );
+    }
+
+    #[test]
+    fn a_remote_monster_mirror_never_counts_as_a_player_target() {
+        let mut engine = engine_with_flat_floor();
+        let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+
+        // A remote peer's own monster mirrors in nearby — its public profile
+        // carries the NET_MONSTER bit, so it must not be mistaken for a player.
+        let payload = netcode::encode_events(&[WireEvent::Spawn {
+            entity: 1,
+            flags: NET_MONSTER,
+            fields: vec![
+                netcode::FieldUpdate { component_id: netcode::COMP_POSITION, field_id: 0, value: 1.0 },
+                netcode::FieldUpdate { component_id: netcode::COMP_POSITION, field_id: 1, value: 0.9 },
+                netcode::FieldUpdate { component_id: netcode::COMP_POSITION, field_id: 2, value: 0.0 },
+            ],
+        }]);
+        let mut out = Vec::new();
+        engine.ingest_peer_payload("peer-a", &payload, &mut out);
+
+        // No local/remote player exists at all — falls back to the JS default.
+        engine.update_monster_goal(20.0, 0.0);
+        assert_eq!(
+            engine.goal_for(m, 0.0, 0.0),
+            (20.0, 0.0),
+            "a remote monster mirror must never be treated as a player target",
+        );
     }
 
     fn delta_payload(entity: u32, pos: [f32; 3]) -> Vec<u8> {
