@@ -6,6 +6,7 @@ export const engine_build_navmesh: (a: number) => void;
 export const engine_clear_monster_goal: (a: number, b: number) => void;
 export const engine_deserialize_patch: (a: number, b: number) => any;
 export const engine_destroy_entity: (a: number, b: number) => void;
+export const engine_dimension: (a: number) => [number, number];
 export const engine_find_path: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
 export const engine_get_metrics: (a: number) => any;
 export const engine_load_map: (a: number, b: any) => any;
@@ -13,7 +14,7 @@ export const engine_net_ingest: (a: number, b: number, c: number, d: number, e: 
 export const engine_net_peer_connected: (a: number, b: number, c: number) => void;
 export const engine_net_peer_disconnected: (a: number, b: number, c: number) => void;
 export const engine_net_take_outbound: (a: number) => any;
-export const engine_new: () => number;
+export const engine_new: (a: number, b: number) => number;
 export const engine_player_fire: (a: number) => void;
 export const engine_register_player: (a: number, b: number) => void;
 export const engine_set_ai_config: (a: number, b: any) => void;

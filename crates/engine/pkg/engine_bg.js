@@ -46,6 +46,23 @@ export class Engine {
         wasm.engine_destroy_entity(this.__wbg_ptr, id);
     }
     /**
+     * Which physics backend this engine was constructed with — `"2d"` or
+     * `"3d"`. Introspection only; the choice was fixed at construction.
+     * @returns {string}
+     */
+    dimension() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.engine_dimension(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * Find a path from (startX, startY, startZ) to (goalX, goalZ).
      * @param {number} start_x
      * @param {number} start_y
@@ -120,8 +137,19 @@ export class Engine {
         const ret = wasm.engine_net_take_outbound(this.__wbg_ptr);
         return ret;
     }
-    constructor() {
-        const ret = wasm.engine_new();
+    /**
+     * `dimension`: `"2d"` (case-insensitive) selects Rapier2D; anything else
+     * (including omitted/`None`, from JS calling `new Engine()`) keeps the
+     * original Rapier3D behavior. A setup-time choice only — fixed for this
+     * engine instance's lifetime, and orthogonal to game logic (player
+     * controller/monster AI/bullets are unchanged either way; see
+     * crates/physics's Dimension for exactly what "2D" means physically).
+     * @param {string | null} [dimension]
+     */
+    constructor(dimension) {
+        var ptr0 = isLikeNone(dimension) ? 0 : passStringToWasm0(dimension, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len0 = WASM_VECTOR_LEN;
+        const ret = wasm.engine_new(ptr0, len0);
         this.__wbg_ptr = ret;
         EngineFinalization.register(this, this.__wbg_ptr, this);
         return this;
@@ -302,9 +330,11 @@ export class Engine {
         return ret;
     }
     /**
-     * Update the default goal — the position every monster without a
-     * per-entity override paths toward. Call once per frame before tick()
-     * (kikorin passes the player's position).
+     * Update the fallback goal for monsters without a per-entity override,
+     * used only when no player exists yet to chase (no local player
+     * registered, no peers connected) — once at least one does, every such
+     * monster targets whichever player (local or a remote mirror) is
+     * currently closest to it instead. See `closest_player_position`.
      * @param {number} gx
      * @param {number} gz
      */

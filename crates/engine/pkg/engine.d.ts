@@ -26,6 +26,11 @@ export class Engine {
      */
     destroy_entity(id: number): void;
     /**
+     * Which physics backend this engine was constructed with — `"2d"` or
+     * `"3d"`. Introspection only; the choice was fixed at construction.
+     */
+    dimension(): string;
+    /**
      * Find a path from (startX, startY, startZ) to (goalX, goalZ).
      */
     find_path(start_x: number, start_y: number, start_z: number, goal_x: number, goal_z: number, can_jump: boolean): any;
@@ -59,7 +64,15 @@ export class Engine {
      * `[{ peer: string | null, data: Uint8Array }]` — null peer = broadcast.
      */
     net_take_outbound(): any;
-    constructor();
+    /**
+     * `dimension`: `"2d"` (case-insensitive) selects Rapier2D; anything else
+     * (including omitted/`None`, from JS calling `new Engine()`) keeps the
+     * original Rapier3D behavior. A setup-time choice only — fixed for this
+     * engine instance's lifetime, and orthogonal to game logic (player
+     * controller/monster AI/bullets are unchanged either way; see
+     * crates/physics's Dimension for exactly what "2D" means physically).
+     */
+    constructor(dimension?: string | null);
     /**
      * Fire one bullet from the player along its facing + aim pitch (tuning in
      * PlayerConfig). Ballistic, replicated, predictable; spawn and death reach
@@ -148,9 +161,11 @@ export class Engine {
      */
     tick(dt_ms: number): any;
     /**
-     * Update the default goal — the position every monster without a
-     * per-entity override paths toward. Call once per frame before tick()
-     * (kikorin passes the player's position).
+     * Update the fallback goal for monsters without a per-entity override,
+     * used only when no player exists yet to chase (no local player
+     * registered, no peers connected) — once at least one does, every such
+     * monster targets whichever player (local or a remote mirror) is
+     * currently closest to it instead. See `closest_player_position`.
      */
     update_monster_goal(gx: number, gz: number): void;
 }
