@@ -1407,12 +1407,6 @@ impl Engine {
         self.set_entity_velocity(eid, vx * cfg.walk_speed, vy, vz * cfg.walk_speed);
         self.world.set_rotation(eid, [yaw, 0.0, 0.0]);
         self.world.mark_dirty(eid, DirtyFlags::TRANSFORM);
-
-        // Monsters chase the player by default (per-monster goals still win).
-        if let Some(pos) = self.world.position(eid) {
-            self.goal_x = pos[0];
-            self.goal_z = pos[2];
-        }
     }
 
     /// Respawn one monster at a random bearing on the respawn ring.
@@ -2742,13 +2736,7 @@ mod tests {
         let pos = engine.world.position(eid).expect("player");
         assert!(pos[2] > 1.0, "forward input must move the player +z, got {pos:?}");
         assert!(pos[1] > y0 + 0.5, "held jump must lift the player, got {pos:?}");
-        // Yaw faces movement and the monster goal follows the player (the goal
-        // is stamped pre-physics, so it may lag by one tick of movement).
         assert_eq!(engine.world.rotation(eid).map(|r| r[0]), Some(0.0));
-        assert!(
-            (engine.goal_x - pos[0]).abs() < 0.1 && (engine.goal_z - pos[2]).abs() < 0.1,
-            "default monster goal must track the player",
-        );
     }
 
     #[test]
