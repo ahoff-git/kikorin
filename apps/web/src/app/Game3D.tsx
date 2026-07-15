@@ -48,7 +48,12 @@ export default function Game3D() {
   const [ownedEids, setOwnedEids] = useState<readonly number[]>([]);
   const timeMetrics = useTimeMetrics();
   const spawnMonstersRef = useRef<((count: number) => void) | null>(null);
-  const { localPeerId, transportError, connectedPeers, chatMessages, connect, sendChatMessage, addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity, setHitHandler } = useNetworking(
+  const {
+    localPeerId, transportError, connectedPeers, chatMessages,
+    activeChatChannel, setActiveChatChannel, joinedChatGroups, joinChatGroup, leaveChatGroup,
+    connect, sendChatMessage,
+    addOwnedEntity, removeOwnedEntity, signalEntityDestroyed, signalHitOnRemoteEntity, setHitHandler,
+  } = useNetworking(
     engine,
     "3d",
     playerEid,
@@ -128,6 +133,11 @@ export default function Game3D() {
           onConnect={connect}
           chatMessages={chatMessages}
           onSendChat={sendChatMessage}
+          activeChatChannel={activeChatChannel}
+          onSelectChatChannel={setActiveChatChannel}
+          joinedChatGroups={joinedChatGroups}
+          onJoinChatGroup={joinChatGroup}
+          onLeaveChatGroup={leaveChatGroup}
         />
       }
       footer={<Footer />}

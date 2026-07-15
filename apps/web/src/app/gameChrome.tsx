@@ -9,7 +9,8 @@ import { useEffect, useRef, useState } from "react";
 import { type Time, useKikorinEvent } from "@kikorin/react";
 import { Box } from "@mui/material";
 import { PAGE_COLUMN_TEMPLATE } from "./kikorinLayout";
-import type { ChatMessage } from "./useNetworking";
+import type { ChatMessage, ChatChannel } from "./useNetworking";
+import { channelLabel } from "./chat";
 
 export const canvasViewportStyle: CSSProperties = {
   flex: 1,
@@ -92,6 +93,38 @@ const chatInputStyle: CSSProperties = {
   fontSize: 11,
 };
 
+const channelRowStyle: CSSProperties = {
+  display: "flex",
+  gap: 4,
+  flexWrap: "wrap",
+  alignItems: "center",
+};
+
+function channelButtonStyle(active: boolean): CSSProperties {
+  return {
+    fontSize: 11,
+    padding: "2px 8px",
+    borderRadius: 999,
+    border: active ? "1px solid #4ade80" : "1px solid #555",
+    background: active ? "#1c3a24" : "transparent",
+    color: active ? "#4ade80" : "#aaa",
+    cursor: "pointer",
+  };
+}
+
+const groupJoinRowStyle: CSSProperties = {
+  display: "flex",
+  gap: 4,
+  marginTop: 4,
+};
+
+const groupJoinInputStyle: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  fontFamily: "monospace",
+  fontSize: 11,
+};
+
 const networkPanelStyle: CSSProperties = { marginTop: 16 };
 
 const networkRowStyle: CSSProperties = {
@@ -167,6 +200,11 @@ export function RightPanel({
   onConnect,
   chatMessages,
   onSendChat,
+  activeChatChannel,
+  onSelectChatChannel,
+  joinedChatGroups,
+  onJoinChatGroup,
+  onLeaveChatGroup,
 }: {
   timeMetrics: Time | null;
   localPeerId: string | null;
@@ -175,6 +213,11 @@ export function RightPanel({
   onConnect: (peerId: string) => void;
   chatMessages: ChatMessage[];
   onSendChat: (text: string) => void;
+  activeChatChannel: ChatChannel;
+  onSelectChatChannel: (channel: ChatChannel) => void;
+  joinedChatGroups: string[];
+  onJoinChatGroup: (name: string) => void;
+  onLeaveChatGroup: (name: string) => void;
 }) {
   // avgDelta = EMA of the Rust tick's execution cost; ticksPerSecond = actual
   // ticks per wall-clock second measured from the bundle tick counter.
@@ -185,7 +228,15 @@ export function RightPanel({
     <div>
       <div>Tick cost: {tickCostMs} ms</div>
       <div>TPS: {ticksPerSecond}</div>
-      <ChatBox messages={chatMessages} onSend={onSendChat} />
+      <ChatBox
+        messages={chatMessages}
+        onSend={onSendChat}
+        activeChannel={activeChatChannel}
+        onSelectChannel={onSelectChatChannel}
+        joinedGroups={joinedChatGroups}
+        onJoinGroup={onJoinChatGroup}
+        onLeaveGroup={onLeaveChatGroup}
+      />
       <NetworkPanel
         localPeerId={localPeerId}
         transportError={transportError}
@@ -199,11 +250,22 @@ export function RightPanel({
 function ChatBox({
   messages,
   onSend,
+  activeChannel,
+  onSelectChannel,
+  joinedGroups,
+  onJoinGroup,
+  onLeaveGroup,
 }: {
   messages: ChatMessage[];
   onSend: (text: string) => void;
+  activeChannel: ChatChannel;
+  onSelectChannel: (channel: ChatChannel) => void;
+  joinedGroups: string[];
+  onJoinGroup: (name: string) => void;
+  onLeaveGroup: (name: string) => void;
 }) {
   const [input, setInput] = useState("");
+  const [groupInput, setGroupInput] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -222,37 +284,102 @@ function ChatBox({
     if (e.key === "Enter") handleSend();
   }
 
+  function handleJoinGroup() {
+    const trimmed = groupInput.trim();
+    if (!trimmed) return;
+    onJoinGroup(trimmed);
+    onSelectChannel({ kind: "group", name: trimmed });
+    setGroupInput("");
+  }
+
+  function handleGroupKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter") handleJoinGroup();
+  }
+
+  const isActive = (channel: ChatChannel) =>
+    channel.kind === activeChannel.kind
+    && (channel.kind !== "group" || (activeChannel.kind === "group" && activeChannel.name === channel.name));
+
   return (
     <div style={chatBoxStyle}>
       <div style={sectionLabelStyle}>Chat</div>
+
+      {/* Channel picks where the next message you send goes; messages from
+          every channel you can currently see (global, nearby in range, and
+          your joined groups) all show in the one log below. */}
+      <div style={channelRowStyle}>
+        <button
+          type="button"
+          style={channelButtonStyle(isActive({ kind: "global" }))}
+          onClick={() => onSelectChannel({ kind: "global" })}
+        >
+          Global
+        </button>
+        <button
+          type="button"
+          style={channelButtonStyle(isActive({ kind: "nearby" }))}
+          onClick={() => onSelectChannel({ kind: "nearby" })}
+        >
+          Nearby
+        </button>
+        {joinedGroups.map((name) => (
+          <button
+            type="button"
+            key={name}
+            style={channelButtonStyle(isActive({ kind: "group", name }))}
+            onClick={() => onSelectChannel({ kind: "group", name })}
+            onDoubleClick={() => onLeaveGroup(name)}
+            title="Double-click to leave"
+          >
+            #{name}
+          </button>
+        ))}
+      </div>
+      <div style={groupJoinRowStyle}>
+        <input
+          style={groupJoinInputStyle}
+          placeholder="Join a group…"
+          value={groupInput}
+          onChange={(e) => setGroupInput(e.target.value)}
+          onKeyDown={handleGroupKeyDown}
+        />
+        <button type="button" onClick={handleJoinGroup} disabled={!groupInput.trim()}>
+          Join
+        </button>
+      </div>
+
       <div ref={logRef} style={chatLogStyle}>
         {messages.length === 0 ? (
           <div style={{ color: "#555" }}>No messages yet</div>
         ) : (
           messages.map((msg) => (
-            <div key={msg.id} style={{ color: msg.from === "me" ? "#4ade80" : "#ff44aa" }}>
-              <span style={{ fontWeight: 700 }}>
-                {msg.from === "me" ? "You" : msg.from.slice(0, 8)}
-              </span>
-              {": "}
-              {msg.text}
+            <div
+              key={msg.id}
+              style={{ color: msg.from === "system" ? "#888" : msg.from === "me" ? "#4ade80" : "#ff44aa" }}
+            >
+              {msg.from === "system" ? (
+                <>* {msg.text}</>
+              ) : (
+                <>
+                  <span style={{ fontWeight: 700 }}>{msg.from === "me" ? "You" : msg.displayName}</span>
+                  <span style={{ color: "#666" }}> [{channelLabel(msg.channel)}]</span>
+                  {": "}
+                  {msg.text}
+                </>
+              )}
             </div>
           ))
         )}
       </div>
-      {/* Chat send is not wired into the Rust netcode yet (useNetworking's
-          sendChatMessage is a no-op) — keep the input visibly disabled rather
-          than silently dropping typed messages. */}
       <div style={chatInputRowStyle}>
         <input
           style={chatInputStyle}
-          placeholder="Chat not wired up yet"
+          placeholder={`Message ${channelLabel(activeChannel)}…`}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          disabled
         />
-        <button type="button" onClick={handleSend} disabled>
+        <button type="button" onClick={handleSend} disabled={!input.trim()}>
           Send
         </button>
       </div>

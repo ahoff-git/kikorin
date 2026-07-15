@@ -17,6 +17,7 @@
 
 import { log, logLevels } from "@kikorin/util";
 import { netChannel } from "@kikorin/adapter";
+import { applyToObjectByEid } from "@kikorin/system-rendering";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createAwari, type Transport } from "@awari/core";
 import type { PeerRef, RoomSession } from "@awari/protocol";
@@ -24,12 +25,17 @@ import { createPeerJsTransport, readPeerJsId } from "@awari/transport-peerjs";
 import { createManualBootstrapClient, type ManualBootstrapClient } from "./manualBootstrap";
 import { getGameRoom, type GameKey } from "./gameRoom";
 import type { WorkerEngineProxy } from "../workers/WorkerEngineProxy";
+import {
+  createChatController,
+  systemNotice,
+  shortPeerName,
+  MAX_CHAT_HISTORY,
+  type ChatController,
+  type ChatChannel,
+  type ChatMessage,
+} from "./chat";
 
-export type ChatMessage = {
-  id: number;
-  from: string; // "me" for locally sent, peerId for remote
-  text: string;
-};
+export type { ChatMessage, ChatChannel };
 
 /** The subset of a game setup's networking hooks needed to report entity ownership and hits. */
 export type OwnershipCallbacks = Pick<
@@ -44,6 +50,13 @@ export interface UseNetworkingReturn {
   transportError: string | null;
   connectedPeers: string[];
   chatMessages: ChatMessage[];
+  /** Where `sendChatMessage` delivers to; switch before sending to change channel. */
+  activeChatChannel: ChatChannel;
+  setActiveChatChannel: (channel: ChatChannel) => void;
+  /** Group channels this client currently receives — "group" messages outside this list are dropped silently, not queued. */
+  joinedChatGroups: string[];
+  joinChatGroup: (name: string) => void;
+  leaveChatGroup: (name: string) => void;
   connect: (remotePeerId: string) => void;
   sendChatMessage: (text: string) => void;
   addOwnedEntity: (eid: number) => void;
@@ -56,16 +69,28 @@ export interface UseNetworkingReturn {
 export function useNetworking(
   engine: WorkerEngineProxy | null,
   gameKey: GameKey,
-  _playerEid: number | null,
+  playerEid: number | null,
   _ownedEids: readonly number[],
 ): UseNetworkingReturn {
   const [localPeerId, setLocalPeerId] = useState<string | null>(null);
   const [transportError, setTransportError] = useState<string | null>(null);
   const [connectedPeers, setConnectedPeers] = useState<string[]>([]);
-  const [chatMessages] = useState<ChatMessage[]>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [activeChatChannel, setActiveChatChannel] = useState<ChatChannel>({ kind: "global" });
+  const [joinedChatGroups, setJoinedChatGroups] = useState<string[]>([]);
   const sessionRef = useRef<RoomSession | null>(null);
   const awariRef = useRef<ReturnType<typeof createAwari> | null>(null);
   const bootstrapRef = useRef<ManualBootstrapClient | null>(null);
+  const chatControllerRef = useRef<ChatController | null>(null);
+  const selfPeerIdRef = useRef<string | null>(null);
+  // Latest-value refs so the chat controller (created once per session
+  // inside the effect) reads current values instead of a stale closure —
+  // same pattern as sessionRef/attachSessionRef below.
+  const playerEidRef = useRef(playerEid);
+  playerEidRef.current = playerEid;
+  const activeChatChannelRef = useRef(activeChatChannel);
+  activeChatChannelRef.current = activeChatChannel;
+  const joinedChatGroupsRef = useRef<Set<string>>(new Set());
   // Wiring shared between the initial shared-game-room session and any
   // session `connect()` joins later — set inside the effect so it closes
   // over the current `engine`, called from the stable `connect` callback via
@@ -112,6 +137,31 @@ export function useNetworking(
         log(logLevels.warning, "[transport] room disconnected", ["network"], reason);
         setTransportError(reason.message);
       });
+
+      // Chat rides this same session/room rather than opening its own —
+      // torn down and recreated alongside it (manual connect() replaces both
+      // together, so chat always matches whichever room is currently live).
+      chatControllerRef.current?.dispose();
+      chatControllerRef.current = createChatController(
+        session,
+        selfPeerIdRef.current ?? "unknown",
+        (message) => {
+          setChatMessages((prev) => {
+            const next = [...prev, message];
+            return next.length > MAX_CHAT_HISTORY ? next.slice(next.length - MAX_CHAT_HISTORY) : next;
+          });
+        },
+        () => joinedChatGroupsRef.current,
+        () => {
+          const eid = playerEidRef.current;
+          if (eid === null) return null;
+          let pos: [number, number, number] | null = null;
+          applyToObjectByEid(eid, (obj) => {
+            pos = [obj.position.x, obj.position.y, obj.position.z];
+          });
+          return pos;
+        },
+      );
     }
     attachSessionRef.current = attachSession;
 
@@ -148,6 +198,7 @@ export function useNetworking(
       transport = transportAttempt;
 
       log(logLevels.debug, "[transport] broker connected", ["network"], selfId, { isAnchor });
+      selfPeerIdRef.current = selfId;
       setLocalPeerId(selfId);
       setTransportError(null);
 
@@ -196,6 +247,8 @@ export function useNetworking(
       awariRef.current = null;
       bootstrapRef.current = null;
       activeEngine.onNetOut(null);
+      chatControllerRef.current?.dispose();
+      chatControllerRef.current = null;
       void sessionRef.current?.close();
       sessionRef.current = null;
       void transport?.destroy();
@@ -222,6 +275,19 @@ export function useNetworking(
         }
         return next;
       });
+
+      // System chat notices: every peer_joined/peer_left is symmetric across
+      // clients (each engine reports its own bridge events), so no broadcast
+      // is needed — everyone derives the same notice locally.
+      const notices = patches
+        .filter(p => p.kind === "peer_joined" || p.kind === "peer_left")
+        .map(p => systemNotice(`${shortPeerName(p.peer_id)} ${p.kind === "peer_joined" ? "joined" : "left"}`));
+      if (notices.length > 0) {
+        setChatMessages(prev => {
+          const next = [...prev, ...notices];
+          return next.length > MAX_CHAT_HISTORY ? next.slice(next.length - MAX_CHAT_HISTORY) : next;
+        });
+      }
     });
     return unsub;
   }, []);
@@ -254,11 +320,26 @@ export function useNetworking(
     })();
   }, []);
 
-  // TODO: intentional no-op stubs from the TS→Rust netcode migration. Chat and
-  // the ownership/hit signalling pipeline are not wired into the wire protocol
-  // yet; these keep the setupGame contract stable until a Chat wire event lands
-  // (or the pipeline is deleted).
-  const sendChatMessage = useCallback((_text: string) => {}, []);
+  const sendChatMessage = useCallback((text: string) => {
+    chatControllerRef.current?.send(activeChatChannelRef.current, text);
+  }, []);
+
+  const joinChatGroup = useCallback((name: string) => {
+    const clean = name.trim();
+    if (!clean || joinedChatGroupsRef.current.has(clean)) return;
+    joinedChatGroupsRef.current.add(clean);
+    setJoinedChatGroups([...joinedChatGroupsRef.current]);
+  }, []);
+
+  const leaveChatGroup = useCallback((name: string) => {
+    if (!joinedChatGroupsRef.current.delete(name)) return;
+    setJoinedChatGroups([...joinedChatGroupsRef.current]);
+  }, []);
+
+  // TODO: intentional no-op stubs from the TS→Rust netcode migration. The
+  // ownership/hit signalling pipeline is not wired into the wire protocol
+  // yet; these keep the setupGame contract stable until it lands (or the
+  // pipeline is deleted).
   const addOwnedEntity = useCallback((_eid: number) => {}, []);
   const removeOwnedEntity = useCallback((_eid: number) => {}, []);
   const signalEntityDestroyed = useCallback((_eid: number) => {}, []);
@@ -270,6 +351,11 @@ export function useNetworking(
     transportError,
     connectedPeers,
     chatMessages,
+    activeChatChannel,
+    setActiveChatChannel,
+    joinedChatGroups,
+    joinChatGroup,
+    leaveChatGroup,
     connect,
     sendChatMessage,
     addOwnedEntity,
