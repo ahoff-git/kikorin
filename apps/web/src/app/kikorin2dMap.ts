@@ -4,13 +4,16 @@
  * gravity pulls on Y). Z is a fixed small thickness, purely cosmetic (2D
  * physics never reads it) so blocks read as flat slabs from the orthographic
  * camera. Spawned directly via spawn_floor_entity — this game doesn't use
- * load_map/navmesh at all (no monster pathfinding here; see kikorin2d.ts).
+ * load_map at all, but does build a 2D navmesh over this geometry afterward
+ * (engine.build_navmesh_2d; see kikorin2d.ts) for monster pathfinding.
  */
 export interface Block2D {
   x: number;
   y: number;
   hw: number;
   hh: number;
+  /** Defaults to true. Mirrors 3D's `MapBlock.walkable` — set false for hazards/decoration that should stay solid but never be pathed onto. Not used by KIKORIN_2D_MAP today; exists so the plumbing is real and testable. */
+  walkable?: boolean;
 }
 
 const Z_DEPTH_HALF = 0.5;

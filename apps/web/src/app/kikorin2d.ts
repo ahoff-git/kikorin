@@ -4,6 +4,7 @@ import {
   hudChannel,
   NET_BULLET,
   NET_LOCAL,
+  NET_MONSTER,
   NET_REPLICATED,
   NET_PREDICTABLE,
 } from "@kikorin/adapter";
@@ -27,14 +28,19 @@ import { createHeldKeysTracker, suppressContextMenu } from "./inputHelpers";
 import type { OwnershipCallbacks } from "./useNetworking";
 
 // This file is UI + IO only, mirroring kikorin.ts's split for the 3D game —
-// but it does NOT use the engine's player controller (register_player/
-// set_player_input), monster AI, or navmesh/pathfinding at all. Those are
-// written in terms of an X/Z ground plane + Y height and aren't meaningful
-// for a side-view 2D game (see crates/engine/engine.spec.md's "Physics
-// Dimension" section). Movement, shooting, monster patrol, and hit detection
-// are all plain TypeScript here, driving the engine only through its
-// dimension-agnostic primitives: spawn_box_entity, spawn_bullet,
-// spawn_floor_entity, set_entity_velocity, destroy_entity.
+// it does NOT use the engine's player controller (register_player only
+// registers the player for closest_player_position's benefit here;
+// set_player_input is never called, and tick_player_controller is a no-op
+// for a 2D engine — see specs/engine/README.md's "Physics Dimension"
+// section). Player movement/shooting stay plain TypeScript, driving the
+// engine through dimension-agnostic primitives: spawn_box_entity,
+// spawn_bullet, spawn_floor_entity, set_entity_velocity, destroy_entity.
+// Monster AI, pathfinding, and bullet-vs-monster hit detection are NOT
+// reimplemented here — they run in Rust exactly as they do for the 3D game
+// (tick_monster_ai/tick_bullets), because that logic already degenerates
+// correctly for 2D as long as every 2D entity's Z stays 0 (see the engine
+// spec's "Monster AI in 2D" section for why). Monsters just need
+// NET_MONSTER set to be picked up by it.
 
 const PLAYER_HALF_W = 0.4;
 const PLAYER_HALF_H = 0.6;
@@ -49,14 +55,19 @@ const INITIAL_MONSTER_COUNT = 6;
 const BULLET_SPEED = 14.0;
 const BULLET_UP_ARC = 2.0;
 const BULLET_MUZZLE_OFFSET = 0.6;
-const HIT_RADIUS_SQ = 0.6 * 0.6;
 
 const MONSTER_HALF = 0.4;
 const MONSTER_HEALTH = 30;
-const MONSTER_PATROL_SPEED = 2.0;
-const MONSTER_PATROL_RANGE = 3.0;
 const MONSTER_SPAWN_Y = 4.0;
 const MONSTER_SPAWN_X_SPREAD = 9.0;
+// Monsters currently get only one jump per waypoint trigger — MonsterState
+// (crates/engine/src/lib.rs) has no multi-jump budget the way PlayerState
+// does (see specs/engine/README.md's PlayerConfig.max_jumps note), so the navmesh
+// must be built assuming single-jump reach even though the player can
+// double-jump. Monsters will route around anything that needs a second
+// jump rather than get stuck mid-air attempting it. Giving monsters a real
+// jump budget is a natural follow-up, not done here.
+const MONSTER_MAX_JUMPS = 1;
 
 const CAM_Y_OFFSET = 1.0;
 const CAM_Z = 5.0;
@@ -84,43 +95,61 @@ export type SetupGame2DResult = {
   cleanup: () => void;
 };
 
-type Monster = { eid: number; originX: number; dir: 1 | -1 };
-
 export async function setupGame2D(
   engine: WorkerEngineProxy,
   ownership: OwnershipCallbacks,
   _canvas?: HTMLCanvasElement,
 ): Promise<SetupGame2DResult> {
-  // --- Terrain: spawned directly (no load_map/navmesh — this game has no
-  // pathfinding to build one for). ---
+  // --- Terrain: spawned directly (no load_map — this game has no single
+  // "load the map" call), but does build a 2D navmesh over the resulting
+  // geometry once every block is down (see build_navmesh_2d below). ---
   for (const b of KIKORIN_2D_MAP) {
     const eid = await engine.spawn_floor_entity(b.x, b.y, 0, b.hw, b.hh, BLOCK_Z_HALF_DEPTH);
+    if (b.walkable === false) engine.set_terrain_walkable(eid, false);
     const obj = upsertObjectByEid(eid, () => makeFlatBox(b.hw, b.hh, 0x445342, 0x243022));
     obj.position.set(b.x, b.y, 0);
   }
+  // Capability describes whoever will actually traverse the mesh — monsters
+  // (the player never queries it; movement there is direct input, not
+  // pathfinding) — so this must match set_ai_config below, not the player's
+  // own (higher) jump budget.
+  await engine.build_navmesh_2d(MOVE_SPEED, JUMP_IMPULSE_VY, MONSTER_MAX_JUMPS);
+  // Monster AI tuning: walk/jump speed must match the capability the
+  // navmesh above was built for. The rest of AiConfig's defaults (waypoint
+  // reach, replan timing, stuck detection, separation radius) are tuned for
+  // 3D's world scale but close enough in magnitude to 2D's that they're left
+  // as-is for now — revisit after playtesting if monsters feel off.
+  engine.set_ai_config({ walk_speed: MOVE_SPEED, jump_speed: JUMP_IMPULSE_VY });
+  // respawn:false — respawn_monster() (crates/engine/src/lib.rs) places the
+  // replacement on a 3D ring, which would write a nonzero Z into a 2D
+  // entity and break the Z=0 invariant every other monster-AI/hit-detection
+  // calculation relies on (see specs/engine/README.md). A 2D-aware respawn is a
+  // natural follow-up, not done here.
+  engine.set_monster_config({ respawn: false });
 
   // --- Player ---
   const playerEid = await engine.spawn_box_entity(
     0, 3, 0, PLAYER_HALF_W, PLAYER_HALF_H, PLAYER_HALF_D, PLAYER_HEALTH, NET_LOCAL | NET_REPLICATED,
   );
   upsertObjectByEid(playerEid, () => makePersonMeshFor(0x4488cc, 0xffe082));
+  // Registers the player for closest_player_position's benefit only —
+  // tick_player_controller is a no-op for a 2D engine (see module doc
+  // above), so this never fights the manual set_entity_velocity calls below.
+  engine.register_player(playerEid);
   ownership.addOwnedEntity(playerEid);
   const ownedEids: number[] = [playerEid];
 
-  // --- Bullets: created locally, tracked here for hit detection; the engine
-  // integrates/destroys them on its own schedule (TTL/kill-plane/hit), so
-  // lifecycle "despawned" is the only place we need to stop tracking one. ---
-  const bulletEids = new Set<number>();
+  // --- Bullets: mesh lifecycle only. Hit detection, damage, death, and TTL/
+  // kill-plane cleanup are all handled by the engine's existing tick_bullets
+  // pipeline (works for NET_MONSTER entities regardless of dimension). ---
   const unsubLifecycle = lifecycleChannel.subscribe(() => {
     for (const l of lifecycleChannel.getSnapshot()) {
       if (l.kind === "spawned") {
         if (l.entity === playerEid) continue; // already created above
         if (l.flags & NET_BULLET) {
-          bulletEids.add(l.entity);
           upsertObjectByEid(l.entity, () => makeProjectileMesh());
         }
       } else {
-        bulletEids.delete(l.entity);
         removeObjectByEid(l.entity, { dispose: true });
       }
     }
@@ -131,34 +160,40 @@ export async function setupGame2D(
     for (const p of netChannel.getSnapshot()) {
       if (p.kind === "spawned") {
         const flags = p.flags ?? 0;
-        upsertObjectByEid(p.entity, () => (flags & NET_BULLET) ? makeProjectileMesh() : makePersonMeshFor(0x9c27b0, 0xe1bee7));
+        upsertObjectByEid(p.entity, () => {
+          if (flags & NET_BULLET) return makeProjectileMesh();
+          if (flags & NET_MONSTER) return makePersonMeshFor(0x8e4444, 0xd88a8a);
+          return makePersonMeshFor(0x9c27b0, 0xe1bee7);
+        });
       } else if (p.kind === "despawned") {
         removeObjectByEid(p.entity, { dispose: true });
       }
     }
   });
 
-  // --- Grounded tracking for jump edge-detection (no built-in player
-  // controller here, so this game does its own — see the module doc above). ---
-  let grounded = false;
+  // --- Grounded tracking, for the player's own jump edge-detection (no
+  // built-in player controller here, so this game does its own for the
+  // player — see the module doc above). Monsters don't need this in TS
+  // anymore: tick_monster_ai reads is_grounded internally. ---
+  let playerGrounded = false;
   const unsubHud = hudChannel.subscribe(() => {
     for (const s of hudChannel.getSnapshot()) {
-      if (s.entity === playerEid && s.grounded !== undefined) grounded = s.grounded;
+      if (s.entity === playerEid && s.grounded !== undefined) playerGrounded = s.grounded;
     }
   });
 
-  // --- Monsters: plain locally-owned boxes, no NET_MONSTER flag — this game
-  // drives their patrol and hit detection itself rather than using the
-  // engine's navmesh-based monster AI (not meaningful for a side view). ---
-  const monsters: Monster[] = [];
+  // --- Monsters: NET_MONSTER so the engine's own tick_monster_ai (movement/
+  // pathfinding) and tick_bullets (hit detection/damage/death) pick them up
+  // — see the module doc above for why that already works correctly for a
+  // 2D entity without any 2D-specific code on the Rust side. ---
   async function spawnMonsters(count: number) {
     for (let i = 0; i < count; i++) {
       const x = (Math.random() - 0.5) * 2 * MONSTER_SPAWN_X_SPREAD;
       const eid = await engine.spawn_box_entity(
-        x, MONSTER_SPAWN_Y, 0, MONSTER_HALF, MONSTER_HALF, MONSTER_HALF, MONSTER_HEALTH, NET_LOCAL | NET_REPLICATED,
+        x, MONSTER_SPAWN_Y, 0, MONSTER_HALF, MONSTER_HALF, MONSTER_HALF, MONSTER_HEALTH,
+        NET_LOCAL | NET_MONSTER | NET_REPLICATED,
       );
       upsertObjectByEid(eid, () => makePersonMeshFor(0xcc4444, 0xff8800));
-      monsters.push({ eid, originX: x, dir: Math.random() < 0.5 ? 1 : -1 });
     }
   }
 
@@ -204,7 +239,7 @@ export async function setupGame2D(
     // Landing refills the jump budget; edge-detected so holding Space through
     // a landing doesn't re-trigger. Airborne presses spend the budget instead
     // of being gated on `grounded`, which is what gives the second jump.
-    if (grounded) jumpsUsed = 0;
+    if (playerGrounded) jumpsUsed = 0;
     const jumpEdge = jumpHeld && !prevJumpHeld && jumpsUsed < MAX_JUMPS;
     prevJumpHeld = jumpHeld;
     if (jumpEdge) jumpsUsed++;
@@ -219,37 +254,9 @@ export async function setupGame2D(
       lookCameraAt(obj.position.x, obj.position.y + CAM_Y_OFFSET, 0);
     });
 
-    for (const m of monsters) {
-      applyToObjectByEid(m.eid, (obj) => {
-        if (obj.position.x > m.originX + MONSTER_PATROL_RANGE) m.dir = -1;
-        else if (obj.position.x < m.originX - MONSTER_PATROL_RANGE) m.dir = 1;
-        engine.set_entity_velocity(m.eid, m.dir * MONSTER_PATROL_SPEED, 0, 0);
-      });
-    }
-
-    // Bullet-vs-monster hit detection: this game's monsters aren't
-    // NET_MONSTER-flagged, so the engine's own bullet hit detection doesn't
-    // see them — a simple distance check on last-rendered positions instead.
-    for (const bulletEid of [...bulletEids]) {
-      applyToObjectByEid(bulletEid, (bulletObj) => {
-        // Snapshot: the inner loop's own hit handling below splices `monsters`
-        // mid-iteration, which would silently skip an element if we iterated
-        // the live array directly.
-        for (const m of [...monsters]) {
-          if (!bulletEids.has(bulletEid)) return; // already consumed this frame
-          applyToObjectByEid(m.eid, (monsterObj) => {
-            const dx = bulletObj.position.x - monsterObj.position.x;
-            const dy = bulletObj.position.y - monsterObj.position.y;
-            if (dx * dx + dy * dy > HIT_RADIUS_SQ) return;
-            engine.destroy_entity(bulletEid);
-            engine.destroy_entity(m.eid);
-            bulletEids.delete(bulletEid);
-            const idx = monsters.indexOf(m);
-            if (idx >= 0) monsters.splice(idx, 1);
-          });
-        }
-      });
-    }
+    // Monster movement, pathfinding, and bullet-vs-monster hit detection all
+    // run in Rust now (tick_monster_ai / tick_bullets) — nothing to drive
+    // here per frame.
   }
 
   function onRemoteEntityHit(_eid: number) {}

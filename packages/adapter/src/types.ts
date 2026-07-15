@@ -237,6 +237,17 @@ export interface EngineHandle {
    */
   spawn_floor_entity(x: number, y: number, z: number, hw: number, hh: number, hd: number): number;
   /**
+   * Build (or rebuild) a 2D navmesh from whatever floor entities currently
+   * exist — the side-view counterpart to load_map's implicit 3D navmesh
+   * build, for a game (like kikorin's 2D one) that spawns terrain via
+   * spawn_floor_entity instead. walkSpeed/jumpSpeed/maxJumps describe
+   * whoever will traverse it; edge reachability is computed from real
+   * projectile motion using these, not a fixed NavConfig-style threshold.
+   */
+  build_navmesh_2d(walkSpeed: number, jumpSpeed: number, maxJumps: number): void;
+  /** Mark a floor entity non-walkable (or clear that) after it's already spawned — the per-block-after-the-fact counterpart to load_map's MapBlock.walkable, for terrain spawned via spawn_floor_entity. */
+  set_terrain_walkable(id: number, walkable: boolean): void;
+  /**
    * Spawn a projectile. The engine integrates its ballistic trajectory each tick,
    * enforces a TTL, and emits each HitPatch exactly once (hit, expiry, or kill
    * plane). The engine never destroys bullets — the game must call destroy_entity

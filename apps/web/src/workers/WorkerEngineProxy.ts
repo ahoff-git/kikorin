@@ -117,6 +117,18 @@ export class WorkerEngineProxy {
     return p;
   }
 
+  /** Build (or rebuild) the 2D navmesh from currently-spawned floor entities. Call once terrain is in place. */
+  build_navmesh_2d(walkSpeed: number, jumpSpeed: number, maxJumps: number): Promise<void> {
+    const [id, p] = this.request<void>();
+    this.worker.postMessage({ type: 'build_navmesh_2d', id, walkSpeed, jumpSpeed, maxJumps });
+    return p;
+  }
+
+  /** Mark a floor entity non-walkable (or clear that) after spawning it. Fire-and-forget. */
+  set_terrain_walkable(eid: number, walkable: boolean): void {
+    this.worker.postMessage({ type: 'set_terrain_walkable', eid, walkable });
+  }
+
   /** Override monster AI tuning. Fire-and-forget; missing fields = engine defaults. */
   set_ai_config(cfg: AiConfigInput): void {
     this.worker.postMessage({ type: 'set_ai_config', cfg });

@@ -81,7 +81,7 @@ export function useEngine(
         // Three.js's default (0,0,0) until the next update, or forever if
         // there never was one (e.g. a stationary remote player's mirror,
         // which only moves on a Delta and gets none while its owner stands
-        // still) — see crates/patch/patch.spec.md.
+        // still) — see specs/patch/README.md.
         if (bundle.lifecycle.length > 0) lifecycleChannel.emit(bundle.lifecycle);
         if (bundle.net.length > 0) netChannel.emit(bundle.net);
         if (bundle.render.length > 0) renderChannel.emit(bundle.render);

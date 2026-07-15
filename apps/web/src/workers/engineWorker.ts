@@ -54,6 +54,8 @@ type Req =
   | { type: 'spawn_bullet';        id: number; x: number; y: number; z: number; vx: number; vy: number; vz: number; net_flags: number }
   | { type: 'spawn_floor';         id: number; x: number; y: number; z: number; hw: number; hh: number; hd: number }
   | { type: 'load_map';            id: number; blocks: TerrainBlockInput[] }
+  | { type: 'build_navmesh_2d';    id: number; walkSpeed: number; jumpSpeed: number; maxJumps: number }
+  | { type: 'set_terrain_walkable'; eid: number; walkable: boolean }
   | { type: 'find_path';           id: number; sx: number; sy: number; sz: number; gx: number; gz: number; canJump: boolean }
   | { type: 'update_monster_goal'; gx: number; gz: number }
   | { type: 'set_monster_goal';    eid: number; gx: number; gz: number }
@@ -219,6 +221,14 @@ addEventListener('message', async (event: MessageEvent<Req>) => {
       post({ type: 'ack', id: msg.id, result: layout });
       break;
     }
+    case 'build_navmesh_2d': {
+      engine.build_navmesh_2d(msg.walkSpeed, msg.jumpSpeed, msg.maxJumps);
+      post({ type: 'ack', id: msg.id, result: undefined });
+      break;
+    }
+    case 'set_terrain_walkable':
+      engine.set_terrain_walkable(msg.eid, msg.walkable);
+      break;
     case 'find_path': {
       const path = engine.find_path(msg.sx, msg.sy, msg.sz, msg.gx, msg.gz, msg.canJump);
       post({ type: 'ack', id: msg.id, result: path });

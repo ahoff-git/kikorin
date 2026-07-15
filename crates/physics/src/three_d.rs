@@ -17,7 +17,7 @@ use std::collections::HashMap;
 const GROUNDED_STRIDE: u64 = 4;
 
 // A velocity-command Y below this magnitude means "gravity owns Y" (see the
-// Velocity Split section of physics.spec.md); above it, the command overrides
+// Velocity Split section of specs/physics/README.md); above it, the command overrides
 // Rapier's accumulated vertical velocity for this sync.
 const Y_COMMAND_THRESHOLD: f32 = 0.01;
 
@@ -145,7 +145,7 @@ impl PhysicsWorld3D {
                     ColliderBuilder::new(shape).sensor(true)
                 } else if is_dynamic {
                     // Zero-friction + Multiply combine + GROUP_2→GROUP_1 broadphase
-                    // filter — rationale in physics.spec.md ("Zero Friction" and
+                    // filter — rationale in specs/physics/README.md ("Zero Friction" and
                     // "Collision Groups" sections).
                     ColliderBuilder::new(shape)
                         .friction(0.0)

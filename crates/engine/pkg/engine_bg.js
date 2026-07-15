@@ -21,6 +21,23 @@ export class Engine {
         wasm.engine_build_navmesh(this.__wbg_ptr);
     }
     /**
+     * Build (or rebuild) a 2D navmesh — the side-view platformer analogue of
+     * `build_navmesh`, kept as a separate entry point (see
+     * `crates/engine/src/navmesh2d.rs`) since 3D's single-surface-per-column
+     * scan silently loses geometry a 2D level actually needs. `walk_speed`/
+     * `jump_speed`/`max_jumps` describe whoever will traverse the mesh —
+     * passed in by the caller each time rather than read from any stored
+     * config, so the same level can serve movers with different
+     * capabilities without touching Rust. Stores into the same `self.navmesh`
+     * slot `build_navmesh` does; `find_path` queries it unchanged either way.
+     * @param {number} walk_speed
+     * @param {number} jump_speed
+     * @param {number} max_jumps
+     */
+    build_navmesh_2d(walk_speed, jump_speed, max_jumps) {
+        wasm.engine_build_navmesh_2d(this.__wbg_ptr, walk_speed, jump_speed, max_jumps);
+    }
+    /**
      * Revert a monster to the default goal.
      * @param {number} id
      */
@@ -239,6 +256,17 @@ export class Engine {
      */
     set_player_input(input) {
         wasm.engine_set_player_input(this.__wbg_ptr, input);
+    }
+    /**
+     * Mark a floor entity as non-walkable (or clear that) after it's already
+     * spawned — additive counterpart to `MapBlock.walkable` (which only
+     * applies at `load_map` time) for callers like the 2D game that spawn
+     * terrain block-by-block via `spawn_floor_entity` instead.
+     * @param {number} id
+     * @param {boolean} walkable
+     */
+    set_terrain_walkable(id, walkable) {
+        wasm.engine_set_terrain_walkable(this.__wbg_ptr, id, walkable);
     }
     /**
      * Spawn a dynamic entity (player, monster, box). Returns the entity ID.

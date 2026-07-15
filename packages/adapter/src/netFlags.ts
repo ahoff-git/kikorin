@@ -1,7 +1,7 @@
 /**
  * Entity networking profile flags — TS mirror of the `NET_*` constants in
  * `crates/ecs`. Composable dimensions (ownership, type, authority,
- * predictability, urgency), documented once in `crates/engine/engine.spec.md`;
+ * predictability, urgency), documented once in `specs/engine/README.md`;
  * these numeric values are wire-level and must match the Rust side exactly.
  */
 /** Ownership: simulated on this client (physics body, HEALTH semantics). */

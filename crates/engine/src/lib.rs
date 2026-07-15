@@ -1,3 +1,5 @@
+mod navmesh2d;
+
 use bincode::{Decode, Encode};
 use ecs::{
     ColliderConfig, DirtyFlags, World, NET_BULLET, NET_LOCAL, NET_LOW_URGENCY, NET_MONSTER,
@@ -1119,6 +1121,34 @@ impl Engine {
         self.navmesh = Some(mesh);
     }
 
+    /// Build (or rebuild) a 2D navmesh — the side-view platformer analogue of
+    /// `build_navmesh`, kept as a separate entry point (see
+    /// `crates/engine/src/navmesh2d.rs`) since 3D's single-surface-per-column
+    /// scan silently loses geometry a 2D level actually needs. `walk_speed`/
+    /// `jump_speed`/`max_jumps` describe whoever will traverse the mesh —
+    /// passed in by the caller each time rather than read from any stored
+    /// config, so the same level can serve movers with different
+    /// capabilities without touching Rust. Stores into the same `self.navmesh`
+    /// slot `build_navmesh` does; `find_path` queries it unchanged either way.
+    pub fn build_navmesh_2d(&mut self, walk_speed: f32, jump_speed: f32, max_jumps: u32) {
+        self.physics.sync_from_world(&self.world);
+        self.physics.prepare_queries();
+        let cap = navmesh2d::MovementCapability2D { walk_speed, jump_speed, max_jumps };
+        self.navmesh = navmesh2d::build(&self.world, &self.physics, &self.non_walkable_terrain, &cap, GRAVITY);
+    }
+
+    /// Mark a floor entity as non-walkable (or clear that) after it's already
+    /// spawned — additive counterpart to `MapBlock.walkable` (which only
+    /// applies at `load_map` time) for callers like the 2D game that spawn
+    /// terrain block-by-block via `spawn_floor_entity` instead.
+    pub fn set_terrain_walkable(&mut self, id: u32, walkable: bool) {
+        if walkable {
+            self.non_walkable_terrain.remove(&id);
+        } else {
+            self.non_walkable_terrain.insert(id);
+        }
+    }
+
     /// Find a path from (startX, startY, startZ) to (goalX, goalZ).
     pub fn find_path(
         &self,
@@ -1371,6 +1401,15 @@ impl Engine {
         let Some(p) = self.player.as_mut() else {
             return;
         };
+        // 2D's player is TypeScript-driven (yaw/strafe don't exist in a
+        // side-view game — see tick_monster_ai's matching gate and
+        // specs/engine/README.md's Physics Dimension section for the full picture).
+        // Still safe to call register_player for 2D — that's what lets
+        // closest_player_position see it — as long as this stays a no-op so
+        // it never overwrites the TS-driven velocity with default input.
+        if self.physics.dimension() == Dimension::TwoD {
+            return;
+        }
         let eid = p.eid;
 
         if let Some(yaw) = p.input.yaw_override {
@@ -1781,6 +1820,19 @@ impl Engine {
     /// Returns the milliseconds spent inside A* searches (pathfinding_ms).
     fn tick_monster_ai(&mut self, dt_secs: f32) -> f32 {
         let ai = self.ai;
+        // Ground-plane math below (goal_for, dx/dz, follow_waypoints) reads
+        // positions' X and Z components unconditionally — this works
+        // correctly for 2D too, without a separate code path, because every
+        // 2D entity's Z is always 0 by convention (2D physics passes Z
+        // through untouched, and nothing in the 2D game ever sets it to
+        // anything else): dz is always 0-0=0, so dist/direction degenerate
+        // to correct 1-D (X-only) results for free. This invariant is real
+        // and load-bearing — a future feature giving 2D entities nonzero Z
+        // would silently break monster AI. The one thing that doesn't
+        // degenerate safely is the rotation write below (yaw is a real 3D
+        // concept with no 2D equivalent), so it's the one part gated
+        // explicitly — see tick_player_controller's matching gate.
+        let is_2d = self.physics.dimension() == Dimension::TwoD;
 
         self.with_scratch_ids(|this, monster_ids| {
             let mut pathfinding_ms = 0.0_f32;
@@ -1857,10 +1909,16 @@ impl Engine {
                     None => continue,
                 };
 
-                // Rotation: yaw faces the walk direction.
-                let yaw = desired_x.atan2(desired_z);
-                this.world.set_rotation(mid, [yaw, 0.0, 0.0]);
-                this.world.mark_dirty(mid, DirtyFlags::TRANSFORM);
+                // Rotation: yaw faces the walk direction. 2D has no yaw
+                // (side view; facing is a sprite flip driven from TS instead)
+                // — skip the write entirely rather than let a meaningless
+                // value ride to the renderer, which applies rotation
+                // unconditionally (see this fn's doc comment above).
+                if !is_2d {
+                    let yaw = desired_x.atan2(desired_z);
+                    this.world.set_rotation(mid, [yaw, 0.0, 0.0]);
+                    this.world.mark_dirty(mid, DirtyFlags::TRANSFORM);
+                }
 
                 let vy = if wants_jump { ai.jump_speed } else { 0.0 };
                 // Desired direction stored as velocity; separation adjusts it below.

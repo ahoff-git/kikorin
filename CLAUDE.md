@@ -61,15 +61,22 @@
 
 ## Black Box Specs
 
-- For each black box module or subsystem, maintain a short colocated mini spec that explains the box without requiring source review.
+- For each black box module or subsystem, maintain a short mini spec that explains the box without requiring source review, under the centralized `specs/` tree (see File Pattern below).
 - Examples include netcode, ECS loop, replication, input pipeline, prediction, reconciliation, and rendering bridge.
 - Specs describe **architecture, not minutia**: current-state ins, outs, and medium-level logic — never a changelog. History lives in git.
 
 ### Altitude and Layering
 
-- The main spec (`crates/engine/engine.spec.md`) is the top-level entry point. It describes the big picture: how the subsystems fit together, the per-tick sequence, and cross-cutting contracts (e.g. NET flags). Keep it high-level.
-- Each component spec sits one level lower. It fills in the details the main spec deliberately glosses over — the mechanics and non-obvious "why" specific to that box.
+- `specs/README.md` is the top-level index — every spec and ADR is linked from there.
+- `specs/architecture/README.md` is the cross-cutting entry point: how the subsystems fit together, the per-tick sequence, and contracts that span more than one box (e.g. NET flags). Keep it high-level.
+- Each component spec (`specs/<crate-or-package>/README.md`) sits one level lower. It fills in the details the architecture doc deliberately glosses over — the mechanics and non-obvious "why" specific to that box.
 - **Do not repeat yourself across specs.** A contract is documented in exactly one spec and referenced by name elsewhere. If two specs describe the same thing, one of them is wrong.
+
+### Decisions (`specs/decisions/`)
+
+- Before making a nontrivial design call, check `specs/decisions/` — if the question was already settled, follow that decision (or explicitly revisit it in a new ADR) instead of re-deriving it from scratch.
+- When you make a real architectural decision — especially one with a non-obvious rationale, a rejected alternative, or a real consequence someone could get bitten by later — record it as a new numbered ADR (`specs/decisions/00NN-slug.md`, `Status` / `Context` / `Decision` / `Consequences`, per `specs/decisions/README.md`'s log) and link it from that README.
+- ADRs record decisions, not open questions — an unresolved design question or deferred idea belongs in a spec's own notes or the conversation, not a new ADR.
 
 ### Requirements
 
@@ -99,11 +106,12 @@ Include only the sections that carry real information for the box; omit the rest
 
 ### File Pattern
 
-- Co-locate specs near the code.
+- Specs live centrally under `specs/`, not next to the code — one directory per crate/package, named after it, containing a `README.md`. Cross-cutting docs (the architecture overview, ADRs) get their own top-level `specs/` subdirectory.
 
 Examples:
-- `NetDriver.ts` -> `NetDriver.spec.md`
-- `ecs/updateLoop.ts` -> `ecs/updateLoop.spec.md`
+- `crates/engine` -> `specs/engine/README.md`
+- `packages/system-rendering` -> `specs/system-rendering/README.md`
+- a cross-cutting decision -> `specs/decisions/00NN-slug.md`
 
 ### Spec Style
 

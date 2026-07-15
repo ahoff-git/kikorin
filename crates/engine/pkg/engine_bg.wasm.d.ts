@@ -3,6 +3,7 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_engine_free: (a: number, b: number) => void;
 export const engine_build_navmesh: (a: number) => void;
+export const engine_build_navmesh_2d: (a: number, b: number, c: number, d: number) => void;
 export const engine_clear_monster_goal: (a: number, b: number) => void;
 export const engine_deserialize_patch: (a: number, b: number) => any;
 export const engine_destroy_entity: (a: number, b: number) => void;
@@ -25,6 +26,7 @@ export const engine_set_monster_goal: (a: number, b: number, c: number, d: numbe
 export const engine_set_nav_config: (a: number, b: any) => void;
 export const engine_set_player_config: (a: number, b: any) => void;
 export const engine_set_player_input: (a: number, b: any) => void;
+export const engine_set_terrain_walkable: (a: number, b: number, c: number) => void;
 export const engine_spawn_box_entity: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => number;
 export const engine_spawn_bullet: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => number;
 export const engine_spawn_entity: (a: number, b: number, c: number) => number;

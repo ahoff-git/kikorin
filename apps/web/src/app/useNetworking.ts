@@ -2,7 +2,7 @@
 
 // Peer-to-peer transport (IO layer), riding on @awari/core's room/topology
 // session instead of ad hoc pairwise PeerJS dialing (see
-// crates/netcode/peer.spec.md's Transport section). The Rust engine still
+// specs/netcode/README.md's Transport section). The Rust engine still
 // owns the wire protocol and delta tracking unchanged — this hook only
 // bridges an awari RoomSession to the engine's net_* bridge:
 //   inbound   session.onMessage        → proxy.net_ingest(sender.peerId, bytes)

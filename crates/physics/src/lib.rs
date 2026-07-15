@@ -3,7 +3,7 @@
 //! `three_d::PhysicsWorld3D` (Rapier3D) — chosen once at construction via
 //! `Dimension` and fixed for the physics world's lifetime. Every method below
 //! just forwards to whichever backend is active; see `two_d`/`three_d` for
-//! the actual simulation logic and physics.spec.md for the shared contract
+//! the actual simulation logic and specs/physics/README.md for the shared contract
 //! both backends honor identically (grounded caching, zero-friction dynamics,
 //! collision groups, sensor semantics, the velocity-Y-threshold split).
 
@@ -823,7 +823,7 @@ mod tests {
     /// remove_entity — the Rapier body leaks and keeps answering queries.
     /// Deactivating the collider before destroying is the required teardown path
     /// (see deactivated_collider_removes_entity_from_queries). If this test starts
-    /// failing, the leak was fixed: flip the assertion and update physics.spec.md.
+    /// failing, the leak was fixed: flip the assertion and update specs/physics/README.md.
     #[test]
     fn destroy_entity_without_deactivation_leaks_rapier_body() {
         let mut world = World::new(8);

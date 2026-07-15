@@ -1,7 +1,9 @@
 ## crates/pathfinding — NavMesh A* Pathfinder
 
 ### Purpose
-A 3-D NavMesh with A* pathfinding for NPC navigation. Stateless with respect to the simulation — callers supply start/goal positions. No dependency on `ecs`, `physics`, or `engine`.
+A NavMesh with A* pathfinding for NPC navigation. Stateless with respect to the simulation — callers supply start/goal positions. No dependency on `ecs`, `physics`, or `engine`.
+
+Coordinates are a generic 3-tuple; nothing in this crate assumes 3-D. `crates/engine`'s 3-D `build_navmesh` populates it from an X/Z ground-plane scan, while its 2-D counterpart (`crates/engine/src/navmesh2d.rs`) pins `z` to a constant — the grid bucketing, heuristic, and simplification all degenerate correctly since every node shares the same `z`. Both callers are documented in `specs/engine/README.md`; this crate itself needs no changes to support either.
 
 ### Inputs and Outputs
 - **Build:** `NavMesh::new(config)`, `add_node(x,y,z) → NodeId`, `add_edge(from, to, cost, requires_jump, is_ledge_drop)`. Config carries only `cell_size` (the spatial-index bucket size); mesh bounds are wherever nodes are added — the caller owns the sampling domain.
@@ -19,8 +21,9 @@ A 3-D NavMesh with A* pathfinding for NPC navigation. Stateless with respect to 
 - Output waypoints are simplified by dropping any where the 3-D heading changes < ~23°. Jump and ledge-drop waypoints are never dropped, and Y participates in the heading check so stair/ramp waypoints survive.
 
 ### WASM Surface (via crates/engine)
-- `build_navmesh()` — scans Rapier floor geometry to populate the mesh; run once after terrain spawn (invoked internally by `load_map`).
-- `find_path(...)` — thin delegate returning `JsWaypoint[]` or `null`.
+- `build_navmesh()` — 3-D: scans Rapier floor geometry to populate the mesh; run once after terrain spawn (invoked internally by `load_map`).
+- `build_navmesh_2d(walk_speed, jump_speed, max_jumps)` — 2-D: same idea, different scan (see `specs/engine/README.md`'s 2D Pathfinding section). Populates the same mesh slot; callers use `find_path` unchanged either way.
+- `find_path(...)` — thin delegate returning `JsWaypoint[]` or `null`; dimension-agnostic, queries whatever mesh is currently populated.
 
 ### Dependencies
 `pathfinding` crate (A*). No ECS/physics/engine deps.

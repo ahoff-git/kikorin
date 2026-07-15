@@ -14,6 +14,18 @@ export class Engine {
      */
     build_navmesh(): void;
     /**
+     * Build (or rebuild) a 2D navmesh — the side-view platformer analogue of
+     * `build_navmesh`, kept as a separate entry point (see
+     * `crates/engine/src/navmesh2d.rs`) since 3D's single-surface-per-column
+     * scan silently loses geometry a 2D level actually needs. `walk_speed`/
+     * `jump_speed`/`max_jumps` describe whoever will traverse the mesh —
+     * passed in by the caller each time rather than read from any stored
+     * config, so the same level can serve movers with different
+     * capabilities without touching Rust. Stores into the same `self.navmesh`
+     * slot `build_navmesh` does; `find_path` queries it unchanged either way.
+     */
+    build_navmesh_2d(walk_speed: number, jump_speed: number, max_jumps: number): void;
+    /**
      * Revert a monster to the default goal.
      */
     clear_monster_goal(id: number): void;
@@ -125,6 +137,13 @@ export class Engine {
      * is ignored with a warning.
      */
     set_player_input(input: any): void;
+    /**
+     * Mark a floor entity as non-walkable (or clear that) after it's already
+     * spawned — additive counterpart to `MapBlock.walkable` (which only
+     * applies at `load_map` time) for callers like the 2D game that spawn
+     * terrain block-by-block via `spawn_floor_entity` instead.
+     */
+    set_terrain_walkable(id: number, walkable: boolean): void;
     /**
      * Spawn a dynamic entity (player, monster, box). Returns the entity ID.
      * `net_flags`: combine NET_LOCAL (0x01) and NET_MONSTER (0x04) for monster entities.
