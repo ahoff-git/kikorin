@@ -959,10 +959,11 @@ mod tests {
         let mut world = World::new(8);
         let mut phys = PhysicsWorld::new(-9.81, Dimension::TwoD);
         let floor = spawn_static(&mut world, [0.0, 0.0, 0.0], [10.0, 0.1, 10.0]);
-        // A dynamic body given a non-zero z up front — physics must never
-        // touch it, even as x/y are simulated and synced back every tick.
+        // A dynamic body off to the side (so it can't shadow the ray, which
+        // only reads x/y) given a non-zero z up front — physics must never
+        // touch that z, even as x/y are simulated and synced back every tick.
         let ball = world.create_entity();
-        world.set_position(ball, [0.0, 3.0, 42.0]);
+        world.set_position(ball, [5.0, 3.0, 42.0]);
         world.set_collider(
             ball,
             ColliderConfig { active: true, sensor: false, half_width: 0.25, half_height: 0.25, half_depth: 0.25 },

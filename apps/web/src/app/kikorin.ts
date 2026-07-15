@@ -17,13 +17,7 @@ import {
   lookCameraAt,
 } from "@kikorin/system-rendering";
 import {
-  BoxGeometry,
-  EdgesGeometry,
-  Group,
-  LineBasicMaterial,
-  LineSegments,
   Mesh,
-  MeshLambertMaterial,
   MeshBasicMaterial,
   Raycaster,
   SphereGeometry,
@@ -31,6 +25,9 @@ import {
   type Object3D,
 } from "three";
 import { recordE2EEntitySpawn } from "./e2eMetrics";
+import { makeEdgedBox, makePersonMesh } from "./meshFactories";
+import { createHeldKeysTracker, suppressContextMenu } from "./inputHelpers";
+import type { OwnershipCallbacks } from "./useNetworking";
 
 // This file is UI + IO only: it captures raw input, forwards it to the Rust
 // engine (which owns all movement/combat/spawn rules), and renders what the
@@ -62,41 +59,28 @@ const aimRaycaster = new Raycaster();
 const aimOriginVec = new Vector3();
 const aimDirVec = new Vector3();
 
+// Player/monster body half-extents — must match the collider size passed to
+// spawn_box_entity (physics and mesh geometry share one source of truth here).
+const PERSON_HALF_W = 0.4;
+const PERSON_HALF_H = 0.9;
+const PERSON_HALF_D = 0.4;
+
 // ---- Three.js mesh factories ----
 
-function makeEdgedBox(hw: number, hh: number, hd: number, color: number, edgeColor: number): Object3D {
-  const geo = new BoxGeometry(hw * 2, hh * 2, hd * 2);
-  const mesh = new Mesh(geo, new MeshLambertMaterial({ color }));
-  mesh.receiveShadow = true;
-  mesh.castShadow = true;
-  const line = new LineSegments(new EdgesGeometry(geo), new LineBasicMaterial({ color: edgeColor }));
-  line.renderOrder = 1;
-  line.scale.setScalar(1.0005);
-  mesh.add(line);
-  return mesh;
-}
-
 function makeFloorMesh(hw: number, hh: number, hd: number): Object3D {
-  return makeEdgedBox(hw, hh, hd, 0x445342, 0x243022);
+  return makeEdgedBox(hw, hh, hd, 0x445342, 0x243022, { shadow: true });
 }
 
 function makePlatformMesh(hw: number, hh: number, hd: number): Object3D {
-  return makeEdgedBox(hw, hh, hd, 0x8a9a7a, 0x4a5a3a);
+  return makeEdgedBox(hw, hh, hd, 0x8a9a7a, 0x4a5a3a, { shadow: true });
 }
 
 function makeWallMesh(hw: number, hh: number, hd: number): Object3D {
-  return makeEdgedBox(hw, hh, hd, 0xb0a090, 0x5a4a3a);
+  return makeEdgedBox(hw, hh, hd, 0xb0a090, 0x5a4a3a, { shadow: true });
 }
 
-function makePersonMesh(bodyColor: number, frontColor: number): Object3D {
-  const group = new Group();
-  const geo = new BoxGeometry(0.8, 1.8, 0.8);
-  const bodyMat = new MeshLambertMaterial({ color: bodyColor });
-  const frontMat = new MeshLambertMaterial({ color: frontColor });
-  const body = new Mesh(geo, [bodyMat, bodyMat, bodyMat, bodyMat, frontMat, bodyMat]);
-  body.castShadow = true;
-  group.add(body);
-  return group;
+function makePersonMeshFor(bodyColor: number, frontColor: number): Object3D {
+  return makePersonMesh(PERSON_HALF_W, PERSON_HALF_H, PERSON_HALF_D, bodyColor, frontColor, { castShadow: true });
 }
 
 // Shared across all bullet instances — one GPU upload, many Mesh references.
@@ -112,25 +96,16 @@ function makeProjectileMesh(): Object3D {
 /** Mesh for an engine-owned local entity, styled by its net-flag profile. */
 function makeLocalMesh(flags: number): Object3D {
   if (flags & NET_BULLET) return makeProjectileMesh();
-  if (flags & NET_MONSTER) return makePersonMesh(0xcc4444, 0xff8800);
-  return makePersonMesh(0x4488cc, 0xffe082); // the player
+  if (flags & NET_MONSTER) return makePersonMeshFor(0xcc4444, 0xff8800);
+  return makePersonMeshFor(0x4488cc, 0xffe082); // the player
 }
 
 /** Mesh for a remote peer's mirror, styled by its public profile. */
 function makeRemoteMesh(flags: number): Object3D {
   if (flags & NET_BULLET) return makeProjectileMesh();
-  if (flags & NET_MONSTER) return makePersonMesh(0x8e4444, 0xd88a8a);
-  return makePersonMesh(0x9c27b0, 0xe1bee7);
+  if (flags & NET_MONSTER) return makePersonMeshFor(0x8e4444, 0xd88a8a);
+  return makePersonMeshFor(0x9c27b0, 0xe1bee7);
 }
-
-// ---- Ownership / networking callback shape ----
-
-type OwnershipCallbacks = {
-  addOwnedEntity: (eid: number) => void;
-  removeOwnedEntity: (eid: number) => void;
-  signalEntityDestroyed: (eid: number) => void;
-  signalHitOnRemoteEntity: (localMirrorEid: number) => void;
-};
 
 export type SetupGameResult = {
   playerEid: number;
@@ -172,7 +147,9 @@ export async function setupGame(
   // --- Player ---
   // Spawn the body (game data: position/size/health), then hand it to the
   // engine's controller — movement, jumping, and firing rules live in Rust.
-  const playerEid = await engine.spawn_box_entity(0, 5, 0, 0.4, 0.9, 0.4, 100, NET_LOCAL | NET_REPLICATED);
+  const playerEid = await engine.spawn_box_entity(
+    0, 5, 0, PERSON_HALF_W, PERSON_HALF_H, PERSON_HALF_D, 100, NET_LOCAL | NET_REPLICATED,
+  );
   engine.register_player(playerEid);
   recordE2EEntitySpawn("player", playerEid);
   ownership.addOwnedEntity(playerEid);
@@ -215,7 +192,8 @@ export async function setupGame(
   });
 
   // --- Raw input capture ---
-  const heldKeys = new Set<string>();
+  const { heldKeys, disconnect: disconnectHeldKeys } = createHeldKeysTracker();
+  const stopSuppressingContextMenu = suppressContextMenu(document);
   let camYaw = Math.PI;
   let camPitch = DEFAULT_CAM_PITCH;
   let camOrbitActive = false;
@@ -226,14 +204,6 @@ export async function setupGame(
   camRaycaster.near = 0.5;
   const camLookAtVec = new Vector3();
   const camRayDirVec = new Vector3();
-
-  function onKeyDown(e: KeyboardEvent) { heldKeys.add(e.code); }
-  function onKeyUp(e: KeyboardEvent) { heldKeys.delete(e.code); }
-  window.addEventListener("keydown", onKeyDown);
-  window.addEventListener("keyup", onKeyUp);
-
-  function onContextMenu(e: MouseEvent) { e.preventDefault(); }
-  document.addEventListener("contextmenu", onContextMenu);
 
   function onMouseDown(e: MouseEvent) {
     if (e.button !== 0) {
@@ -403,12 +373,11 @@ export async function setupGame(
   function onRemoteEntityHit(_eid: number) {}
 
   function cleanup() {
-    window.removeEventListener("keydown", onKeyDown);
-    window.removeEventListener("keyup", onKeyUp);
+    disconnectHeldKeys();
     window.removeEventListener("mousedown", onMouseDown);
     document.removeEventListener("mousemove", onMouseMove);
     document.removeEventListener("pointerlockchange", onPointerLockChange);
-    document.removeEventListener("contextmenu", onContextMenu);
+    stopSuppressingContextMenu();
     if (canvas && document.pointerLockElement === canvas) document.exitPointerLock();
     unsubLifecycle();
     unsubNet();

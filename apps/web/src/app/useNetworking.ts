@@ -31,6 +31,12 @@ export type ChatMessage = {
   text: string;
 };
 
+/** The subset of a game setup's networking hooks needed to report entity ownership and hits. */
+export type OwnershipCallbacks = Pick<
+  UseNetworkingReturn,
+  "addOwnedEntity" | "removeOwnedEntity" | "signalEntityDestroyed" | "signalHitOnRemoteEntity"
+>;
+
 export interface UseNetworkingReturn {
   /** This client's PeerJS id — share it so others can join. Null until the broker assigns one. */
   localPeerId: string | null;

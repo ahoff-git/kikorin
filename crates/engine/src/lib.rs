@@ -760,10 +760,10 @@ impl Engine {
         }
         let new_peers = std::mem::take(&mut self.new_net_peers);
         if !new_peers.is_empty() {
-            let mut replicated = std::mem::take(&mut self.scratch_ids);
-            Self::collect_by_flag(&self.world, NET_REPLICATED, &mut replicated);
-            let events = self.delta_tracker.full_snapshot(&self.world, &replicated);
-            self.scratch_ids = replicated;
+            let events = self.with_scratch_ids(|this, replicated| {
+                Self::collect_by_flag(&this.world, NET_REPLICATED, replicated);
+                this.delta_tracker.full_snapshot(&this.world, replicated)
+            });
             let payload = (!events.is_empty()).then(|| netcode::encode_events(&events));
             for peer in new_peers {
                 log::info!("peer connected: {peer} — sending {} full-sync events", events.len());
@@ -1501,6 +1501,18 @@ impl Engine {
         );
     }
 
+    /// Runs `f` with `self.scratch_ids` temporarily taken out (so `f` can read
+    /// `self.world` while also writing the id list, without a borrow conflict),
+    /// then always restores it afterward — including on an early return inside
+    /// `f` — so its allocated capacity is reused next tick instead of being
+    /// dropped and reallocated.
+    fn with_scratch_ids<R>(&mut self, f: impl FnOnce(&mut Self, &mut Vec<u32>) -> R) -> R {
+        let mut ids = std::mem::take(&mut self.scratch_ids);
+        let result = f(self, &mut ids);
+        self.scratch_ids = ids;
+        result
+    }
+
     /// Decode and apply one peer payload: Delta/FullSync events route to this
     /// peer's local mirror entities (created on first sight), Despawned drops
     /// the mirror, Ping only refreshes liveness. Emits one boundary NetPatch
@@ -1593,26 +1605,26 @@ impl Engine {
     /// background actors.
     fn mark_replication_dirty(&mut self) {
         let tick = self.world.tick_count();
-        let mut ids = std::mem::take(&mut self.scratch_ids);
-        Self::collect_by_flag(&self.world, NET_REPLICATED, &mut ids);
-        for &id in &ids {
-            let flags = self.world.net_flags(id).unwrap_or(0);
-            // Unannounced entities flush immediately whatever their cadence —
-            // the Spawn event is what tells peers they exist.
-            let due = if !self.delta_tracker.is_tracked(id) {
-                true
-            } else if flags & NET_PREDICTABLE != 0 {
-                tick.is_multiple_of(PREDICTABLE_STRIDE)
-            } else if flags & NET_LOW_URGENCY != 0 {
-                tick.is_multiple_of(LOW_URGENCY_STRIDE)
-            } else {
-                true
-            };
-            if due {
-                self.delta_tracker.mark_dirty(id);
+        self.with_scratch_ids(|this, ids| {
+            Self::collect_by_flag(&this.world, NET_REPLICATED, ids);
+            for &id in ids.iter() {
+                let flags = this.world.net_flags(id).unwrap_or(0);
+                // Unannounced entities flush immediately whatever their cadence —
+                // the Spawn event is what tells peers they exist.
+                let due = if !this.delta_tracker.is_tracked(id) {
+                    true
+                } else if flags & NET_PREDICTABLE != 0 {
+                    tick.is_multiple_of(PREDICTABLE_STRIDE)
+                } else if flags & NET_LOW_URGENCY != 0 {
+                    tick.is_multiple_of(LOW_URGENCY_STRIDE)
+                } else {
+                    true
+                };
+                if due {
+                    this.delta_tracker.mark_dirty(id);
+                }
             }
-        }
-        self.scratch_ids = ids;
+        });
     }
 
     /// Advance NET_PREDICTABLE mirrors between network updates: linear motion
@@ -1769,98 +1781,97 @@ impl Engine {
     /// Returns the milliseconds spent inside A* searches (pathfinding_ms).
     fn tick_monster_ai(&mut self, dt_secs: f32) -> f32 {
         let ai = self.ai;
-        let mut pathfinding_ms = 0.0_f32;
 
-        let mut monster_ids = std::mem::take(&mut self.scratch_ids);
-        Self::collect_by_flag(&self.world, NET_MONSTER, &mut monster_ids);
+        self.with_scratch_ids(|this, monster_ids| {
+            let mut pathfinding_ms = 0.0_f32;
+            Self::collect_by_flag(&this.world, NET_MONSTER, monster_ids);
 
-        // At most one A* search per engine tick to bound the per-tick CPU spike.
-        // The per-monster cooldown provides the primary throttle; this flag
-        // prevents two monsters with simultaneous cooldown expiry from stacking.
-        let mut path_requested_this_tick = false;
+            // At most one A* search per engine tick to bound the per-tick CPU spike.
+            // The per-monster cooldown provides the primary throttle; this flag
+            // prevents two monsters with simultaneous cooldown expiry from stacking.
+            let mut path_requested_this_tick = false;
 
-        for &mid in &monster_ids {
-            let [mx, my, mz] = match self.world.position(mid) {
-                Some(p) => p,
-                None => continue,
-            };
-            let grounded = self.world.is_grounded(mid).unwrap_or(false);
-            // Foot height anchors navmesh lookups to the correct floor layer;
-            // monster dimensions are caller-supplied, so read the collider.
-            let foot_y = my - self.world.collider(mid).map_or(0.0, |c| c.half_height);
+            for &mid in monster_ids.iter() {
+                let [mx, my, mz] = match this.world.position(mid) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let grounded = this.world.is_grounded(mid).unwrap_or(false);
+                // Foot height anchors navmesh lookups to the correct floor layer;
+                // monster dimensions are caller-supplied, so read the collider.
+                let foot_y = my - this.world.collider(mid).map_or(0.0, |c| c.half_height);
 
-            let (goal_x, goal_z) = self.goal_for(mid, mx, mz);
-            let dx = goal_x - mx;
-            let dz = goal_z - mz;
-            let dist = (dx * dx + dz * dz).sqrt();
-            if dist < GOAL_REACHED_EPSILON {
-                // Stop explicitly: physics reapplies the last XZ command every
-                // sync, so skipping the write would keep the monster walking.
-                self.world.set_velocity(mid, [0.0, 0.0, 0.0]);
-                continue;
-            }
+                let (goal_x, goal_z) = this.goal_for(mid, mx, mz);
+                let dx = goal_x - mx;
+                let dz = goal_z - mz;
+                let dist = (dx * dx + dz * dz).sqrt();
+                if dist < GOAL_REACHED_EPSILON {
+                    // Stop explicitly: physics reapplies the last XZ command every
+                    // sync, so skipping the write would keep the monster walking.
+                    this.world.set_velocity(mid, [0.0, 0.0, 0.0]);
+                    continue;
+                }
 
-            let should_replan = match self.monster_states.get_mut(&mid) {
-                Some(state) => state.update_stuck_and_replan(
-                    &ai,
-                    dt_secs,
-                    mx,
-                    mz,
-                    goal_x,
-                    goal_z,
-                    !path_requested_this_tick,
-                ),
-                None => continue,
-            };
+                let should_replan = match this.monster_states.get_mut(&mid) {
+                    Some(state) => state.update_stuck_and_replan(
+                        &ai,
+                        dt_secs,
+                        mx,
+                        mz,
+                        goal_x,
+                        goal_z,
+                        !path_requested_this_tick,
+                    ),
+                    None => continue,
+                };
 
-            // Navmesh lookup needs &self.navmesh, so it runs outside the state borrow.
-            if should_replan {
-                path_requested_this_tick = true;
-                if let Some(navmesh) = &self.navmesh {
-                    let path_timer = Timer::new();
-                    let result = navmesh.find_path(PathRequest {
-                        start: [mx, foot_y, mz],
-                        goal: [goal_x, 0.0, goal_z],
-                        route_seed: None,
-                        can_jump: ai.can_jump,
-                        start_y: Some(foot_y),
-                    });
-                    pathfinding_ms += path_timer.elapsed_ms();
-                    if let Some(s) = self.monster_states.get_mut(&mid) {
-                        s.path = result;
-                        s.waypoint_index = 0;
+                // Navmesh lookup needs &this.navmesh, so it runs outside the state borrow.
+                if should_replan {
+                    path_requested_this_tick = true;
+                    if let Some(navmesh) = &this.navmesh {
+                        let path_timer = Timer::new();
+                        let result = navmesh.find_path(PathRequest {
+                            start: [mx, foot_y, mz],
+                            goal: [goal_x, 0.0, goal_z],
+                            route_seed: None,
+                            can_jump: ai.can_jump,
+                            start_y: Some(foot_y),
+                        });
+                        pathfinding_ms += path_timer.elapsed_ms();
+                        if let Some(s) = this.monster_states.get_mut(&mid) {
+                            s.path = result;
+                            s.waypoint_index = 0;
+                        }
                     }
                 }
+
+                let (desired_x, desired_z, wants_jump) = match this.monster_states.get_mut(&mid) {
+                    Some(state) => state.follow_waypoints(
+                        &ai,
+                        mx,
+                        mz,
+                        foot_y,
+                        grounded,
+                        [dx / dist, dz / dist],
+                    ),
+                    None => continue,
+                };
+
+                // Rotation: yaw faces the walk direction.
+                let yaw = desired_x.atan2(desired_z);
+                this.world.set_rotation(mid, [yaw, 0.0, 0.0]);
+                this.world.mark_dirty(mid, DirtyFlags::TRANSFORM);
+
+                let vy = if wants_jump { ai.jump_speed } else { 0.0 };
+                // Desired direction stored as velocity; separation adjusts it below.
+                this.world.set_velocity(
+                    mid,
+                    [desired_x * ai.walk_speed, vy, desired_z * ai.walk_speed],
+                );
             }
 
-            let (desired_x, desired_z, wants_jump) = match self.monster_states.get_mut(&mid) {
-                Some(state) => state.follow_waypoints(
-                    &ai,
-                    mx,
-                    mz,
-                    foot_y,
-                    grounded,
-                    [dx / dist, dz / dist],
-                ),
-                None => continue,
-            };
-
-            // Rotation: yaw faces the walk direction.
-            let yaw = desired_x.atan2(desired_z);
-            self.world.set_rotation(mid, [yaw, 0.0, 0.0]);
-            self.world.mark_dirty(mid, DirtyFlags::TRANSFORM);
-
-            let vy = if wants_jump { ai.jump_speed } else { 0.0 };
-            // Desired direction stored as velocity; separation adjusts it below.
-            self.world.set_velocity(
-                mid,
-                [desired_x * ai.walk_speed, vy, desired_z * ai.walk_speed],
-            );
-        }
-
-        // Return the buffer so its capacity is reused next tick.
-        self.scratch_ids = monster_ids;
-        pathfinding_ms
+            pathfinding_ms
+        })
     }
 
     /// Add soft repulsion forces so monsters don't cluster. Reads current XZ velocities
@@ -1868,80 +1879,79 @@ impl Engine {
     /// back. Must run after tick_monster_ai and before physics sync_from_world.
     fn apply_monster_separation(&mut self) {
         let ai = self.ai;
-        let mut monster_ids = std::mem::take(&mut self.scratch_ids);
-        Self::collect_by_flag(&self.world, NET_MONSTER, &mut monster_ids);
+        self.with_scratch_ids(|this, monster_ids| {
+            Self::collect_by_flag(&this.world, NET_MONSTER, monster_ids);
 
-        if monster_ids.len() < 2 {
-            self.scratch_ids = monster_ids;
-            return;
-        }
-
-        // Snapshot positions so the per-entity loop can read all neighbours without
-        // re-borrowing self.world through the inner loop.
-        let mut positions = std::mem::take(&mut self.scratch_positions);
-        positions.clear();
-        positions.extend(
-            monster_ids
-                .iter()
-                .map(|&id| self.world.position(id).unwrap_or([0.0; 3])),
-        );
-
-        let r_sq = ai.separation_radius * ai.separation_radius;
-
-        for (i, &mid) in monster_ids.iter().enumerate() {
-            let vel = match self.world.velocity(mid) {
-                Some(v) => v,
-                None => continue,
-            };
-            // Skip jump frames so separation doesn't fight the vertical impulse.
-            if vel[1].abs() > JUMP_FRAME_VY_THRESHOLD {
-                continue;
+            if monster_ids.len() < 2 {
+                return;
             }
 
-            let [mx, _, mz] = positions[i];
-            let mut sx = 0.0_f32;
-            let mut sz = 0.0_f32;
+            // Snapshot positions so the per-entity loop can read all neighbours without
+            // re-borrowing this.world through the inner loop.
+            let mut positions = std::mem::take(&mut this.scratch_positions);
+            positions.clear();
+            positions.extend(
+                monster_ids
+                    .iter()
+                    .map(|&id| this.world.position(id).unwrap_or([0.0; 3])),
+            );
 
-            for (j, pos_j) in positions.iter().enumerate() {
-                if i == j {
+            let r_sq = ai.separation_radius * ai.separation_radius;
+
+            for (i, &mid) in monster_ids.iter().enumerate() {
+                let vel = match this.world.velocity(mid) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                // Skip jump frames so separation doesn't fight the vertical impulse.
+                if vel[1].abs() > JUMP_FRAME_VY_THRESHOLD {
                     continue;
                 }
-                let dx = pos_j[0] - mx;
-                let dz = pos_j[2] - mz;
-                let d2 = dx * dx + dz * dz;
-                if d2 > 1e-6 && d2 < r_sq {
-                    let d = d2.sqrt();
-                    let f = 1.0 - d / ai.separation_radius;
-                    sx -= (dx / d) * f;
-                    sz -= (dz / d) * f;
+
+                let [mx, _, mz] = positions[i];
+                let mut sx = 0.0_f32;
+                let mut sz = 0.0_f32;
+
+                for (j, pos_j) in positions.iter().enumerate() {
+                    if i == j {
+                        continue;
+                    }
+                    let dx = pos_j[0] - mx;
+                    let dz = pos_j[2] - mz;
+                    let d2 = dx * dx + dz * dz;
+                    if d2 > 1e-6 && d2 < r_sq {
+                        let d = d2.sqrt();
+                        let f = 1.0 - d / ai.separation_radius;
+                        sx -= (dx / d) * f;
+                        sz -= (dz / d) * f;
+                    }
                 }
+
+                if sx.abs() < 1e-6 && sz.abs() < 1e-6 {
+                    continue;
+                }
+
+                // Recover unit desired direction from velocity (vel = dir × walk_speed).
+                let speed = (vel[0] * vel[0] + vel[2] * vel[2]).sqrt();
+                let (dir_x, dir_z) = if speed > 1e-6 {
+                    (vel[0] / speed, vel[2] / speed)
+                } else {
+                    (0.0, 0.0)
+                };
+
+                this.world.set_velocity(
+                    mid,
+                    [
+                        (dir_x + sx) * ai.walk_speed,
+                        vel[1],
+                        (dir_z + sz) * ai.walk_speed,
+                    ],
+                );
             }
 
-            if sx.abs() < 1e-6 && sz.abs() < 1e-6 {
-                continue;
-            }
-
-            // Recover unit desired direction from velocity (vel = dir × walk_speed).
-            let speed = (vel[0] * vel[0] + vel[2] * vel[2]).sqrt();
-            let (dir_x, dir_z) = if speed > 1e-6 {
-                (vel[0] / speed, vel[2] / speed)
-            } else {
-                (0.0, 0.0)
-            };
-
-            self.world.set_velocity(
-                mid,
-                [
-                    (dir_x + sx) * ai.walk_speed,
-                    vel[1],
-                    (dir_z + sz) * ai.walk_speed,
-                ],
-            );
-        }
-
-        // Return buffers so their capacity is reused next tick.
-        self.scratch_positions = positions;
-        self.scratch_ids = monster_ids;
+            // Return the buffer so its capacity is reused next tick.
+            this.scratch_positions = positions;
+        });
     }
 
     /// Integrate NET_BULLET positions (ballistic arc + wall bounce), detect hits
@@ -1950,42 +1960,59 @@ impl Engine {
     /// monsters despawn (respawning per MonsterConfig). Returns one HitPatch per
     /// collision and one per expiry (target_eid = None) as UI events.
     fn tick_bullets(&mut self, dt_secs: f32) -> Vec<HitPatch> {
-        let mut bullet_ids = std::mem::take(&mut self.scratch_ids);
-        Self::collect_by_flag(&self.world, NET_BULLET, &mut bullet_ids);
+        let (hits, spent_bullets, damaged_monsters) = self.with_scratch_ids(|this, bullet_ids| {
+            Self::collect_by_flag(&this.world, NET_BULLET, bullet_ids);
 
-        // No bullets in flight: skip the monster snapshot scan+alloc entirely. Bullets are
-        // transient, so the common case is zero bullets — most ticks return here.
-        if bullet_ids.is_empty() {
-            self.scratch_ids = bullet_ids;
-            return Vec::new();
-        }
+            // No bullets in flight: skip the monster snapshot scan+alloc entirely. Bullets are
+            // transient, so the common case is zero bullets — most ticks return here.
+            if bullet_ids.is_empty() {
+                return (Vec::new(), Vec::new(), Vec::new());
+            }
 
-        // Snapshot monster positions before the bullet loop so we can check hits without
-        // a conflicting borrow on self.world inside the integration logic.
-        let mut monster_snapshots = std::mem::take(&mut self.scratch_snapshots);
-        monster_snapshots.clear();
-        monster_snapshots.extend(
-            self.world
-                .entities()
-                .filter(|&id| {
-                    self.world
-                        .net_flags(id)
-                        .is_some_and(|f| f & NET_MONSTER != 0)
-                })
-                .filter_map(|id| Some((id, self.world.position(id)?))),
-        );
+            // Snapshot monster positions before the bullet loop so we can check hits without
+            // a conflicting borrow on this.world inside the integration logic.
+            let mut monster_snapshots = std::mem::take(&mut this.scratch_snapshots);
+            monster_snapshots.clear();
+            monster_snapshots.extend(
+                this.world
+                    .entities()
+                    .filter(|&id| {
+                        this.world
+                            .net_flags(id)
+                            .is_some_and(|f| f & NET_MONSTER != 0)
+                    })
+                    .filter_map(|id| Some((id, this.world.position(id)?))),
+            );
 
-        let mut hits: Vec<HitPatch> = Vec::new();
-        let mut spent_bullets: Vec<u32> = Vec::new();
-        let mut damaged_monsters: Vec<u32> = Vec::new();
+            let mut hits: Vec<HitPatch> = Vec::new();
+            let mut spent_bullets: Vec<u32> = Vec::new();
+            let mut damaged_monsters: Vec<u32> = Vec::new();
 
-        for &id in &bullet_ids {
-            // TTL gate. Use a block so the mutable borrow on bullet_ages is
-            // dropped before the rest of the loop body (which also needs &mut self).
-            {
-                let age = self.bullet_ages.entry(id).or_insert(0);
-                *age += 1;
-                if *age > BULLET_MAX_FRAMES {
+            for &id in bullet_ids.iter() {
+                // TTL gate. Use a block so the mutable borrow on bullet_ages is
+                // dropped before the rest of the loop body (which also needs &mut this).
+                {
+                    let age = this.bullet_ages.entry(id).or_insert(0);
+                    *age += 1;
+                    if *age > BULLET_MAX_FRAMES {
+                        hits.push(HitPatch {
+                            bullet_eid: id,
+                            target_eid: None,
+                        });
+                        spent_bullets.push(id);
+                        continue;
+                    }
+                }
+
+                let Some(pos) = this.world.position(id) else {
+                    continue;
+                };
+                let Some(vel) = this.world.velocity(id) else {
+                    continue;
+                };
+
+                // Bullet left the play area.
+                if pos[1] < BULLET_KILL_PLANE_Y {
                     hits.push(HitPatch {
                         bullet_eid: id,
                         target_eid: None,
@@ -1993,104 +2020,92 @@ impl Engine {
                     spent_bullets.push(id);
                     continue;
                 }
-            }
 
-            let Some(pos) = self.world.position(id) else {
-                continue;
-            };
-            let Some(vel) = self.world.velocity(id) else {
-                continue;
-            };
+                // Apply gravity before integration so it accumulates across ticks.
+                // Shadow vel so the gravity-adjusted values are used for the ray and position.
+                let vel = [vel[0], vel[1] + GRAVITY * dt_secs, vel[2]];
 
-            // Bullet left the play area.
-            if pos[1] < BULLET_KILL_PLANE_Y {
-                hits.push(HitPatch {
-                    bullet_eid: id,
-                    target_eid: None,
-                });
-                spent_bullets.push(id);
-                continue;
-            }
+                let speed = (vel[0].powi(2) + vel[1].powi(2) + vel[2].powi(2)).sqrt();
+                if speed > 1e-6 {
+                    let dir = [vel[0] / speed, vel[1] / speed, vel[2] / speed];
+                    let dist = speed * dt_secs;
 
-            // Apply gravity before integration so it accumulates across ticks.
-            // Shadow vel so the gravity-adjusted values are used for the ray and position.
-            let vel = [vel[0], vel[1] + GRAVITY * dt_secs, vel[2]];
-
-            let speed = (vel[0].powi(2) + vel[1].powi(2) + vel[2].powi(2)).sqrt();
-            if speed > 1e-6 {
-                let dir = [vel[0] / speed, vel[1] / speed, vel[2] / speed];
-                let dist = speed * dt_secs;
-
-                if let Some((normal, toi)) =
-                    self.physics
-                        .cast_ray_with_normal([pos[0], pos[1], pos[2]], dir, dist)
-                {
-                    let dot = vel[0] * normal[0] + vel[1] * normal[1] + vel[2] * normal[2];
-                    self.world.set_velocity(
-                        id,
-                        [
-                            vel[0] - 2.0 * dot * normal[0],
-                            vel[1] - 2.0 * dot * normal[1],
-                            vel[2] - 2.0 * dot * normal[2],
-                        ],
-                    );
-                    // Velocity discontinuity: remote mirrors extrapolate this
-                    // bullet, so force an immediate correction instead of
-                    // waiting for the next PREDICTABLE_STRIDE tick.
-                    if self.world.net_flags(id).is_some_and(|f| f & NET_REPLICATED != 0) {
-                        self.delta_tracker.mark_dirty(id);
+                    if let Some((normal, toi)) =
+                        this.physics
+                            .cast_ray_with_normal([pos[0], pos[1], pos[2]], dir, dist)
+                    {
+                        let dot = vel[0] * normal[0] + vel[1] * normal[1] + vel[2] * normal[2];
+                        this.world.set_velocity(
+                            id,
+                            [
+                                vel[0] - 2.0 * dot * normal[0],
+                                vel[1] - 2.0 * dot * normal[1],
+                                vel[2] - 2.0 * dot * normal[2],
+                            ],
+                        );
+                        // Velocity discontinuity: remote mirrors extrapolate this
+                        // bullet, so force an immediate correction instead of
+                        // waiting for the next PREDICTABLE_STRIDE tick.
+                        if this
+                            .world
+                            .net_flags(id)
+                            .is_some_and(|f| f & NET_REPLICATED != 0)
+                        {
+                            this.delta_tracker.mark_dirty(id);
+                        }
+                        this.world.set_position(
+                            id,
+                            [
+                                pos[0] + dir[0] * toi + normal[0] * BULLET_BOUNCE_OFFSET,
+                                pos[1] + dir[1] * toi + normal[1] * BULLET_BOUNCE_OFFSET,
+                                pos[2] + dir[2] * toi + normal[2] * BULLET_BOUNCE_OFFSET,
+                            ],
+                        );
+                    } else {
+                        // Store gravity-updated velocity so the arc accumulates next tick.
+                        this.world.set_velocity(id, vel);
+                        this.world.set_position(
+                            id,
+                            [
+                                pos[0] + vel[0] * dt_secs,
+                                pos[1] + vel[1] * dt_secs,
+                                pos[2] + vel[2] * dt_secs,
+                            ],
+                        );
                     }
-                    self.world.set_position(
-                        id,
-                        [
-                            pos[0] + dir[0] * toi + normal[0] * BULLET_BOUNCE_OFFSET,
-                            pos[1] + dir[1] * toi + normal[1] * BULLET_BOUNCE_OFFSET,
-                            pos[2] + dir[2] * toi + normal[2] * BULLET_BOUNCE_OFFSET,
-                        ],
-                    );
                 } else {
-                    // Store gravity-updated velocity so the arc accumulates next tick.
-                    self.world.set_velocity(id, vel);
-                    self.world.set_position(
-                        id,
-                        [
-                            pos[0] + vel[0] * dt_secs,
-                            pos[1] + vel[1] * dt_secs,
-                            pos[2] + vel[2] * dt_secs,
-                        ],
-                    );
+                    this.world.set_velocity(id, vel);
                 }
-            } else {
-                self.world.set_velocity(id, vel);
-            }
 
-            self.world.mark_dirty(id, DirtyFlags::TRANSFORM);
+                this.world.mark_dirty(id, DirtyFlags::TRANSFORM);
 
-            // Read the updated position for hit detection.
-            let bpos = match self.world.position(id) {
-                Some(p) => p,
-                None => continue,
-            };
+                // Read the updated position for hit detection.
+                let bpos = match this.world.position(id) {
+                    Some(p) => p,
+                    None => continue,
+                };
 
-            for &(mid, mpos) in &monster_snapshots {
-                let dx = bpos[0] - mpos[0];
-                let dy = bpos[1] - mpos[1];
-                let dz = bpos[2] - mpos[2];
-                if dx * dx + dy * dy + dz * dz < BULLET_HIT_RADIUS_SQ {
-                    hits.push(HitPatch {
-                        bullet_eid: id,
-                        target_eid: Some(mid),
-                    });
-                    spent_bullets.push(id);
-                    damaged_monsters.push(mid);
-                    break;
+                for &(mid, mpos) in &monster_snapshots {
+                    let dx = bpos[0] - mpos[0];
+                    let dy = bpos[1] - mpos[1];
+                    let dz = bpos[2] - mpos[2];
+                    if dx * dx + dy * dy + dz * dz < BULLET_HIT_RADIUS_SQ {
+                        hits.push(HitPatch {
+                            bullet_eid: id,
+                            target_eid: Some(mid),
+                        });
+                        spent_bullets.push(id);
+                        damaged_monsters.push(mid);
+                        break;
+                    }
                 }
             }
-        }
 
-        // Return buffers so their capacity is reused next tick.
-        self.scratch_snapshots = monster_snapshots;
-        self.scratch_ids = bullet_ids;
+            // Return the buffer so its capacity is reused next tick.
+            this.scratch_snapshots = monster_snapshots;
+
+            (hits, spent_bullets, damaged_monsters)
+        });
 
         // Settle consequences after the integration loop so entity destruction
         // never invalidates the snapshots it iterated.

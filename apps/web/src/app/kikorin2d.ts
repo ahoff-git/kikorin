@@ -16,18 +16,15 @@ import {
   lookCameraAt,
 } from "@kikorin/system-rendering";
 import {
-  BoxGeometry,
-  EdgesGeometry,
-  Group,
-  LineBasicMaterial,
-  LineSegments,
   Mesh,
-  MeshLambertMaterial,
   MeshBasicMaterial,
   SphereGeometry,
   type Object3D,
 } from "three";
 import { KIKORIN_2D_MAP, BLOCK_Z_HALF_DEPTH } from "./kikorin2dMap";
+import { makeEdgedBox, makePersonMesh } from "./meshFactories";
+import { createHeldKeysTracker, suppressContextMenu } from "./inputHelpers";
+import type { OwnershipCallbacks } from "./useNetworking";
 
 // This file is UI + IO only, mirroring kikorin.ts's split for the 3D game —
 // but it does NOT use the engine's player controller (register_player/
@@ -65,25 +62,11 @@ const CAM_Y_OFFSET = 1.0;
 const CAM_Z = 5.0;
 
 function makeFlatBox(hw: number, hh: number, color: number, edgeColor: number): Object3D {
-  const geo = new BoxGeometry(hw * 2, hh * 2, BLOCK_Z_HALF_DEPTH * 2);
-  const mesh = new Mesh(geo, new MeshLambertMaterial({ color }));
-  mesh.receiveShadow = false;
-  mesh.castShadow = false;
-  const line = new LineSegments(new EdgesGeometry(geo), new LineBasicMaterial({ color: edgeColor }));
-  line.renderOrder = 1;
-  line.scale.setScalar(1.0005);
-  mesh.add(line);
-  return mesh;
+  return makeEdgedBox(hw, hh, BLOCK_Z_HALF_DEPTH, color, edgeColor);
 }
 
-function makePersonMesh(bodyColor: number, frontColor: number): Object3D {
-  const group = new Group();
-  const geo = new BoxGeometry(PLAYER_HALF_W * 2, PLAYER_HALF_H * 2, PLAYER_HALF_D * 2);
-  const bodyMat = new MeshLambertMaterial({ color: bodyColor });
-  const frontMat = new MeshLambertMaterial({ color: frontColor });
-  const body = new Mesh(geo, [bodyMat, bodyMat, bodyMat, bodyMat, frontMat, bodyMat]);
-  group.add(body);
-  return group;
+function makePersonMeshFor(bodyColor: number, frontColor: number): Object3D {
+  return makePersonMesh(PLAYER_HALF_W, PLAYER_HALF_H, PLAYER_HALF_D, bodyColor, frontColor);
 }
 
 const PROJ_GEO = new SphereGeometry(0.15, 10, 8);
@@ -91,13 +74,6 @@ const PROJ_MAT = new MeshBasicMaterial({ color: 0xf97316 });
 function makeProjectileMesh(): Object3D {
   return new Mesh(PROJ_GEO, PROJ_MAT);
 }
-
-type OwnershipCallbacks = {
-  addOwnedEntity: (eid: number) => void;
-  removeOwnedEntity: (eid: number) => void;
-  signalEntityDestroyed: (eid: number) => void;
-  signalHitOnRemoteEntity: (localMirrorEid: number) => void;
-};
 
 export type SetupGame2DResult = {
   playerEid: number;
@@ -127,7 +103,7 @@ export async function setupGame2D(
   const playerEid = await engine.spawn_box_entity(
     0, 3, 0, PLAYER_HALF_W, PLAYER_HALF_H, PLAYER_HALF_D, PLAYER_HEALTH, NET_LOCAL | NET_REPLICATED,
   );
-  upsertObjectByEid(playerEid, () => makePersonMesh(0x4488cc, 0xffe082));
+  upsertObjectByEid(playerEid, () => makePersonMeshFor(0x4488cc, 0xffe082));
   ownership.addOwnedEntity(playerEid);
   const ownedEids: number[] = [playerEid];
 
@@ -155,7 +131,7 @@ export async function setupGame2D(
     for (const p of netChannel.getSnapshot()) {
       if (p.kind === "spawned") {
         const flags = p.flags ?? 0;
-        upsertObjectByEid(p.entity, () => (flags & NET_BULLET) ? makeProjectileMesh() : makePersonMesh(0x9c27b0, 0xe1bee7));
+        upsertObjectByEid(p.entity, () => (flags & NET_BULLET) ? makeProjectileMesh() : makePersonMeshFor(0x9c27b0, 0xe1bee7));
       } else if (p.kind === "despawned") {
         removeObjectByEid(p.entity, { dispose: true });
       }
@@ -181,20 +157,14 @@ export async function setupGame2D(
       const eid = await engine.spawn_box_entity(
         x, MONSTER_SPAWN_Y, 0, MONSTER_HALF, MONSTER_HALF, MONSTER_HALF, MONSTER_HEALTH, NET_LOCAL | NET_REPLICATED,
       );
-      upsertObjectByEid(eid, () => makePersonMesh(0xcc4444, 0xff8800));
+      upsertObjectByEid(eid, () => makePersonMeshFor(0xcc4444, 0xff8800));
       monsters.push({ eid, originX: x, dir: Math.random() < 0.5 ? 1 : -1 });
     }
   }
 
   // --- Raw input ---
-  const heldKeys = new Set<string>();
-  function onKeyDown(e: KeyboardEvent) { heldKeys.add(e.code); }
-  function onKeyUp(e: KeyboardEvent) { heldKeys.delete(e.code); }
-  window.addEventListener("keydown", onKeyDown);
-  window.addEventListener("keyup", onKeyUp);
-
-  function onContextMenu(e: MouseEvent) { e.preventDefault(); }
-  document.addEventListener("contextmenu", onContextMenu);
+  const { heldKeys, disconnect: disconnectHeldKeys } = createHeldKeysTracker();
+  const stopSuppressingContextMenu = suppressContextMenu(document);
 
   let facing: 1 | -1 = 1;
 
@@ -287,10 +257,9 @@ export async function setupGame2D(
   await spawnMonsters(INITIAL_MONSTER_COUNT);
 
   function cleanup() {
-    window.removeEventListener("keydown", onKeyDown);
-    window.removeEventListener("keyup", onKeyUp);
+    disconnectHeldKeys();
     window.removeEventListener("mousedown", onMouseDown);
-    document.removeEventListener("contextmenu", onContextMenu);
+    stopSuppressingContextMenu();
     unsubLifecycle();
     unsubNet();
     unsubHud();
