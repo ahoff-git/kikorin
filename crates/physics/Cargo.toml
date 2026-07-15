@@ -7,3 +7,4 @@ edition = "2021"
 ecs = { path = "../ecs" }
 # default-features = false disables simd-stable and parallel (both needed for WASM compat)
 rapier3d = { version = "0.22", default-features = false, features = ["dim3", "f32"] }
+rapier2d = { version = "0.22", default-features = false, features = ["dim2", "f32"] }

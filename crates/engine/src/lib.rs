@@ -22,7 +22,7 @@ use patch::{
     PatchGenerator,
 };
 use pathfinding::{NavMesh, NavMeshConfig, PathRequest, Waypoint};
-use physics::PhysicsWorld;
+use physics::{Dimension, PhysicsWorld};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
@@ -526,8 +526,14 @@ pub struct Engine {
 
 #[wasm_bindgen]
 impl Engine {
+    /// `dimension`: `"2d"` (case-insensitive) selects Rapier2D; anything else
+    /// (including omitted/`None`, from JS calling `new Engine()`) keeps the
+    /// original Rapier3D behavior. A setup-time choice only — fixed for this
+    /// engine instance's lifetime, and orthogonal to game logic (player
+    /// controller/monster AI/bullets are unchanged either way; see
+    /// crates/physics's Dimension for exactly what "2D" means physically).
     #[wasm_bindgen(constructor)]
-    pub fn new() -> Engine {
+    pub fn new(dimension: Option<String>) -> Engine {
         #[cfg(target_arch = "wasm32")]
         {
             use log::Level;
@@ -535,9 +541,14 @@ impl Engine {
             console_error_panic_hook::set_once();
         }
 
+        let dimension = match dimension.as_deref() {
+            Some(s) if s.eq_ignore_ascii_case("2d") => Dimension::TwoD,
+            _ => Dimension::ThreeD,
+        };
+
         Engine {
             world: World::new(1024),
-            physics: PhysicsWorld::new(GRAVITY),
+            physics: PhysicsWorld::new(GRAVITY, dimension),
             navmesh: None,
             delta_tracker: DeltaTracker::new(),
             patch_gen: PatchGenerator::new(),
@@ -570,6 +581,15 @@ impl Engine {
             scratch_ids: Vec::new(),
             scratch_positions: Vec::new(),
             scratch_snapshots: Vec::new(),
+        }
+    }
+
+    /// Which physics backend this engine was constructed with — `"2d"` or
+    /// `"3d"`. Introspection only; the choice was fixed at construction.
+    pub fn dimension(&self) -> String {
+        match self.physics.dimension() {
+            Dimension::TwoD => "2d".to_string(),
+            Dimension::ThreeD => "3d".to_string(),
         }
     }
 
@@ -2364,7 +2384,7 @@ mod tests {
     }
 
     fn engine_with_static_map() -> Engine {
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         engine.load_map_blocks(&castle_blocks());
         engine
     }
@@ -2411,7 +2431,7 @@ mod tests {
     fn navmesh_bounds_derive_from_terrain_location() {
         // A map placed far outside the old hardcoded ±80 world bounds must still
         // produce a walkable navmesh — bounds come from the geometry, not the engine.
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         let blocks: Vec<MapBlock> = [
             (200.0, -1.0, 200.0, 15.0, 1.0, 15.0),
             (220.0, -1.0, 200.0, 5.0, 1.0, 5.0),
@@ -2448,7 +2468,7 @@ mod tests {
 
     #[test]
     fn navmesh_is_none_without_floor_geometry() {
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         engine.build_navmesh();
         assert!(engine.navmesh.is_none(), "no floors → no navmesh");
     }
@@ -2485,7 +2505,7 @@ mod tests {
         // the graph. Failed searches must respect the replan cooldown — the exhausted-
         // path branch must not zero it, or one bad goal becomes a full-mesh search
         // per tick and the tick budget collapses.
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         engine.load_map_blocks(&[
             MapBlock {
                 x: 0.0,
@@ -2526,7 +2546,7 @@ mod tests {
     }
 
     fn engine_with_flat_floor() -> Engine {
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         engine.load_map_blocks(&[MapBlock {
             x: 0.0,
             y: -1.0,
@@ -2613,7 +2633,7 @@ mod tests {
 
     #[test]
     fn teleport_entity_moves_existing_dynamic_body() {
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         engine.load_map_blocks(&[MapBlock {
             x: 0.0,
             y: -1.0,
@@ -2647,7 +2667,7 @@ mod tests {
         // Regression: the blueprint path used to skip all NET-flag bookkeeping,
         // leaving blueprint monsters without AI state and without a velocity
         // component (so movement commands silently no-oped).
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         let bp = EntityBlueprint {
             position: Some([0.0, 1.0, 0.0]),
             net_flags: Some(NET_LOCAL | NET_MONSTER),
@@ -2844,7 +2864,7 @@ mod tests {
     #[test]
     fn bullet_below_kill_plane_emits_exactly_one_hitpatch() {
         // No terrain: the bullet free-falls past the kill plane.
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         let b = engine.spawn_bullet(0.0, 1.0, 0.0, 0.0, -30.0, 0.0, 0);
 
         let mut deaths = 0;
@@ -3149,7 +3169,7 @@ mod tests {
 
     #[test]
     fn inbound_delta_creates_a_mirror_not_an_id_collision() {
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         let player = engine.spawn_box_entity(0.0, 5.0, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
 
         // The remote peer's entity id happens to equal our player's id — applying
@@ -3175,7 +3195,7 @@ mod tests {
 
     #[test]
     fn repeat_deltas_update_the_same_mirror() {
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         let mut out = Vec::new();
         engine.ingest_peer_payload("peer-a", &delta_payload(7, [1.0, 0.0, 0.0]), &mut out);
         engine.ingest_peer_payload("peer-a", &delta_payload(7, [2.0, 0.0, 0.0]), &mut out);
@@ -3189,7 +3209,7 @@ mod tests {
 
     #[test]
     fn same_remote_id_from_two_peers_gets_two_mirrors() {
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         let mut out = Vec::new();
         engine.ingest_peer_payload("peer-a", &delta_payload(7, [1.0, 0.0, 0.0]), &mut out);
         engine.ingest_peer_payload("peer-b", &delta_payload(7, [2.0, 0.0, 0.0]), &mut out);
@@ -3202,7 +3222,7 @@ mod tests {
 
     #[test]
     fn despawn_event_removes_the_mirror() {
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         let mut out = Vec::new();
         engine.ingest_peer_payload("peer-a", &delta_payload(7, [1.0, 0.0, 0.0]), &mut out);
         let mirror = out[0].entity;
@@ -3220,7 +3240,7 @@ mod tests {
 
     #[test]
     fn silent_peer_times_out_and_its_mirrors_despawn() {
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         let mut out = Vec::new();
         engine.ingest_peer_payload("peer-a", &delta_payload(7, [1.0, 0.0, 0.0]), &mut out);
         let mirror = out[0].entity;
@@ -3245,7 +3265,7 @@ mod tests {
 
     #[test]
     fn destroying_a_replicated_entity_broadcasts_despawned() {
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         let player =
             engine.spawn_box_entity(0.0, 5.0, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL | NET_REPLICATED);
         // Un-replicated local entities are nobody's business on the wire.
@@ -3269,7 +3289,7 @@ mod tests {
 
     #[test]
     fn replication_cadence_follows_urgency_flags() {
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         // Flushing needs an audience.
         engine.peer_last_seen.insert("peer-x".to_string(), 0.0);
         let urgent =
@@ -3319,7 +3339,7 @@ mod tests {
 
     #[test]
     fn predictable_mirrors_extrapolate_between_updates() {
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         // Remote ballistic bullet: one Spawn with position + velocity.
         let mut fields = Vec::new();
         for (axis, v) in [0.0, 10.0, 0.0].iter().enumerate() {
@@ -3358,7 +3378,7 @@ mod tests {
 
     #[test]
     fn unpredictable_mirrors_stay_put_between_updates() {
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         let mut out = Vec::new();
         engine.ingest_peer_payload("peer-a", &delta_payload(7, [1.0, 2.0, 3.0]), &mut out);
         let mirror = out[0].entity;
@@ -3436,7 +3456,7 @@ mod tests {
     fn navmesh_builds_at_any_altitude() {
         // Regression: the node-sampling scan window used to be hardcoded to
         // y ∈ [200, −50]; floors outside it silently produced no navmesh nodes.
-        let mut engine = Engine::new();
+        let mut engine = Engine::new(None);
         engine.load_map_blocks(&[MapBlock {
             x: 0.0,
             y: 300.0,

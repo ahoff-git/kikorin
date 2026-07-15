@@ -50,12 +50,18 @@ export class WorkerEngineProxy {
     return [id, p];
   }
 
-  /** Load the WASM engine inside the worker. Must be awaited before any other call. */
-  init(): Promise<void> {
+  /**
+   * Load the WASM engine inside the worker. Must be awaited before any other
+   * call. `dimension`: `"2d"` selects Rapier2D physics; omitted (or `"3d"`)
+   * keeps the original Rapier3D behavior — see crates/physics's Dimension
+   * for what "2D" means physically. Purely a physics-backend choice; every
+   * other call here behaves identically either way.
+   */
+  init(dimension?: "2d" | "3d"): Promise<void> {
     const [id, p] = this.request<void>();
     // Pass origin so the worker can build an absolute WASM URL even when
     // Turbopack serves the worker from a blob URL (self.location.origin = "null").
-    this.worker.postMessage({ type: 'init', id, origin: location.origin });
+    this.worker.postMessage({ type: 'init', id, origin: location.origin, dimension });
     return p;
   }
 
@@ -95,6 +101,13 @@ export class WorkerEngineProxy {
   spawn_bullet(x: number, y: number, z: number, vx: number, vy: number, vz: number, net_flags: number): Promise<number> {
     const [id, p] = this.request<number>();
     this.worker.postMessage({ type: 'spawn_bullet', id, x, y, z, vx, vy, vz, net_flags });
+    return p;
+  }
+
+  /** Static terrain body, without load_map's navmesh build. */
+  spawn_floor_entity(x: number, y: number, z: number, hw: number, hh: number, hd: number): Promise<number> {
+    const [id, p] = this.request<number>();
+    this.worker.postMessage({ type: 'spawn_floor', id, x, y, z, hw, hh, hd });
     return p;
   }
 

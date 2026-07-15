@@ -6,6 +6,7 @@ import {
   removeObjectByEid,
   setObjectTransformByEid,
   applyToObjectByEid,
+  getRenderMode,
 } from '../render'
 
 describe('system-rendering exports', () => {
@@ -31,5 +32,20 @@ describe('system-rendering exports', () => {
 
   it('applyToObjectByEid returns false for unknown eid', () => {
     expect(applyToObjectByEid(9999, () => {})).toBe(false)
+  })
+})
+
+describe('render mode', () => {
+  it('defaults to "3d" before any setupRenderer call', () => {
+    expect(getRenderMode()).toBe('3d')
+  })
+
+  it('setupRenderer accepts an explicit mode without a canvas as a no-op', () => {
+    // No real canvas/WebGL context in this test environment (node, no
+    // jsdom) — setupRenderer(null, ...) exercises only the early-return
+    // guard, same as the existing no-canvas smoke coverage above, but
+    // proves the two-argument call shape type-checks and doesn't throw.
+    expect(() => setupRenderer(null, '2d')).not.toThrow()
+    expect(getRenderMode()).toBe('3d')
   })
 })

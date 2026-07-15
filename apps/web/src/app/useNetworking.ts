@@ -22,7 +22,7 @@ import { createAwari, type Transport } from "@awari/core";
 import type { PeerRef, RoomSession } from "@awari/protocol";
 import { createPeerJsTransport, readPeerJsId } from "@awari/transport-peerjs";
 import { createManualBootstrapClient, type ManualBootstrapClient } from "./manualBootstrap";
-import { GAME_ROOM_ANCHOR_PEER_ID, GAME_ROOM_ID } from "./gameRoom";
+import { getGameRoom, type GameKey } from "./gameRoom";
 import type { WorkerEngineProxy } from "../workers/WorkerEngineProxy";
 
 export type ChatMessage = {
@@ -49,6 +49,7 @@ export interface UseNetworkingReturn {
 
 export function useNetworking(
   engine: WorkerEngineProxy | null,
+  gameKey: GameKey,
   _playerEid: number | null,
   _ownedEids: readonly number[],
 ): UseNetworkingReturn {
@@ -110,13 +111,14 @@ export function useNetworking(
 
     async function start() {
       // Auto-discovery with no separate directory service: try to claim a
-      // well-known PeerJS id derived from the shared game room (see
-      // gameRoom.ts). Whoever gets there first becomes the room's anchor
-      // (genesis leader); everyone after that fails to claim it — that
-      // failure itself is the discovery signal — and dials it directly
-      // instead of needing a pasted id.
+      // well-known PeerJS id derived from this game's room (see gameRoom.ts —
+      // scoped by gameKey so the 2D and 3D games never share a room). Whoever
+      // gets there first becomes the room's anchor (genesis leader); everyone
+      // after that fails to claim it — that failure itself is the discovery
+      // signal — and dials it directly instead of needing a pasted id.
+      const { roomId, anchorPeerId } = getGameRoom(gameKey);
       let isAnchor = true;
-      let transportAttempt = createPeerJsTransport({ id: GAME_ROOM_ANCHOR_PEER_ID });
+      let transportAttempt = createPeerJsTransport({ id: anchorPeerId });
       let selfId: string;
       try {
         selfId = await transportAttempt.selfId;
@@ -147,14 +149,14 @@ export function useNetworking(
       bootstrapRef.current = bootstrap;
       if (!isAnchor) {
         // We're not the anchor, so someone else already is — dial them.
-        bootstrap.seedContact(GAME_ROOM_ID, GAME_ROOM_ANCHOR_PEER_ID);
+        bootstrap.seedContact(roomId, anchorPeerId);
       }
 
       const awari = createAwari({ transport, bootstrap, resolveConnectionId: readPeerJsId, peerId: selfId });
       awariRef.current = awari;
 
       try {
-        const session = await awari.join({ roomId: GAME_ROOM_ID, sessionId: sessionIdRef.current });
+        const session = await awari.join({ roomId, sessionId: sessionIdRef.current });
         if (disposed) {
           void session.close();
           return;
@@ -193,7 +195,7 @@ export function useNetworking(
       void transport?.destroy();
       setLocalPeerId(null);
     };
-  }, [engine]);
+  }, [engine, gameKey]);
 
   // Live peer list from engine net events: peer_joined fires when the room
   // session bridge reports a new peer (before any entity data), entity

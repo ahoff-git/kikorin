@@ -19,7 +19,7 @@ import { EMPTY_METRICS } from '@kikorin/adapter';
 // @ts-ignore — no sub-path type declarations; Engine and __wbg_set_wasm are exported at runtime
 import * as engineBg from '@kikorin/engine-wasm/engine_bg.js';
 
-async function loadWasm(origin: string): Promise<new () => EngineHandle> {
+async function loadWasm(origin: string): Promise<new (dimension?: string) => EngineHandle> {
   // Use the origin passed from the main thread to build an absolute WASM URL.
   // Turbopack may serve workers from a blob URL (self.location.origin = "null"),
   // so we cannot rely on self.location.origin for root-relative URL resolution.
@@ -36,7 +36,7 @@ async function loadWasm(origin: string): Promise<new () => EngineHandle> {
 
   // wasm-bindgen's generated Engine class types every method loosely (any/JsValue);
   // EngineHandle is the hand-maintained strict contract, so re-type at the boundary.
-  return (engineBg as unknown as { Engine: new () => EngineHandle }).Engine;
+  return (engineBg as unknown as { Engine: new (dimension?: string) => EngineHandle }).Engine;
 }
 
 // How often to post accumulated patches to the main thread (~60 Hz).
@@ -46,12 +46,13 @@ const SIM_STEP_MS = 4;
 const MAX_CATCHUP_STEPS = 8;
 
 type Req =
-  | { type: 'init';                id: number; origin: string }
+  | { type: 'init';                id: number; origin: string; dimension?: '2d' | '3d' }
   | { type: 'set_velocity';        eid: number; vx: number; vy: number; vz: number }
   | { type: 'teleport';            eid: number; x: number; y: number; z: number }
   | { type: 'destroy';             eid: number }
   | { type: 'spawn_box';           id: number; x: number; y: number; z: number; hw: number; hh: number; hd: number; health: number; net_flags: number }
   | { type: 'spawn_bullet';        id: number; x: number; y: number; z: number; vx: number; vy: number; vz: number; net_flags: number }
+  | { type: 'spawn_floor';         id: number; x: number; y: number; z: number; hw: number; hh: number; hd: number }
   | { type: 'load_map';            id: number; blocks: TerrainBlockInput[] }
   | { type: 'find_path';           id: number; sx: number; sy: number; sz: number; gx: number; gz: number; canJump: boolean }
   | { type: 'update_monster_goal'; gx: number; gz: number }
@@ -180,7 +181,7 @@ addEventListener('message', async (event: MessageEvent<Req>) => {
 
   if (msg.type === 'init') {
     const Engine = await loadWasm(msg.origin);
-    engine = new Engine();
+    engine = new Engine(msg.dimension);
     post({ type: 'ack', id: msg.id, result: null });
     startSimulation();
     return;
@@ -205,6 +206,11 @@ addEventListener('message', async (event: MessageEvent<Req>) => {
     }
     case 'spawn_bullet': {
       const eid = engine.spawn_bullet(msg.x, msg.y, msg.z, msg.vx, msg.vy, msg.vz, msg.net_flags);
+      post({ type: 'ack', id: msg.id, result: eid });
+      break;
+    }
+    case 'spawn_floor': {
+      const eid = engine.spawn_floor_entity(msg.x, msg.y, msg.z, msg.hw, msg.hh, msg.hd);
       post({ type: 'ack', id: msg.id, result: eid });
       break;
     }

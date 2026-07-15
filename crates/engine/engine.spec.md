@@ -12,7 +12,7 @@ Rust owns all game logic: physics, pathfinding, monster AI, the player controlle
 This spec is the top-level entry point; each box below has its own spec for the detail glossed over here.
 
 - **`ecs`** — SoA world storage + scheduler; the single source of truth every subsystem reads/writes.
-- **`physics`** — Rapier3D step; derives bodies from ECS colliders, writes back positions + grounded.
+- **`physics`** — Rapier2D or Rapier3D step (a construction-time choice, see "Physics Dimension" below); derives bodies from ECS colliders, writes back positions + grounded.
 - **`pathfinding`** — stateless NavMesh A*; supplies monster waypoints.
 - **`netcode`** — per-peer delta tracking + WebRTC apply/flush.
 - **`patch`** — packs the tick's dirty entities into the `PatchBundle`.
@@ -49,8 +49,13 @@ kikorin's profiles: player = `LOCAL|REPLICATED`, monsters = `LOCAL|MONSTER|REPLI
 
 Every spawn path routes through the same post-spawn bookkeeping (`register_spawned`): velocity component init plus the flag-driven registries — the blueprint path included.
 
+### Physics Dimension — a construction-time setup parameter
+`new Engine(dimension?)` takes an optional `"2d"` (case-insensitive) to construct with Rapier2D instead of the default Rapier3D — see `crates/physics`'s `Dimension` for exactly what that means physically (X horizontal, Y up, no meaningful Z). `dimension()` reports which one an instance was built with. This is purely a physics-backend choice, fixed for the engine's lifetime; **it does not change any game logic**. The player controller, monster AI (including navmesh/pathfinding), and bullet flight are all still written in terms of an X/Z ground plane + Y height, unchanged regardless of which physics backend is active — constructing a 2D engine does not make these systems "2D-aware," it only changes which Rapier crate simulates collisions/gravity/queries underneath them. Making the higher-level game systems meaningful in 2D (or building something new on top of the 2D physics/rendering primitives directly, bypassing them) is future work, not something this parameter does on its own.
+
 ### Public WASM API
 ```
+new(dimension?: "2d"|"3d") → Engine       "2d" selects Rapier2D; anything else (including omitted) is Rapier3D
+dimension() → "2d" | "3d"                 which physics backend this instance was constructed with
 tick(dt_ms) → JsPatch                     per-tick simulation; returns the PatchBundle
 spawn_box_entity(x,y,z,hw,hh,hd,health,net_flags) → id
 spawn_bullet(x,y,z,vx,vy,vz,net_flags) → id   NET_BULLET always set; no Rapier body

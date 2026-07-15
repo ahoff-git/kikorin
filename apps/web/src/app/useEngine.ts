@@ -40,7 +40,10 @@ export interface UseEngineReturn {
  * to the main thread at ~60 Hz. The render loop consumes those patches asynchronously,
  * so rendering always uses the most recent flushed positions.
  */
-export function useEngine(canvasRef: RefObject<HTMLCanvasElement | null>): UseEngineReturn {
+export function useEngine(
+  canvasRef: RefObject<HTMLCanvasElement | null>,
+  dimension: "2d" | "3d" = "3d",
+): UseEngineReturn {
   const onFrameRef = useRef<(() => void) | null>(null);
   const [engine, setEngine] = useState<WorkerEngineProxy | null>(null);
 
@@ -105,9 +108,9 @@ export function useEngine(canvasRef: RefObject<HTMLCanvasElement | null>): UseEn
       });
 
       // Load WASM inside the worker thread (async; main thread stays free).
-      await proxy.init();
+      await proxy.init(dimension);
 
-      setupRenderer(canvas);
+      setupRenderer(canvas, dimension);
       unsubRender = subscribeToRenderChannel();
 
       running = true;
@@ -135,7 +138,8 @@ export function useEngine(canvasRef: RefObject<HTMLCanvasElement | null>): UseEn
       proxy?.terminate();
       setEngine(null);
     };
-  // canvasRef is a stable ref — safe to omit.
+  // canvasRef is a stable ref, and dimension is a fixed setup choice for a
+  // given page (never changes after mount) — safe to omit both.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

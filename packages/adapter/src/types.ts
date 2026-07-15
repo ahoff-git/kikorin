@@ -231,6 +231,12 @@ export interface EngineHandle {
   /** Spawn a dynamic entity. net_flags=1 (NET_LOCAL) for locally-simulated entities. */
   spawn_box_entity(x: number, y: number, z: number, hw: number, hh: number, hd: number, health: number, net_flags: number): number;
   /**
+   * Spawn a static terrain body directly, without building (or rebuilding)
+   * the navmesh the way load_map does — use this for a game that doesn't
+   * use the engine's monster/pathfinding system at all.
+   */
+  spawn_floor_entity(x: number, y: number, z: number, hw: number, hh: number, hd: number): number;
+  /**
    * Spawn a projectile. The engine integrates its ballistic trajectory each tick,
    * enforces a TTL, and emits each HitPatch exactly once (hit, expiry, or kill
    * plane). The engine never destroys bullets — the game must call destroy_entity
@@ -275,5 +281,6 @@ export interface EngineHandle {
 }
 
 export interface EngineClass {
-  new (): EngineHandle;
+  /** `dimension`: `"2d"` selects Rapier2D physics; omitted (or `"3d"`) is the original Rapier3D behavior. */
+  new (dimension?: '2d' | '3d'): EngineHandle;
 }

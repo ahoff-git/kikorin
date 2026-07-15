@@ -1,19 +1,23 @@
 import { log, logLevels } from "@kikorin/util";
-import type { PerspectiveCamera } from "three";
+import type { Camera } from "three";
 
 const CAMERA_LOG_INTERVAL = 30;
 
-let camera: PerspectiveCamera | null = null;
+// Camera (three's base class) rather than PerspectiveCamera specifically —
+// setupRenderer constructs either a PerspectiveCamera ("3d") or an
+// OrthographicCamera ("2d"); every operation here (position, lookAt) is
+// defined on the base class, so this module never needs to branch on which.
+let camera: Camera | null = null;
 let setCameraPositionCallCount = 0;
 let lookCameraAtCallCount = 0;
 
-export function setActiveCamera(c: PerspectiveCamera | null) {
+export function setActiveCamera(c: Camera | null) {
   camera = c;
   setCameraPositionCallCount = 0;
   lookCameraAtCallCount = 0;
 }
 
-export function getActiveCamera(): PerspectiveCamera | null {
+export function getActiveCamera(): Camera | null {
   return camera;
 }
 

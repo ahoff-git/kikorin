@@ -3,6 +3,8 @@ import {
   Color,
   Scene,
   PerspectiveCamera,
+  OrthographicCamera,
+  type Camera,
   WebGLRenderer,
   Object3D,
   Material,
@@ -14,11 +16,25 @@ import {
 } from "three";
 import { setActiveCamera, getActiveCamera } from "./renderCamera";
 
+/**
+ * Setup-time choice, fixed for a renderer's lifetime (mirrors
+ * `physics::Dimension` in the Rust engine — the two are independent knobs a
+ * game picks together, not coupled at the type level). `"3d"` is the
+ * original behavior: `PerspectiveCamera` plus a directional "sun" light with
+ * shadow mapping. `"2d"` uses `OrthographicCamera` and flat ambient-only
+ * lighting — no shadow rig, since dynamic shadows rarely make sense for a 2D
+ * scene. Geometry/mesh choice is still entirely up to the caller (this
+ * package never constructs meshes); a 2D game supplies its own flat/sprite
+ * geometry to `upsertObjectByEid` same as a 3D game supplies boxes.
+ */
+export type RenderMode = "2d" | "3d";
+
 let scene: Scene | null = null;
 let renderer: WebGLRenderer | null = null;
 let sunLight: DirectionalLight | null = null;
 let rendererViewportWidth = 0;
 let rendererViewportHeight = 0;
+let renderMode: RenderMode = "3d";
 
 const _camDir = new Vector3();
 // Shadow frustum half-extent and derived texel size for snapping
@@ -26,6 +42,14 @@ const SUN_FRUSTUM_HALF = 60;
 const SHADOW_MAP_SIZE = 2048;
 const SHADOW_UPDATE_EVERY = 3;
 const SUN_TEXEL_SIZE = (SUN_FRUSTUM_HALF * 2) / SHADOW_MAP_SIZE;
+// Default world-space vertical extent visible through the 2D orthographic
+// camera — arbitrary but reasonable for a human-scale 2D scene; callers
+// needing a different scale should zoom the camera itself (Object3D-level,
+// via three's own APIs) after setup.
+const ORTHO_VIEW_HEIGHT = 20;
+// World-space height the orthographic camera's frustum spans at zoom=1;
+// width follows from the current aspect ratio. Unused in "3d" mode.
+let orthoViewHeight = ORTHO_VIEW_HEIGHT;
 
 const objectsByEid = new Map<number, Object3D>();
 const RENDER_DEBUG_FRAME_INTERVAL = 30;
@@ -54,6 +78,11 @@ function logRenderSkipOnce(reason: string, data?: Record<string, unknown>) {
 
 function clearRenderSkipReason() {
   lastRenderSkipReason = null;
+}
+
+/** Which mode the active renderer was set up with — introspection only, "3d" before setup. */
+export function getRenderMode(): RenderMode {
+  return renderMode;
 }
 
 export interface RenderMetrics {
@@ -161,6 +190,7 @@ function clearRenderState() {
   setActiveCamera(null);
   rendererViewportWidth = 0;
   rendererViewportHeight = 0;
+  renderMode = "3d";
   lastSunCX = Infinity;
   lastSunCZ = Infinity;
 
@@ -171,8 +201,24 @@ function clearRenderState() {
 function updateCameraAspect(width: number, height: number) {
   const cam = getActiveCamera();
   if (!cam) return;
-  cam.aspect = width / Math.max(height, 1);
-  cam.updateProjectionMatrix();
+  const aspect = width / Math.max(height, 1);
+  // updateProjectionMatrix isn't on the base Camera type (three's other
+  // camera kinds compute it differently, some not at all) — called inside
+  // each branch, where cam is narrowed to a type that actually has it.
+  if (cam instanceof OrthographicCamera) {
+    // Orthographic has no `.aspect` field — the frustum's world-space extent
+    // is fixed (orthoViewHeight) and width follows the aspect ratio instead.
+    const halfHeight = orthoViewHeight / 2;
+    const halfWidth = halfHeight * aspect;
+    cam.left = -halfWidth;
+    cam.right = halfWidth;
+    cam.top = halfHeight;
+    cam.bottom = -halfHeight;
+    cam.updateProjectionMatrix();
+  } else if (cam instanceof PerspectiveCamera) {
+    cam.aspect = aspect;
+    cam.updateProjectionMatrix();
+  }
 }
 
 function setRendererViewportSize(width: number, height: number) {
@@ -204,20 +250,33 @@ function syncRendererViewportSize() {
   return setRendererViewportSize(width, height);
 }
 
-export function setupRenderer(canvas: HTMLCanvasElement | null) {
+export function setupRenderer(canvas: HTMLCanvasElement | null, mode: RenderMode = "3d") {
   if (!canvas) {
     logRenderDebug("setupRenderer skipped: canvas is null");
     return;
   }
 
   clearRenderState();
+  renderMode = mode;
 
   const width = canvas.clientWidth || canvas.width || 1;
   const height = canvas.clientHeight || canvas.height || 1;
 
   scene = new Scene();
-  const cam = new PerspectiveCamera(75, width / height, 0.1, 1000);
-  cam.position.z = 5;
+
+  let cam: Camera;
+  if (mode === "2d") {
+    const aspect = width / Math.max(height, 1);
+    const halfHeight = orthoViewHeight / 2;
+    const halfWidth = halfHeight * aspect;
+    const ortho = new OrthographicCamera(-halfWidth, halfWidth, halfHeight, -halfHeight, 0.1, 1000);
+    ortho.position.z = 5;
+    cam = ortho;
+  } else {
+    const perspective = new PerspectiveCamera(75, width / height, 0.1, 1000);
+    perspective.position.z = 5;
+    cam = perspective;
+  }
   setActiveCamera(cam);
 
   renderer = new WebGLRenderer({
@@ -228,30 +287,40 @@ export function setupRenderer(canvas: HTMLCanvasElement | null) {
 
   const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
   renderer.setPixelRatio(pixelRatio);
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = PCFShadowMap;
-  renderer.shadowMap.autoUpdate = false;
   setRendererViewportSize(width, height);
 
   scene.background = new Color(0x87ceeb);
 
-  const ambientLight = new AmbientLight(0xffd9a0, 1.2);
-  scene.add(ambientLight);
+  if (mode === "2d") {
+    // Flat lighting only — no directional "sun"/shadow rig. Dynamic shadows
+    // rarely make sense for a 2D scene, and skipping them avoids the shadow
+    // map + frustum-tracking overhead entirely.
+    renderer.shadowMap.enabled = false;
+    const ambientLight = new AmbientLight(0xffffff, 1.5);
+    scene.add(ambientLight);
+  } else {
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = PCFShadowMap;
+    renderer.shadowMap.autoUpdate = false;
 
-  sunLight = new DirectionalLight(0xfff5e0, 2.5);
-  sunLight.position.set(50, 100, 30);
-  sunLight.castShadow = true;
-  sunLight.shadow.mapSize.width = SHADOW_MAP_SIZE;
-  sunLight.shadow.mapSize.height = SHADOW_MAP_SIZE;
-  sunLight.shadow.camera.near = 0.5;
-  sunLight.shadow.camera.far = 200;
-  sunLight.shadow.camera.left = -SUN_FRUSTUM_HALF;
-  sunLight.shadow.camera.right = SUN_FRUSTUM_HALF;
-  sunLight.shadow.camera.top = SUN_FRUSTUM_HALF;
-  sunLight.shadow.camera.bottom = -SUN_FRUSTUM_HALF;
-  sunLight.shadow.bias = -0.001;
-  scene.add(sunLight);
-  scene.add(sunLight.target);
+    const ambientLight = new AmbientLight(0xffd9a0, 1.2);
+    scene.add(ambientLight);
+
+    sunLight = new DirectionalLight(0xfff5e0, 2.5);
+    sunLight.position.set(50, 100, 30);
+    sunLight.castShadow = true;
+    sunLight.shadow.mapSize.width = SHADOW_MAP_SIZE;
+    sunLight.shadow.mapSize.height = SHADOW_MAP_SIZE;
+    sunLight.shadow.camera.near = 0.5;
+    sunLight.shadow.camera.far = 200;
+    sunLight.shadow.camera.left = -SUN_FRUSTUM_HALF;
+    sunLight.shadow.camera.right = SUN_FRUSTUM_HALF;
+    sunLight.shadow.camera.top = SUN_FRUSTUM_HALF;
+    sunLight.shadow.camera.bottom = -SUN_FRUSTUM_HALF;
+    sunLight.shadow.bias = -0.001;
+    scene.add(sunLight);
+    scene.add(sunLight.target);
+  }
 
   logRenderDebug("renderer setup complete", {
     width,
