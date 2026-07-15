@@ -161,12 +161,18 @@ export class Engine {
      * engine instance's lifetime, and orthogonal to game logic (player
      * controller/monster AI/bullets are unchanged either way; see
      * crates/physics's Dimension for exactly what "2D" means physically).
+     * `gravity`: overrides the engine-wide gravity constant for this
+     * instance (e.g. `Some(0.0)` for a top-down, no-fall game); omitted/
+     * `None` keeps the original value. Threaded to every consumer that
+     * cares — physics, bullet ballistic integration, and the 2D navmesh's
+     * jump-reachability math all read `self.gravity`, not the bare constant.
      * @param {string | null} [dimension]
+     * @param {number | null} [gravity]
      */
-    constructor(dimension) {
+    constructor(dimension, gravity) {
         var ptr0 = isLikeNone(dimension) ? 0 : passStringToWasm0(dimension, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         var len0 = WASM_VECTOR_LEN;
-        const ret = wasm.engine_new(ptr0, len0);
+        const ret = wasm.engine_new(ptr0, len0, isLikeNone(gravity) ? Number.MAX_SAFE_INTEGER : Math.fround(gravity));
         this.__wbg_ptr = ret;
         EngineFinalization.register(this, this.__wbg_ptr, this);
         return this;

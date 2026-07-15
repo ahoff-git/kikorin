@@ -53,8 +53,8 @@ export default function Landing() {
           Kikorin
         </Typography>
         <Typography variant="body1" sx={{ color: "#888", marginTop: 1, maxWidth: 480 }}>
-          A small multiplayer arena shooter, in two flavors — same engine, two
-          physics/rendering dimensions. Pick one to play.
+          A small multiplayer arena shooter, in three flavors — same engine,
+          different physics/rendering setups. Pick one to play.
         </Typography>
       </Box>
 
@@ -69,10 +69,15 @@ export default function Landing() {
           title="Kikorin 2D"
           description="Side-view platformer: run, jump, and shoot across a flat arena."
         />
+        <GameCard
+          href="/topdown"
+          title="Kikorin Top-Down"
+          description="Overhead maze shooter: no gravity, no jumping — just run and shoot."
+        />
       </Box>
 
       <Typography variant="caption" sx={{ color: "#555" }}>
-        Each game is its own multiplayer room — 2D and 3D players never share a session.
+        Each game is its own multiplayer room — players in one never share a session with another.
       </Typography>
     </Box>
   );

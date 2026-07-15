@@ -19,6 +19,8 @@ The engine ships no game data: maps arrive as blocks via `load_map(blocks)` (nav
 
 2D and 3D are both first-class (see [Engine](../engine/README.md)'s Physics Dimension and Monster AI in 2D sections) — a construction-time parameter selects Rapier2D vs Rapier3D, and both pathfinding and monster AI execution work correctly for either, though by two different mechanisms: pathfinding has a genuinely separate 2D build path, while monster AI execution reuses the 3D code unmodified, relying on a documented convention (2D entities' Z always 0) rather than a 2D-specific branch. The player controller remains 3D-only; 2D's own game (`apps/web/src/app/kikorin2d.ts`) drives its player directly from TypeScript instead.
 
+A third sample game — top-down, no-gravity, "pacman style" (`apps/web/src/app/kikorinTopDown.ts`) — adds no new physics dimension at all. It's the existing 3D pipeline (Rapier3D, the real player controller and monster AI, unmodified) configured with a construction-time `gravity: 0` override and a perfectly flat map, rendered through the 2D render mode's orthographic camera. Physics dimension and render mode are independent knobs (see [system-rendering](../system-rendering/README.md)); this game is the case that exercises the combination the other two don't (3D physics, 2D-style camera). See ADR 0005.
+
 ---
 
 ## Crate Layering

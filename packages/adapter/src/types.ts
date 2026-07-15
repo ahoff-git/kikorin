@@ -292,6 +292,11 @@ export interface EngineHandle {
 }
 
 export interface EngineClass {
-  /** `dimension`: `"2d"` selects Rapier2D physics; omitted (or `"3d"`) is the original Rapier3D behavior. */
-  new (dimension?: '2d' | '3d'): EngineHandle;
+  /**
+   * `dimension`: `"2d"` selects Rapier2D physics; omitted (or `"3d"`) is the original Rapier3D behavior.
+   * `gravity`: overrides the engine-wide gravity constant for this instance (e.g. `0` for a
+   * top-down, no-fall game); omitted keeps the original value. Threaded to bullet integration
+   * and the 2D navmesh too, not just physics — see specs/engine/README.md.
+   */
+  new (dimension?: '2d' | '3d', gravity?: number): EngineHandle;
 }

@@ -16,9 +16,10 @@ This package never constructs meshes (`BoxGeometry`, `Mesh`, materials all live 
 ### Inputs and Outputs
 - **In:** `renderChannel` snapshots (`RenderPatch[]` from `@kikorin/adapter`) — position/rotation per entity per tick.
 - **Out:** updated `Object3D` transforms; `renderer.render(scene, camera)` per `renderFrame()`.
-- **API surface:** `setupRenderer` / `disposeRenderer`; `getRenderMode`; registry ops (`upsertObjectByEid`, `removeObjectByEid`, `applyToObjectByEid`, `setObjectTransformByEid`); `subscribeToRenderChannel`; `renderFrame`; `getRenderMetrics` (EMA of `renderFrame` duration as `frame_ms` — the rendering-pipeline slice of the cross-layer metrics contract; currently no standing consumer); camera helpers (`setActiveCamera`, `getActiveCamera`, `setCameraPosition`, `lookCameraAt`).
+- **API surface:** `setupRenderer` / `disposeRenderer`; `getRenderMode`; registry ops (`upsertObjectByEid`, `removeObjectByEid`, `applyToObjectByEid`, `setObjectTransformByEid`); `subscribeToRenderChannel`; `renderFrame`; `getRenderMetrics` (EMA of `renderFrame` duration as `frame_ms` — the rendering-pipeline slice of the cross-layer metrics contract; currently no standing consumer); camera helpers (`setActiveCamera`, `getActiveCamera`, `setCameraPosition`, `setCameraUp`, `lookCameraAt`).
 
 ### Invariants
+- `setCameraUp` defaults to `(0,1,0)` (three's own default) on every `setupRenderer` call. A camera that will look straight down or straight up must call it once at setup with a non-parallel up vector (e.g. `(0,0,-1)`) — `lookAt`'s orientation math is undefined when the view direction is parallel to `up`, which is exactly the straight-down case a top-down game's camera sits in.
 - `subscribeToRenderChannel` runs after `setupRenderer`; call its returned unsubscribe on dispose.
 - `removeObjectByEid(eid, { dispose: true })` frees geometry/material; without `dispose` it only detaches from scene + registry.
 - Camera operations are no-ops before `setupRenderer`.

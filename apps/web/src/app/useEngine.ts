@@ -43,6 +43,14 @@ export interface UseEngineReturn {
 export function useEngine(
   canvasRef: RefObject<HTMLCanvasElement | null>,
   dimension: "2d" | "3d" = "3d",
+  gravity?: number,
+  // Independent of `dimension` (see packages/system-rendering/src/render.ts's
+  // doc comment) — defaults to matching it, which is what both existing
+  // games want. The top-down game is the first to need them to differ: 3D
+  // physics (X/Z ground plane, so monster AI/pathfinding need no changes)
+  // rendered through the 2D mode's orthographic camera for a true overhead
+  // look instead of perspective distortion.
+  renderMode?: "2d" | "3d",
 ): UseEngineReturn {
   const onFrameRef = useRef<(() => void) | null>(null);
   const [engine, setEngine] = useState<WorkerEngineProxy | null>(null);
@@ -108,9 +116,9 @@ export function useEngine(
       });
 
       // Load WASM inside the worker thread (async; main thread stays free).
-      await proxy.init(dimension);
+      await proxy.init(dimension, gravity);
 
-      setupRenderer(canvas, dimension);
+      setupRenderer(canvas, renderMode ?? dimension);
       unsubRender = subscribeToRenderChannel();
 
       running = true;
@@ -138,8 +146,9 @@ export function useEngine(
       proxy?.terminate();
       setEngine(null);
     };
-  // canvasRef is a stable ref, and dimension is a fixed setup choice for a
-  // given page (never changes after mount) — safe to omit both.
+  // canvasRef is a stable ref, and dimension/gravity/renderMode are all
+  // fixed setup choices for a given page (never change after mount) — safe
+  // to omit all four.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

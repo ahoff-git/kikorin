@@ -19,7 +19,7 @@ import { EMPTY_METRICS } from '@kikorin/adapter';
 // @ts-ignore — no sub-path type declarations; Engine and __wbg_set_wasm are exported at runtime
 import * as engineBg from '@kikorin/engine-wasm/engine_bg.js';
 
-async function loadWasm(origin: string): Promise<new (dimension?: string) => EngineHandle> {
+async function loadWasm(origin: string): Promise<new (dimension?: string, gravity?: number) => EngineHandle> {
   // Use the origin passed from the main thread to build an absolute WASM URL.
   // Turbopack may serve workers from a blob URL (self.location.origin = "null"),
   // so we cannot rely on self.location.origin for root-relative URL resolution.
@@ -36,7 +36,7 @@ async function loadWasm(origin: string): Promise<new (dimension?: string) => Eng
 
   // wasm-bindgen's generated Engine class types every method loosely (any/JsValue);
   // EngineHandle is the hand-maintained strict contract, so re-type at the boundary.
-  return (engineBg as unknown as { Engine: new (dimension?: string) => EngineHandle }).Engine;
+  return (engineBg as unknown as { Engine: new (dimension?: string, gravity?: number) => EngineHandle }).Engine;
 }
 
 // How often to post accumulated patches to the main thread (~60 Hz).
@@ -46,7 +46,7 @@ const SIM_STEP_MS = 4;
 const MAX_CATCHUP_STEPS = 8;
 
 type Req =
-  | { type: 'init';                id: number; origin: string; dimension?: '2d' | '3d' }
+  | { type: 'init';                id: number; origin: string; dimension?: '2d' | '3d'; gravity?: number }
   | { type: 'set_velocity';        eid: number; vx: number; vy: number; vz: number }
   | { type: 'teleport';            eid: number; x: number; y: number; z: number }
   | { type: 'destroy';             eid: number }
@@ -183,7 +183,7 @@ addEventListener('message', async (event: MessageEvent<Req>) => {
 
   if (msg.type === 'init') {
     const Engine = await loadWasm(msg.origin);
-    engine = new Engine(msg.dimension);
+    engine = new Engine(msg.dimension, msg.gravity);
     post({ type: 'ack', id: msg.id, result: null });
     startSimulation();
     return;

@@ -54,14 +54,15 @@ export class WorkerEngineProxy {
    * Load the WASM engine inside the worker. Must be awaited before any other
    * call. `dimension`: `"2d"` selects Rapier2D physics; omitted (or `"3d"`)
    * keeps the original Rapier3D behavior — see crates/physics's Dimension
-   * for what "2D" means physically. Purely a physics-backend choice; every
-   * other call here behaves identically either way.
+   * for what "2D" means physically. `gravity`: overrides the engine-wide
+   * gravity constant (e.g. `0` for a top-down, no-fall game); omitted keeps
+   * the original value. Both are independent setup-time choices.
    */
-  init(dimension?: "2d" | "3d"): Promise<void> {
+  init(dimension?: "2d" | "3d", gravity?: number): Promise<void> {
     const [id, p] = this.request<void>();
     // Pass origin so the worker can build an absolute WASM URL even when
     // Turbopack serves the worker from a blob URL (self.location.origin = "null").
-    this.worker.postMessage({ type: 'init', id, origin: location.origin, dimension });
+    this.worker.postMessage({ type: 'init', id, origin: location.origin, dimension, gravity });
     return p;
   }
 

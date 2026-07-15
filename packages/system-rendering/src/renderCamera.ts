@@ -42,6 +42,22 @@ export function setCameraPosition(x: number, y: number, z: number): boolean {
   return true;
 }
 
+/**
+ * Sets the camera's up vector — needed once, at setup, for a camera that
+ * will look straight down (or up): `lookAt`'s orientation math is degenerate
+ * when the view direction is parallel to `up` (the default `(0,1,0)`), so a
+ * top-down camera must pick a different up vector before its first
+ * `lookCameraAt` call, or the resulting orientation is undefined.
+ */
+export function setCameraUp(x: number, y: number, z: number): boolean {
+  if (!camera) {
+    log(logLevels.debug, "[render] setCameraUp failed: camera missing", ["render"], { x, y, z });
+    return false;
+  }
+  camera.up.set(x, y, z);
+  return true;
+}
+
 export function lookCameraAt(x: number, y: number, z: number): boolean {
   if (!camera) {
     log(logLevels.debug, "[render] lookCameraAt failed: camera missing", ["render"], { x, y, z });

@@ -83,8 +83,13 @@ export class Engine {
      * engine instance's lifetime, and orthogonal to game logic (player
      * controller/monster AI/bullets are unchanged either way; see
      * crates/physics's Dimension for exactly what "2D" means physically).
+     * `gravity`: overrides the engine-wide gravity constant for this
+     * instance (e.g. `Some(0.0)` for a top-down, no-fall game); omitted/
+     * `None` keeps the original value. Threaded to every consumer that
+     * cares — physics, bullet ballistic integration, and the 2D navmesh's
+     * jump-reachability math all read `self.gravity`, not the bare constant.
      */
-    constructor(dimension?: string | null);
+    constructor(dimension?: string | null, gravity?: number | null);
     /**
      * Fire one bullet from the player along its facing + aim pitch (tuning in
      * PlayerConfig). Ballistic, replicated, predictable; spawn and death reach

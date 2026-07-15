@@ -1,17 +1,20 @@
 /**
  * The shared multiplayer room every instance of a given game joins by
  * default — a game-level identity, not a per-peer one. This app actually
- * ships two distinct games (the 3D and 2D versions) that must never end up
- * in the same room — a 2D client's entities are meaningless to a 3D client
- * and vice versa — so the room id is always scoped by `gameKey` ("3d" | "2d").
+ * ships several distinct games (3D, 2D, top-down) that must never end up in
+ * the same room — one game's entities are meaningless to another's client —
+ * so the room id is always scoped by `gameKey`. Purely a room-naming
+ * concern, decoupled from physics `Dimension`: the top-down game passes
+ * `dimension: "3d"` to `useEngine` (it reuses the 3D pipeline) but still
+ * gets its own `"topdown"` room, distinct from the real 3D game's.
  *
  * Override the shared base via NEXT_PUBLIC_KIKORIN_ROOM_ID (e.g. in
- * .env.local) if you fork this app; both games' rooms move together since
+ * .env.local) if you fork this app; every game's room moves together since
  * they derive from the same base, but stay distinct from each other.
  */
 const BASE_ROOM_ID = process.env.NEXT_PUBLIC_KIKORIN_ROOM_ID ?? "kikorin";
 
-export type GameKey = "2d" | "3d";
+export type GameKey = "2d" | "3d" | "topdown";
 
 export interface GameRoom {
   roomId: string;

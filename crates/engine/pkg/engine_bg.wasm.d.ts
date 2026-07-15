@@ -15,7 +15,7 @@ export const engine_net_ingest: (a: number, b: number, c: number, d: number, e: 
 export const engine_net_peer_connected: (a: number, b: number, c: number) => void;
 export const engine_net_peer_disconnected: (a: number, b: number, c: number) => void;
 export const engine_net_take_outbound: (a: number) => any;
-export const engine_new: (a: number, b: number) => number;
+export const engine_new: (a: number, b: number, c: number) => number;
 export const engine_player_fire: (a: number) => void;
 export const engine_register_player: (a: number, b: number) => void;
 export const engine_set_ai_config: (a: number, b: any) => void;

@@ -19,6 +19,7 @@ Lightweight architecture decision record (ADR) log for kikorin.
 - [0002: 2D pathfinding is a separate build path, not a dimension-branch of the 3D navmesh scan](./0002-2d-pathfinding-separate-build-path.md)
 - [0003: 2D monster AI execution reuses 3D's code unmodified, relying on a Z=0 convention](./0003-2d-monster-ai-reuses-3d-code-via-z-zero.md)
 - [0004: Chat "nearby"/group channels are broadcast + client-side filtered, not real awari-scoped routing](./0004-chat-channels-are-broadcast-and-client-filtered.md)
+- [0005: Top-down "pacman style" game reuses the 3D pipeline with zero gravity, not a fourth Dimension](./0005-topdown-game-reuses-3d-pipeline-with-zero-gravity.md)
 
 ## Open Questions
 

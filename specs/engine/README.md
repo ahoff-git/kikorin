@@ -50,7 +50,9 @@ kikorin's profiles: player = `LOCAL|REPLICATED`, monsters = `LOCAL|MONSTER|REPLI
 Every spawn path routes through the same post-spawn bookkeeping (`register_spawned`): velocity component init plus the flag-driven registries — the blueprint path included.
 
 ### Physics Dimension — a construction-time setup parameter
-`new Engine(dimension?)` takes an optional `"2d"` (case-insensitive) to construct with Rapier2D instead of the default Rapier3D — see `crates/physics`'s `Dimension` for exactly what that means physically (X horizontal, Y up, no meaningful Z). `dimension()` reports which one an instance was built with. This is purely a physics-backend choice, fixed for the engine's lifetime, but it is no longer true that it "changes no game logic" — pathfinding and monster AI *execution* are both dimension-aware today; only the player controller remains a real 3D/2D split. See the next two sections for exactly what that means for each.
+`new Engine(dimension?, gravity?)` takes an optional `"2d"` (case-insensitive) to construct with Rapier2D instead of the default Rapier3D — see `crates/physics`'s `Dimension` for exactly what that means physically (X horizontal, Y up, no meaningful Z). `dimension()` reports which one an instance was built with. This is purely a physics-backend choice, fixed for the engine's lifetime, but it is no longer true that it "changes no game logic" — pathfinding and monster AI *execution* are both dimension-aware today; only the player controller remains a real 3D/2D split. See the next two sections for exactly what that means for each.
+
+`gravity` is a second, independent construction-time override (default: the engine's `GRAVITY` constant) — orthogonal to `dimension`: a `gravity: Some(0.0)` instance still picks Rapier3D vs Rapier2D normally, it just simulates with no fall acceleration. This is what a top-down, no-jump game configures instead of adding a fourth `Dimension` — see ADR 0005.
 
 ### Monster AI in 2D — one code path, not a rewrite
 `tick_monster_ai`, `apply_monster_separation`, and `closest_player_position` run unmodified for 2D — there is no `_2d` variant of any of them. All three read positions' X and Z components to compute ground-plane movement, and that happens to already be correct for 2D: **every 2D entity's Z is always `0`** (2D physics passes Z through untouched on sync, and nothing in the 2D game ever sets it to anything else), so `dz` between any two 2D entities is always `0 - 0 = 0` by construction. `dist = sqrt(dx² + dz²)` degenerates to `|dx|`, and the normalized direction `(dx/dist, dz/dist)` degenerates to `(±1, 0)` — exactly correct 1-D ground-plane behavior, for free. The same holds for `apply_monster_separation`'s repulsion force and `tick_bullets`' monster hit-detection (both full 3-D Euclidean distance, both degenerate the same way).
@@ -68,7 +70,7 @@ Two things are genuinely 3D-only and are explicitly gated on `dimension()`, not 
 
 ### Public WASM API
 ```
-new(dimension?: "2d"|"3d") → Engine       "2d" selects Rapier2D; anything else (including omitted) is Rapier3D
+new(dimension?: "2d"|"3d", gravity?: number) → Engine   "2d" selects Rapier2D; anything else (including omitted) is Rapier3D. gravity overrides the engine-wide constant for this instance (e.g. 0 for a top-down, no-fall game); omitted keeps the default. Read by physics construction, bullet ballistic integration (both local and remote-mirror extrapolation), and build_navmesh_2d's reachability math — every consumer agrees on the same value, not a bare constant.
 dimension() → "2d" | "3d"                 which physics backend this instance was constructed with
 tick(dt_ms) → JsPatch                     per-tick simulation; returns the PatchBundle
 spawn_box_entity(x,y,z,hw,hh,hd,health,net_flags) → id
@@ -107,7 +109,7 @@ get_metrics() → JsMetrics | set_log_level(u8) | deserialize_patch(bytes) → J
 - **2D entities' Z must stay 0.** Monster AI execution (`tick_monster_ai`, `apply_monster_separation`, `closest_player_position`) and bullet hit-detection all run the same 3-D math for both dimensions and rely on every 2D entity's Z being exactly 0 to degenerate correctly to 1-D ground-plane behavior — see 2D Monster AI above. Nothing enforces this at the type level; it's a convention every 2D spawn call must uphold.
 
 ### Known Gaps — reusability decisions pending
-- Bullet flight tuning (TTL, hit radius, elastic bounce, kill plane) and world gravity are engine constants, not configs — no `set_bullet_config`/gravity override yet (muzzle/speed/damage live in PlayerConfig).
+- Bullet flight tuning (TTL, hit radius, elastic bounce, kill plane) is still an engine constant, not a config — no `set_bullet_config` yet (muzzle/speed/damage live in PlayerConfig). Gravity is no longer in this category: it's a construction-time override (`new(dimension?, gravity?)`), fixed for the engine's lifetime like `dimension` — there is no runtime `set_gravity`.
 - Bullets can only hit NET_MONSTER entities, with a fixed hit radius (PvE assumption).
 - No map unload: repeated `load_map` accumulates terrain.
 - `destroy_entity` removes the entity's Rapier body and any monster/bullet state in the same call, so no phantom patches survive for a recycled ID.
