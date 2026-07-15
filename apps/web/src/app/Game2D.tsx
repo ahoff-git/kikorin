@@ -128,7 +128,7 @@ const networkPeerItemStyle: CSSProperties = {
 };
 
 const CONTROL_INSTRUCTIONS =
-  "A / D or Left / Right to run, Space to jump, left click to shoot in the direction you're facing.";
+  "A / D or Left / Right to run, Space to jump (double jump in the air), left click to shoot in the direction you're facing.";
 
 export default function Game2D() {
   const canvasRef = useRef<HTMLCanvasElement>(null);

@@ -45,6 +45,9 @@ const PLAYER_HALF_D = 0.3;
 const PLAYER_HEALTH = 100;
 const MOVE_SPEED = 6.0;
 const JUMP_IMPULSE_VY = 9.0;
+const MAX_JUMPS = 2;
+
+const INITIAL_MONSTER_COUNT = 6;
 
 const BULLET_SPEED = 14.0;
 const BULLET_UP_ARC = 2.0;
@@ -217,6 +220,7 @@ export async function setupGame2D(
   window.addEventListener("mousedown", onMouseDown);
 
   let prevJumpHeld = false;
+  let jumpsUsed = 0;
 
   function onFrame() {
     const left = heldKeys.has("KeyA") || heldKeys.has("ArrowLeft");
@@ -227,10 +231,13 @@ export async function setupGame2D(
     if (left && !right) { vx = -MOVE_SPEED; facing = -1; }
     else if (right && !left) { vx = MOVE_SPEED; facing = 1; }
 
-    // Edge-detected, grounded-gated jump — the same shape as the 3D player
-    // controller's jump budget, just computed here instead of in Rust.
-    const jumpEdge = jumpHeld && !prevJumpHeld && grounded;
+    // Landing refills the jump budget; edge-detected so holding Space through
+    // a landing doesn't re-trigger. Airborne presses spend the budget instead
+    // of being gated on `grounded`, which is what gives the second jump.
+    if (grounded) jumpsUsed = 0;
+    const jumpEdge = jumpHeld && !prevJumpHeld && jumpsUsed < MAX_JUMPS;
     prevJumpHeld = jumpHeld;
+    if (jumpEdge) jumpsUsed++;
 
     engine.set_entity_velocity(playerEid, vx, jumpEdge ? JUMP_IMPULSE_VY : 0, 0);
 
@@ -276,6 +283,8 @@ export async function setupGame2D(
   }
 
   function onRemoteEntityHit(_eid: number) {}
+
+  await spawnMonsters(INITIAL_MONSTER_COUNT);
 
   function cleanup() {
     window.removeEventListener("keydown", onKeyDown);
