@@ -117,6 +117,37 @@ impl Default for AiConfig {
     }
 }
 
+/// Per-monster override of the subset of `AiConfig` that's safe to vary
+/// against a navmesh built for one canonical capability. `jump_speed` and
+/// `max_jumps` are deliberately NOT here and stay engine-global (`AiConfig`)
+/// — the navmesh's edges are computed once assuming one jump impulse/budget,
+/// so a monster with a weaker jump than the mesh assumed could get routed
+/// onto a gap it can't actually clear (see ADR 0006/0008 for the class of
+/// bug that already caused). `walk_speed` never changes which edges are
+/// reachable, only how fast a monster crosses them — always safe to vary.
+/// `can_jump: false` is safe in that direction too: `find_path`'s existing
+/// `can_jump` argument already routes around jump edges entirely, so a
+/// monster given this never gets offered a path it can't walk.
+/// `can_fly` sidesteps the whole question: a flying monster skips the
+/// navmesh/pathfinding system entirely (see `tick_monster_ai`).
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default)]
+pub struct MonsterCapability {
+    pub walk_speed: f32,
+    pub can_jump: bool,
+    pub can_fly: bool,
+}
+
+impl Default for MonsterCapability {
+    fn default() -> Self {
+        Self {
+            walk_speed: AiConfig::default().walk_speed,
+            can_jump: AiConfig::default().can_jump,
+            can_fly: false,
+        }
+    }
+}
+
 /// Navmesh build tuning: cell resolution and agent traversal capabilities.
 /// Mesh bounds are not configured — they are derived from the loaded floor geometry.
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -546,6 +577,9 @@ pub struct Engine {
     pending_despawns: Vec<u32>,
     // Per-monster AI state — populated when a NET_MONSTER entity is spawned.
     monster_states: HashMap<u32, MonsterState>,
+    // Per-monster capability override (set_monster_capability); absent =
+    // derive from the current AiConfig (see capability_for).
+    monster_capabilities: HashMap<u32, MonsterCapability>,
     // Age counter (in ticks) for each NET_BULLET entity — used for TTL enforcement.
     bullet_ages: HashMap<u32, u32>,
     // Jump impulses latched by set_entity_velocity (non-zero vy) awaiting the next
@@ -629,6 +663,7 @@ impl Engine {
             last_broadcast_time: 0.0,
             pending_despawns: Vec::new(),
             monster_states: HashMap::new(),
+            monster_capabilities: HashMap::new(),
             bullet_ages: HashMap::new(),
             pending_jumps: HashMap::new(),
             goal_x: 0.0,
@@ -680,6 +715,28 @@ impl Engine {
         if let Some(state) = self.monster_states.get_mut(&id) {
             state.goal = None;
         }
+    }
+
+    /// Give one monster its own capability override (walk speed / can-jump /
+    /// can-fly — see `MonsterCapability`'s doc comment for why `jump_speed`
+    /// and `max_jumps` aren't here), overriding the engine-global `AiConfig`
+    /// until cleared. Accepts a partial JS object; missing fields fall back
+    /// to `MonsterCapability::default()` (not to the current `AiConfig`,
+    /// same "missing = static default" convention every other partial
+    /// config in this engine already uses). Invalid input is ignored with a
+    /// warning.
+    pub fn set_monster_capability(&mut self, id: u32, cfg: JsValue) {
+        match serde_wasm_bindgen::from_value(cfg) {
+            Ok(c) => {
+                self.monster_capabilities.insert(id, c);
+            }
+            Err(e) => log::warn!("set_monster_capability: invalid config ignored: {e}"),
+        }
+    }
+
+    /// Revert a monster to the engine-global AiConfig's capability.
+    pub fn clear_monster_capability(&mut self, id: u32) {
+        self.monster_capabilities.remove(&id);
     }
 
     /// Override monster AI tuning. Accepts a partial JS object; missing fields fall
@@ -1287,6 +1344,7 @@ impl Engine {
         self.physics.remove_entity(id);
         self.local_entities.retain(|&e| e != id);
         self.monster_states.remove(&id);
+        self.monster_capabilities.remove(&id);
         self.bullet_ages.remove(&id);
         self.non_walkable_terrain.remove(&id);
         self.pending_jumps.remove(&id);
@@ -1875,11 +1933,18 @@ impl Engine {
     /// None only when nobody is playing yet: no local player registered, no
     /// peers connected.
     fn closest_player_position(&self, x: f32, z: f32) -> Option<(f32, f32)> {
-        let mut best: Option<(f32, f32, f32)> = None; // (dist_sq, px, pz)
+        self.closest_player_position_3d(x, z).map(|(px, _, pz)| (px, pz))
+    }
+
+    /// Same search as `closest_player_position`, also returning the
+    /// player's real Y — needed by flying monsters, which (unlike grounded
+    /// ones) actually close vertical distance to their goal.
+    fn closest_player_position_3d(&self, x: f32, z: f32) -> Option<(f32, f32, f32)> {
+        let mut best: Option<(f32, f32, f32, f32)> = None; // (dist_sq, px, py, pz)
 
         if let Some(player) = &self.player {
-            if let Some([px, _, pz]) = self.world.position(player.eid) {
-                best = Some(((px - x) * (px - x) + (pz - z) * (pz - z), px, pz));
+            if let Some([px, py, pz]) = self.world.position(player.eid) {
+                best = Some(((px - x) * (px - x) + (pz - z) * (pz - z), px, py, pz));
             }
         }
 
@@ -1887,16 +1952,28 @@ impl Engine {
             if flags & (NET_BULLET | NET_MONSTER) != 0 {
                 continue;
             }
-            let Some([px, _, pz]) = self.world.position(mirror) else {
+            let Some([px, py, pz]) = self.world.position(mirror) else {
                 continue;
             };
             let dist_sq = (px - x) * (px - x) + (pz - z) * (pz - z);
             if best.is_none_or(|(best_dist, ..)| dist_sq < best_dist) {
-                best = Some((dist_sq, px, pz));
+                best = Some((dist_sq, px, py, pz));
             }
         }
 
-        best.map(|(_, px, pz)| (px, pz))
+        best.map(|(_, px, py, pz)| (px, py, pz))
+    }
+
+    /// The effective capability for one monster: its override
+    /// (`set_monster_capability`) if any, else derived from the current
+    /// `AiConfig` — read fresh each call, so a later `set_ai_config` still
+    /// affects monsters with no explicit override.
+    fn capability_for(&self, mid: u32) -> MonsterCapability {
+        self.monster_capabilities.get(&mid).copied().unwrap_or(MonsterCapability {
+            walk_speed: self.ai.walk_speed,
+            can_jump: self.ai.can_jump,
+            can_fly: false,
+        })
     }
 
     /// The goal one monster paths toward: its per-entity override; else
@@ -1949,6 +2026,51 @@ impl Engine {
                     Some(p) => p,
                     None => continue,
                 };
+                let capability = this.capability_for(mid);
+
+                // Flying skips the navmesh/pathfinding system entirely — no
+                // waypoints, just steer straight at the goal's real 3D
+                // position (unlike grounded movers, which only ever care
+                // about X/Z). Physically well-defined with zero physics
+                // changes: writing a fresh nonzero Y every tick is already a
+                // sustained "set velocity.y to exactly this" command, not a
+                // one-shot jump impulse — see crates/physics's
+                // nonzero_ecs_velocity_y_is_a_one_frame_jump_impulse /
+                // zero_ecs_velocity_y_preserves_gravity_accumulation tests.
+                if capability.can_fly {
+                    // Goal precedence mirrors goal_for, but duplicated rather
+                    // than shared — goal_for is grounded-only (X/Z), used by
+                    // well-tested code this shouldn't risk touching, and a
+                    // flying monster additionally needs a sensible altitude
+                    // when the goal has none of its own (hold current Y).
+                    let (goal_x, goal_y, goal_z) = if let Some(g) =
+                        this.monster_states.get(&mid).and_then(|s| s.goal)
+                    {
+                        (g[0], my, g[1])
+                    } else if let Some((px, py, pz)) = this.closest_player_position_3d(mx, mz) {
+                        (px, py, pz)
+                    } else {
+                        (this.goal_x, my, this.goal_z)
+                    };
+                    let dx = goal_x - mx;
+                    let dy = goal_y - my;
+                    let dz = goal_z - mz;
+                    let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                    if dist < GOAL_REACHED_EPSILON {
+                        this.world.set_velocity(mid, [0.0, 0.0, 0.0]);
+                        continue;
+                    }
+                    let speed = capability.walk_speed;
+                    let (vx, vy, vz) = (dx / dist * speed, dy / dist * speed, dz / dist * speed);
+                    if !is_2d {
+                        let yaw = vx.atan2(vz);
+                        this.world.set_rotation(mid, [yaw, 0.0, 0.0]);
+                        this.world.mark_dirty(mid, DirtyFlags::TRANSFORM);
+                    }
+                    this.world.set_velocity(mid, [vx, vy, vz]);
+                    continue;
+                }
+
                 let grounded = this.world.is_grounded(mid).unwrap_or(false);
                 // A subsequent jump in a multi-jump sequence times off this —
                 // see follow_waypoints' doc comment.

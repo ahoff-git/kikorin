@@ -38,6 +38,13 @@ export class Engine {
         wasm.engine_build_navmesh_2d(this.__wbg_ptr, walk_speed, jump_speed, max_jumps);
     }
     /**
+     * Revert a monster to the engine-global AiConfig's capability.
+     * @param {number} id
+     */
+    clear_monster_capability(id) {
+        wasm.engine_clear_monster_capability(this.__wbg_ptr, id);
+    }
+    /**
      * Revert a monster to the default goal.
      * @param {number} id
      */
@@ -222,6 +229,21 @@ export class Engine {
      */
     set_log_level(_level) {
         wasm.engine_set_log_level(this.__wbg_ptr, _level);
+    }
+    /**
+     * Give one monster its own capability override (walk speed / can-jump /
+     * can-fly — see `MonsterCapability`'s doc comment for why `jump_speed`
+     * and `max_jumps` aren't here), overriding the engine-global `AiConfig`
+     * until cleared. Accepts a partial JS object; missing fields fall back
+     * to `MonsterCapability::default()` (not to the current `AiConfig`,
+     * same "missing = static default" convention every other partial
+     * config in this engine already uses). Invalid input is ignored with a
+     * warning.
+     * @param {number} id
+     * @param {any} cfg
+     */
+    set_monster_capability(id, cfg) {
+        wasm.engine_set_monster_capability(this.__wbg_ptr, id, cfg);
     }
     /**
      * Override monster spawn/respawn tuning (partial-object semantics).

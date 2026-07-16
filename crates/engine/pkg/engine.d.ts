@@ -26,6 +26,10 @@ export class Engine {
      */
     build_navmesh_2d(walk_speed: number, jump_speed: number, max_jumps: number): void;
     /**
+     * Revert a monster to the engine-global AiConfig's capability.
+     */
+    clear_monster_capability(id: number): void;
+    /**
      * Revert a monster to the default goal.
      */
     clear_monster_goal(id: number): void;
@@ -119,6 +123,17 @@ export class Engine {
      * Set log verbosity: 0=off, 1=error, 2=warn, 3=info, 4=debug.
      */
     set_log_level(_level: number): void;
+    /**
+     * Give one monster its own capability override (walk speed / can-jump /
+     * can-fly — see `MonsterCapability`'s doc comment for why `jump_speed`
+     * and `max_jumps` aren't here), overriding the engine-global `AiConfig`
+     * until cleared. Accepts a partial JS object; missing fields fall back
+     * to `MonsterCapability::default()` (not to the current `AiConfig`,
+     * same "missing = static default" convention every other partial
+     * config in this engine already uses). Invalid input is ignored with a
+     * warning.
+     */
+    set_monster_capability(id: number, cfg: any): void;
     /**
      * Override monster spawn/respawn tuning (partial-object semantics).
      */
