@@ -20,6 +20,10 @@ Lightweight architecture decision record (ADR) log for kikorin.
 - [0003: 2D monster AI execution reuses 3D's code unmodified, relying on a Z=0 convention](./0003-2d-monster-ai-reuses-3d-code-via-z-zero.md)
 - [0004: Chat "nearby"/group channels are broadcast + client-side filtered, not real awari-scoped routing](./0004-chat-channels-are-broadcast-and-client-filtered.md)
 - [0005: Top-down "pacman style" game reuses the 3D pipeline with zero gravity, not a fourth Dimension](./0005-topdown-game-reuses-3d-pipeline-with-zero-gravity.md)
+- [0006: 3D navmesh walls block lateral movement, not just standing on top](./0006-navmesh-walls-block-lateral-movement.md)
+- [0007: Cross-peer bullet hits reuse existing replication, not a new wire message](./0007-cross-peer-bullet-monster-hits.md)
+- [0008: Monsters get a real jump budget, executed with apex-timed re-triggering](./0008-monster-multi-jump-budget.md)
+- [0009: Room discovery uses the real, shared awari bootstrap service, proxied same-origin](./0009-real-bootstrap-service.md)
 
 ## Open Questions
 

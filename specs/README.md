@@ -21,6 +21,10 @@ Lightweight wiki-style specs for the kikorin project. Start here and branch out 
 - [System-rendering — Three.js render bridge](./system-rendering/README.md)
 - [Util — logging contract](./util/README.md)
 
+## App-level modules (apps/web)
+
+- [Chat framework](./chat/README.md) — multi-channel chat riding the game's own netcode room.
+
 ## Process
 
 - [Decisions](./decisions/README.md) — architecture decision records (ADRs). Check here before re-deriving a design question that's already been settled.
