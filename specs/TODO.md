@@ -6,8 +6,9 @@
 ## Features: 
 - ~~configuration for the 'nearby' channel~~ — **done**: `createChatController`'s `nearbyRadius` is now a per-game construction-time parameter instead of one fixed constant. See [specs/chat/README.md](chat/README.md).
 - ~~docs for the chat stuff~~ — **done**: [specs/chat/README.md](chat/README.md).
-- Work through 8 way paper doll (layered sprite) sprite animations
-  - Should support armor, weapons, multiple attack patterns / animations, etc. 
+- Talk about and create a way to manage 8 way paper doll (layered sprite) sprite animations
+  - Should support armor, weapons, multiple attack patterns / animations, etc.
+  - Should work for all of the rendering modes 
 - add pathing for flying monsters. They don't have to stay at one altitude
 - add an incorporeal flag that lets things run through walls (will need to update pathing for this as well)
 
