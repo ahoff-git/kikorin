@@ -24,6 +24,7 @@ Lightweight architecture decision record (ADR) log for kikorin.
 - [0007: Cross-peer bullet hits reuse existing replication, not a new wire message](./0007-cross-peer-bullet-monster-hits.md)
 - [0008: Monsters get a real jump budget, executed with apex-timed re-triggering](./0008-monster-multi-jump-budget.md)
 - [0009: Room discovery uses the real, shared awari bootstrap service, proxied same-origin](./0009-real-bootstrap-service.md)
+- [0010: Monster type templates via a narrow per-monster capability override](./0010-monster-type-templates.md)
 
 ## Open Questions
 

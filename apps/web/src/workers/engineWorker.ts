@@ -12,7 +12,7 @@
 // The wasm-bindgen bundler-target binary imports its JS bindings under the namespace
 // "./engine_bg.js", which matches the star-import we provide as the instantiation imports.
 
-import type { EngineHandle, PatchBundle, HitPatch, LifecyclePatch, RenderPatch, SemanticPatch, NetPatch, MetricsPatch, TerrainBlockInput, AiConfigInput, NavConfigInput, PlayerConfigInput, PlayerInputState, MonsterConfigInput } from '@kikorin/adapter';
+import type { EngineHandle, PatchBundle, HitPatch, LifecyclePatch, RenderPatch, SemanticPatch, NetPatch, MetricsPatch, TerrainBlockInput, AiConfigInput, NavConfigInput, PlayerConfigInput, PlayerInputState, MonsterConfigInput, MonsterCapabilityInput } from '@kikorin/adapter';
 import { EMPTY_METRICS } from '@kikorin/adapter';
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
@@ -60,6 +60,8 @@ type Req =
   | { type: 'update_monster_goal'; gx: number; gz: number }
   | { type: 'set_monster_goal';    eid: number; gx: number; gz: number }
   | { type: 'clear_monster_goal';  eid: number }
+  | { type: 'set_monster_capability';   eid: number; cfg: MonsterCapabilityInput }
+  | { type: 'clear_monster_capability'; eid: number }
   | { type: 'set_ai_config';       cfg: AiConfigInput }
   | { type: 'set_nav_config';      cfg: NavConfigInput }
   | { type: 'set_player_config';   cfg: PlayerConfigInput }
@@ -242,6 +244,12 @@ addEventListener('message', async (event: MessageEvent<Req>) => {
       break;
     case 'clear_monster_goal':
       engine.clear_monster_goal(msg.eid);
+      break;
+    case 'set_monster_capability':
+      engine.set_monster_capability(msg.eid, msg.cfg);
+      break;
+    case 'clear_monster_capability':
+      engine.clear_monster_capability(msg.eid);
       break;
     case 'set_ai_config':
       engine.set_ai_config(msg.cfg);

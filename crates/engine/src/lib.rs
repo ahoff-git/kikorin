@@ -2112,7 +2112,7 @@ impl Engine {
                             start: [mx, foot_y, mz],
                             goal: [goal_x, 0.0, goal_z],
                             route_seed: None,
-                            can_jump: ai.can_jump,
+                            can_jump: capability.can_jump,
                             start_y: Some(foot_y),
                         });
                         pathfinding_ms += path_timer.elapsed_ms();
@@ -2151,7 +2151,7 @@ impl Engine {
                 // Desired direction stored as velocity; separation adjusts it below.
                 this.world.set_velocity(
                     mid,
-                    [desired_x * ai.walk_speed, vy, desired_z * ai.walk_speed],
+                    [desired_x * capability.walk_speed, vy, desired_z * capability.walk_speed],
                 );
             }
 
@@ -3477,6 +3477,124 @@ mod tests {
             0.0,
             "budget exhausted (max_jumps=2) — must not jump a third time",
         );
+    }
+
+    #[test]
+    fn monster_capability_walk_speed_overrides_the_global_default() {
+        let mut engine = engine_with_flat_floor();
+        let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.monster_capabilities.insert(
+            m,
+            MonsterCapability { walk_speed: 99.0, can_jump: true, can_fly: false },
+        );
+        engine.update_monster_goal(10.0, 0.0);
+
+        engine.tick_monster_ai(0.004);
+
+        let v = engine.world.velocity(m).unwrap();
+        let speed = (v[0] * v[0] + v[2] * v[2]).sqrt();
+        assert!(
+            (speed - 99.0).abs() < 0.01,
+            "override walk_speed must drive the written velocity magnitude, got {v:?}",
+        );
+    }
+
+    #[test]
+    fn monster_capability_can_jump_false_finds_no_path_when_jumping_is_the_only_route() {
+        // Two contiguous platforms forming a single step (height diff 0.6,
+        // within NavConfig defaults' jump_threshold..max_step_up range) —
+        // the only connection between them is a jump-only edge.
+        let mut engine = Engine::new(None, None);
+        engine.load_map_blocks(&[
+            MapBlock {
+                x: 0.0, y: -0.5, z: 0.0, hw: 3.0, hh: 0.5, hd: 3.0,
+                kind: "floor".into(), walkable: true,
+            },
+            MapBlock {
+                x: 6.0, y: 0.3, z: 0.0, hw: 3.0, hh: 0.3, hd: 3.0,
+                kind: "floor".into(), walkable: true,
+            },
+        ]);
+
+        let capable = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        let weak = engine.spawn_box_entity(0.5, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.monster_capabilities.insert(
+            weak,
+            MonsterCapability { walk_speed: engine.ai.walk_speed, can_jump: false, can_fly: false },
+        );
+        engine.update_monster_goal(6.0, 0.0);
+        engine.monster_states.get_mut(&capable).unwrap().replan_cooldown = 0.0;
+        engine.monster_states.get_mut(&weak).unwrap().replan_cooldown = 0.0;
+
+        // At most one A* search runs per tick — two ticks guarantees both
+        // monsters actually get a turn (a denied search keeps its zero
+        // cooldown, so nothing is lost by waiting).
+        engine.tick_monster_ai(0.004);
+        engine.tick_monster_ai(0.004);
+
+        let capable_path = engine.monster_states.get(&capable).unwrap().path.clone();
+        let weak_path = engine.monster_states.get(&weak).unwrap().path.clone();
+        assert!(
+            capable_path.as_ref().is_some_and(|p| p.iter().any(|wp| wp.requires_jump)),
+            "default (can_jump) monster should find a path using the jump, got {capable_path:?}",
+        );
+        assert!(
+            weak_path.is_none(),
+            "can_jump:false monster must find no path when jumping is the only route, got {weak_path:?}",
+        );
+    }
+
+    #[test]
+    fn flying_monster_closes_3d_distance_toward_the_player_including_altitude() {
+        let mut engine = engine_with_flat_floor();
+        let player = engine.spawn_box_entity(6.0, 8.0, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL | NET_REPLICATED);
+        engine.register_player(player);
+
+        let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.monster_capabilities.insert(
+            m,
+            MonsterCapability { walk_speed: 10.0, can_jump: true, can_fly: true },
+        );
+
+        engine.tick_monster_ai(0.004);
+
+        let v = engine.world.velocity(m).unwrap();
+        let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        assert!(
+            (speed - 10.0).abs() < 0.01,
+            "flying speed must match capability.walk_speed, got {v:?}",
+        );
+        assert!(v[1] > 0.0, "flying monster below the player must climb, got {v:?}");
+
+        let expected = [6.0_f32, 7.1, 0.0]; // player (6,8,0) minus monster (0,0.9,0)
+        let norm = (expected[0].powi(2) + expected[1].powi(2) + expected[2].powi(2)).sqrt();
+        for i in 0..3 {
+            assert!(
+                (v[i] / speed - expected[i] / norm).abs() < 0.01,
+                "flight direction should point straight at the player, axis {i}: {v:?}",
+            );
+        }
+        assert!(
+            engine.monster_states.get(&m).unwrap().path.is_none(),
+            "a flying monster must never touch the navmesh/pathfinding system",
+        );
+    }
+
+    #[test]
+    fn destroying_a_monster_clears_its_capability_override_for_a_recycled_id() {
+        let mut engine = engine_with_flat_floor();
+        let a = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.monster_capabilities.insert(
+            a,
+            MonsterCapability { walk_speed: 99.0, can_jump: false, can_fly: true },
+        );
+        engine.destroy_entity(a);
+        assert!(engine.monster_capabilities.get(&a).is_none());
+
+        let b = engine.spawn_box_entity(1.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        let cap = engine.capability_for(b);
+        assert_eq!(cap.walk_speed, engine.ai.walk_speed, "must not inherit a's stale override");
+        assert!(!cap.can_fly, "must not inherit a's stale override");
     }
 
     #[test]

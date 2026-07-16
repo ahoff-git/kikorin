@@ -12,6 +12,7 @@ export type {
   JsTerrainBlock,
   TerrainBlockInput,
   AiConfigInput,
+  MonsterCapabilityInput,
   NavConfigInput,
   PlayerInputState,
   PlayerConfigInput,

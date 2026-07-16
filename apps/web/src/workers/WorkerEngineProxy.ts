@@ -4,7 +4,7 @@
 // remain synchronous from the caller's perspective.
 // The worker drives its own simulation loop — there is no tick() method here.
 
-import type { AiConfigInput, JsTerrainBlock, JsWaypoint, MonsterConfigInput, NavConfigInput, PatchBundle, PlayerConfigInput, PlayerInputState, TerrainBlockInput } from '@kikorin/adapter';
+import type { AiConfigInput, JsTerrainBlock, JsWaypoint, MonsterCapabilityInput, MonsterConfigInput, NavConfigInput, PatchBundle, PlayerConfigInput, PlayerInputState, TerrainBlockInput } from '@kikorin/adapter';
 
 type NetOutItem = { peer: string | null; data: Uint8Array };
 
@@ -189,6 +189,16 @@ export class WorkerEngineProxy {
   /** Revert a monster to the default goal. */
   clear_monster_goal(eid: number): void {
     this.worker.postMessage({ type: 'clear_monster_goal', eid });
+  }
+
+  /** Give one monster its own capability override (walk speed / can-jump / can-fly). Fire-and-forget. */
+  set_monster_capability(eid: number, cfg: MonsterCapabilityInput): void {
+    this.worker.postMessage({ type: 'set_monster_capability', eid, cfg });
+  }
+
+  /** Revert a monster to the engine-global AiConfig's capability. */
+  clear_monster_capability(eid: number): void {
+    this.worker.postMessage({ type: 'clear_monster_capability', eid });
   }
 
   /** Initialise (or reinitialise) WebRTC networking inside the worker. Fire-and-forget. */

@@ -26,6 +26,7 @@ import { KIKORIN_2D_MAP, BLOCK_Z_HALF_DEPTH } from "./kikorin2dMap";
 import { makeEdgedBox, makePersonMesh } from "./meshFactories";
 import { createHeldKeysTracker, suppressContextMenu } from "./inputHelpers";
 import type { OwnershipCallbacks } from "./useNetworking";
+import { createMonsterTemplates, pickMonsterTemplate } from "./monsterTemplates";
 
 // This file is UI + IO only, mirroring kikorin.ts's split for the 3D game —
 // it does NOT use the engine's player controller (register_player only
@@ -68,6 +69,11 @@ const MONSTER_SPAWN_X_SPREAD = 9.0;
 // a mismatch either strands a monster mid-air or needlessly routes around a
 // gap it could actually clear.
 const MONSTER_MAX_JUMPS = 2;
+
+// Matches set_ai_config's walk_speed (MOVE_SPEED) below — see
+// monsterTemplates.ts for why templates scale relative to the caller's own
+// baseline rather than a fixed absolute speed.
+const MONSTER_TEMPLATES = createMonsterTemplates(MOVE_SPEED);
 
 const CAM_Y_OFFSET = 1.0;
 const CAM_Z = 5.0;
@@ -198,7 +204,9 @@ export async function setupGame2D(
         x, MONSTER_SPAWN_Y, 0, MONSTER_HALF, MONSTER_HALF, MONSTER_HALF, MONSTER_HEALTH,
         NET_LOCAL | NET_MONSTER | NET_REPLICATED,
       );
-      upsertObjectByEid(eid, () => makePersonMeshFor(0xcc4444, 0xff8800));
+      const template = pickMonsterTemplate(MONSTER_TEMPLATES);
+      engine.set_monster_capability(eid, template.capability);
+      upsertObjectByEid(eid, () => makePersonMeshFor(template.bodyColor, template.frontColor));
     }
   }
 

@@ -185,6 +185,25 @@ export interface AiConfigInput {
 }
 
 /**
+ * Per-monster capability override (set_monster_capability) — the subset of
+ * AiConfig that's safe to vary per monster against a navmesh built for one
+ * canonical capability. `jump_speed`/`max_jumps` deliberately aren't here —
+ * they stay engine-global (AiConfigInput) so every jumping monster matches
+ * what the navmesh actually assumed; only `walk_speed` (never changes which
+ * edges are reachable), `can_jump` (false just routes around jump edges,
+ * which find_path already supports), and `can_fly` (skips the navmesh
+ * entirely) are safe to vary. Missing fields fall back to
+ * MonsterCapability's own defaults (not to the current AiConfig — same
+ * "missing = static default" convention as every other partial config
+ * here), so pass a fully-specified object rather than a sparse one.
+ */
+export interface MonsterCapabilityInput {
+  walk_speed?: number;
+  can_jump?: boolean;
+  can_fly?: boolean;
+}
+
+/**
  * Navmesh build tuning overrides (cell resolution + agent traversal capabilities).
  * Same partial-object semantics as AiConfigInput. Mesh bounds are not configurable —
  * the engine derives them from the loaded floor geometry.
@@ -277,6 +296,10 @@ export interface EngineHandle {
   set_monster_goal(id: number, gx: number, gz: number): void;
   /** Revert a monster to the default goal. */
   clear_monster_goal(id: number): void;
+  /** Give one monster its own capability override (walk speed / can-jump / can-fly), overriding the engine-global AiConfig until cleared. */
+  set_monster_capability(id: number, cfg: MonsterCapabilityInput): void;
+  /** Revert a monster to the engine-global AiConfig's capability. */
+  clear_monster_capability(id: number): void;
   /**
    * Find a path from (startX, startY, startZ) to (goalX, goalZ).
    * Returns a waypoint array or null if no path exists.

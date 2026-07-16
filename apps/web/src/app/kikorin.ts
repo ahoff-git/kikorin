@@ -28,6 +28,7 @@ import { recordE2EEntitySpawn } from "./e2eMetrics";
 import { makeEdgedBox, makePersonMesh } from "./meshFactories";
 import { createHeldKeysTracker, suppressContextMenu } from "./inputHelpers";
 import type { OwnershipCallbacks } from "./useNetworking";
+import { createMonsterTemplates, pickMonsterTemplate } from "./monsterTemplates";
 
 // This file is UI + IO only: it captures raw input, forwards it to the Rust
 // engine (which owns all movement/combat/spawn rules), and renders what the
@@ -65,6 +66,12 @@ const PERSON_HALF_W = 0.4;
 const PERSON_HALF_H = 0.9;
 const PERSON_HALF_D = 0.4;
 
+// This game never calls set_ai_config, so monsters run on AiConfig::default()
+// — matches its walk_speed exactly, so "agile"/"slow" read as genuinely
+// faster/slower than a plain monster rather than an arbitrary unrelated speed.
+const MONSTER_BASE_WALK_SPEED = 2.5;
+const MONSTER_TEMPLATES = createMonsterTemplates(MONSTER_BASE_WALK_SPEED);
+
 // ---- Three.js mesh factories ----
 
 function makeFloorMesh(hw: number, hh: number, hd: number): Object3D {
@@ -93,10 +100,13 @@ function makeProjectileMesh(): Object3D {
   return mesh;
 }
 
-/** Mesh for an engine-owned local entity, styled by its net-flag profile. */
+/**
+ * Mesh for an engine-owned local entity, styled by its net-flag profile.
+ * NET_MONSTER isn't handled here — the lifecycle handler below styles
+ * monsters per their randomly-assigned template instead.
+ */
 function makeLocalMesh(flags: number): Object3D {
   if (flags & NET_BULLET) return makeProjectileMesh();
-  if (flags & NET_MONSTER) return makePersonMeshFor(0xcc4444, 0xff8800);
   return makePersonMeshFor(0x4488cc, 0xffe082); // the player
 }
 
@@ -162,12 +172,18 @@ export async function setupGame(
   const unsubLifecycle = lifecycleChannel.subscribe(() => {
     for (const l of lifecycleChannel.getSnapshot()) {
       if (l.kind === "spawned") {
-        upsertObjectByEid(l.entity, () => makeLocalMesh(l.flags));
         if (l.flags & NET_MONSTER) {
+          // Pick a type before creating the mesh so its color matches what
+          // set_monster_capability just gave it — also covers respawns,
+          // which emit this same "spawned" event with a fresh entity id.
+          const template = pickMonsterTemplate(MONSTER_TEMPLATES);
+          engine.set_monster_capability(l.entity, template.capability);
+          upsertObjectByEid(l.entity, () => makePersonMeshFor(template.bodyColor, template.frontColor));
           monsterEids.push(l.entity);
           recordE2EEntitySpawn("monster", l.entity);
-        } else if (l.flags & NET_BULLET) {
-          recordE2EEntitySpawn("bullet", l.entity);
+        } else {
+          upsertObjectByEid(l.entity, () => makeLocalMesh(l.flags));
+          if (l.flags & NET_BULLET) recordE2EEntitySpawn("bullet", l.entity);
         }
       } else {
         removeObjectByEid(l.entity, { dispose: true });

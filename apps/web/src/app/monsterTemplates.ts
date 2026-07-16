@@ -1,0 +1,65 @@
+import type { MonsterCapabilityInput } from "@kikorin/adapter";
+
+// Monster-type templates: agile (fast, can jump), slow (grounded, can't
+// jump), flying (bypasses pathfinding entirely, chases in true 3D). These
+// are plain TS presets, not an engine concept — the engine only exposes a
+// generic per-monster capability override (set_monster_capability); naming
+// specific "types" is the game's job, matching how AiConfig/MonsterConfig
+// already work ("the engine ships no game data").
+//
+// walk_speed is scaled relative to the caller's own baseline rather than a
+// fixed absolute number — kikorin's games run at very different scales
+// (3D's default AiConfig walk_speed is 2.5; 2D's kikorin2d.ts configures
+// 6.0), so one hardcoded speed wouldn't read as "agile" in both.
+//
+// jump_speed/max_jumps are deliberately NOT part of a template — see
+// MonsterCapabilityInput's own doc comment (packages/adapter/src/types.ts)
+// for why varying them per monster against one shared navmesh is unsafe.
+
+export type MonsterTemplateName = "agile" | "slow" | "flying";
+
+export type MonsterTemplate = {
+  name: MonsterTemplateName;
+  capability: MonsterCapabilityInput;
+  /** Relative pick weight — see pickMonsterTemplate. */
+  weight: number;
+  bodyColor: number;
+  frontColor: number;
+};
+
+export function createMonsterTemplates(baseWalkSpeed: number): MonsterTemplate[] {
+  return [
+    {
+      name: "agile",
+      weight: 2,
+      capability: { walk_speed: baseWalkSpeed * 1.6, can_jump: true, can_fly: false },
+      bodyColor: 0xffa000,
+      frontColor: 0xffe082,
+    },
+    {
+      name: "slow",
+      weight: 2,
+      capability: { walk_speed: baseWalkSpeed * 0.5, can_jump: false, can_fly: false },
+      bodyColor: 0x6d4c41,
+      frontColor: 0xa1887f,
+    },
+    {
+      name: "flying",
+      weight: 1,
+      capability: { walk_speed: baseWalkSpeed * 1.2, can_jump: true, can_fly: true },
+      bodyColor: 0x8e24aa,
+      frontColor: 0xe1bee7,
+    },
+  ];
+}
+
+/** Weighted random pick — grounded types are more common than flying. */
+export function pickMonsterTemplate(templates: readonly MonsterTemplate[]): MonsterTemplate {
+  const total = templates.reduce((sum, t) => sum + t.weight, 0);
+  let r = Math.random() * total;
+  for (const t of templates) {
+    if (r < t.weight) return t;
+    r -= t.weight;
+  }
+  return templates[templates.length - 1];
+}
