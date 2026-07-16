@@ -1,4 +1,8 @@
+mod ballistic3d;
 mod navmesh2d;
+mod pathing;
+
+use pathing::{HeavyJob, PathingShared, PendingPromotion};
 
 use bincode::{Decode, Encode};
 use ecs::{
@@ -77,6 +81,9 @@ pub struct AiConfig {
     /// When false, monsters route around jump edges (or fail to path).
     pub can_jump: bool,
     pub jump_speed: f32,
+    /// Sprint approach speed for Tier-4 discovered edges — engine-global
+    /// like jump_speed (see ADR 0011).
+    pub sprint_speed: f32,
     /// Jump budget between groundings (2 = double jump) — must match whatever
     /// capability the navmesh was built for (`build_navmesh`'s implicit 1, or
     /// `build_navmesh_2d`'s explicit `max_jumps` argument), the same way
@@ -102,6 +109,7 @@ impl Default for AiConfig {
             walk_speed: 2.5,
             can_jump: true,
             jump_speed: 13.0,
+            sprint_speed: 5.0,
             max_jumps: 1,
             jump_trigger_dist: 2.5,
             jump_cooldown: 0.9,
@@ -135,6 +143,8 @@ impl Default for AiConfig {
 pub struct MonsterCapability {
     pub walk_speed: f32,
     pub can_jump: bool,
+    /// Unlocks `requires_sprint` edges (Tier-4 promotions) — see ADR 0011.
+    pub can_sprint: bool,
     pub can_fly: bool,
 }
 
@@ -143,6 +153,7 @@ impl Default for MonsterCapability {
         Self {
             walk_speed: AiConfig::default().walk_speed,
             can_jump: AiConfig::default().can_jump,
+            can_sprint: false,
             can_fly: false,
         }
     }
@@ -353,13 +364,37 @@ impl Timer {
 
 // --- Per-monster path following state ---
 
+/// What a monster is currently following — the three route shapes the
+/// layered pathfinding system produces (see specs/engine, ADR 0011).
+enum ActiveRoute {
+    /// A route this monster owns (Tier-2 A* or a Tier-3 key plan).
+    Owned { path: Vec<Waypoint>, index: usize },
+    /// A read-only snapshot of another monster's pooled route.
+    Spliced { route: std::rc::Rc<pathing::SharedRoute>, index: usize },
+    /// Shared flow field — no owned waypoints; next hop looked up per tick.
+    Flow { key: pathing::FlowKey },
+}
+
+impl ActiveRoute {
+    fn owned(path: Vec<Waypoint>) -> Self {
+        ActiveRoute::Owned { path, index: 0 }
+    }
+
+    fn last_waypoint(&self) -> Option<&Waypoint> {
+        match self {
+            ActiveRoute::Owned { path, .. } => path.last(),
+            ActiveRoute::Spliced { route, .. } => route.waypoints.last(),
+            ActiveRoute::Flow { .. } => None,
+        }
+    }
+}
+
 struct MonsterState {
-    path: Option<Vec<Waypoint>>,
-    waypoint_index: usize,
+    route: Option<ActiveRoute>,
     replan_cooldown: f32,
     jump_cooldown: f32,
     /// Jumps used since last grounded — mirrors PlayerState::jumps_used.
-    /// Reset in `follow_waypoints` whenever `grounded` is true.
+    /// Reset in `follow_slice` whenever `grounded` is true.
     jumps_used: u32,
     stuck_timer: f32,
     last_sample_x: f32,
@@ -373,8 +408,7 @@ struct MonsterState {
 impl MonsterState {
     fn new(initial_replan_cooldown: f32) -> Self {
         Self {
-            path: None,
-            waypoint_index: 0,
+            route: None,
             replan_cooldown: initial_replan_cooldown,
             jump_cooldown: 0.0,
             jumps_used: 0,
@@ -413,7 +447,7 @@ impl MonsterState {
             if moved < ai.stuck_move_threshold {
                 self.stuck_timer += ai.stuck_sample_interval;
                 if self.stuck_timer >= ai.stuck_escape_after {
-                    self.path = None;
+                    self.route = None;
                     self.replan_cooldown = 0.0;
                     self.stuck_timer = 0.0;
                 }
@@ -426,7 +460,7 @@ impl MonsterState {
 
         self.replan_cooldown = (self.replan_cooldown - dt_secs).max(0.0);
 
-        let path_stale = match self.path.as_ref().and_then(|p| p.last()) {
+        let path_stale = match self.route.as_ref().and_then(|r| r.last_waypoint()) {
             Some(wp) => {
                 ((goal_x - wp.x).powi(2) + (goal_z - wp.z).powi(2)).sqrt() > ai.replan_stale_dist
             }
@@ -441,93 +475,74 @@ impl MonsterState {
         }
     }
 
-    /// Advance past reached waypoints, then return the desired XZ walk
-    /// direction and whether to jump this tick (starting the jump cooldown when
-    /// so). Falls back to the direct goal bearing when the path is exhausted.
+    /// Advance past reached waypoints in `wps` (index is caller-owned so any
+    /// route shape can drive this), then return the desired XZ direction,
+    /// jump/sprint intent, and whether the slice is exhausted — exhaustion
+    /// policy (drop route, zero cooldown) is the caller's, since it differs
+    /// per route shape. Falls back to the direct goal bearing when exhausted.
     ///
-    /// A `requires_jump` waypoint may need more than one jump — the navmesh's
-    /// `jump_reachable` already solves multi-jump gaps assuming each
-    /// subsequent jump is "re-triggered exactly at the previous jump's
-    /// apex" (see `navmesh2d.rs`), so execution mirrors that exact strategy:
-    /// the first jump only fires grounded (as before); every jump after that
-    /// fires only while airborne and only once `vy` has crossed to
-    /// non-positive (the apex has passed), up to `AiConfig::max_jumps`. The
-    /// budget resets whenever the monster is grounded, mirroring
-    /// `PlayerState::jumps_used`.
-    fn follow_waypoints(
+    /// Multi-jump waypoints use apex-timed re-triggering (ADR 0008): first
+    /// jump only when grounded; later jumps only airborne past the apex
+    /// (vy ≤ 0), up to `AiConfig::max_jumps`, budget reset when grounded.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_slice(
         &mut self,
         ai: &AiConfig,
+        wps: &[Waypoint],
+        index: &mut usize,
         mx: f32,
         mz: f32,
         foot_y: f32,
         grounded: bool,
         vy: f32,
         goal_dir: [f32; 2],
-    ) -> (f32, f32, bool) {
+    ) -> (f32, f32, bool, bool, bool) {
         if grounded {
             self.jumps_used = 0;
         }
 
-        let path_len = self.path.as_ref().map_or(0, |p| p.len());
-
-        while self.waypoint_index < path_len {
-            let (wp_x, wp_z, wp_y, req_jump) = {
-                let wp = &self.path.as_ref().unwrap()[self.waypoint_index];
-                (wp.x, wp.z, wp.y, wp.requires_jump)
-            };
-            if (wp_x - mx).hypot(wp_z - mz) >= ai.waypoint_reach {
+        while *index < wps.len() {
+            let wp = &wps[*index];
+            if (wp.x - mx).hypot(wp.z - mz) >= ai.waypoint_reach {
                 break;
             }
-            if req_jump && foot_y < wp_y - ai.jump_height_tolerance {
+            if wp.requires_jump && foot_y < wp.y - ai.jump_height_tolerance {
                 break;
             }
-            self.waypoint_index += 1;
+            *index += 1;
         }
 
-        if self.waypoint_index >= path_len {
-            // A real path fully walked → replan immediately for responsiveness.
-            // A None path (last search FAILED, e.g. unreachable goal) must keep
-            // its cooldown: zeroing it here turns one failed search into a
-            // per-tick storm of full-mesh A* explorations — each failure scans
-            // the whole graph, which is what tanks the tick budget in WASM.
-            if self.path.is_some() && path_len > 0 {
-                self.replan_cooldown = 0.0;
-            }
-            self.path = None;
-            (goal_dir[0], goal_dir[1], false)
-        } else {
-            let (wp_x, wp_z, req_jump) = {
-                let wp = &self.path.as_ref().unwrap()[self.waypoint_index];
-                (wp.x, wp.z, wp.requires_jump)
-            };
-            let wp_dx = wp_x - mx;
-            let wp_dz = wp_z - mz;
-            let wp_dist = (wp_dx * wp_dx + wp_dz * wp_dz).sqrt();
-            let dir_x = if wp_dist > 0.0 { wp_dx / wp_dist } else { goal_dir[0] };
-            let dir_z = if wp_dist > 0.0 { wp_dz / wp_dist } else { goal_dir[1] };
-            let is_first_jump = self.jumps_used == 0;
-            // The first jump of a sequence is throttled by jump_cooldown (as
-            // before, unchanged for a max_jumps=1 monster); a jump beyond the
-            // first is a continuation of the SAME airborne sequence, timed by
-            // the apex crossing instead — jump_cooldown would still be active
-            // at that point (its default 0.9s outlasts a typical jump apex)
-            // and must not block it.
-            let cooldown_ready = !is_first_jump || self.jump_cooldown <= 0.0;
-            let airborne_and_past_apex = !grounded && vy <= 0.0;
-            let can_jump_now = if is_first_jump { grounded } else { airborne_and_past_apex };
-            let wants_jump = req_jump
-                && cooldown_ready
-                && can_jump_now
-                && self.jumps_used < ai.max_jumps
-                && wp_dist < ai.jump_trigger_dist;
-            if wants_jump {
-                if is_first_jump {
-                    self.jump_cooldown = ai.jump_cooldown;
-                }
-                self.jumps_used += 1;
-            }
-            (dir_x, dir_z, wants_jump)
+        if *index >= wps.len() {
+            return (goal_dir[0], goal_dir[1], false, false, true);
         }
+
+        let wp = &wps[*index];
+        let wp_dx = wp.x - mx;
+        let wp_dz = wp.z - mz;
+        let wp_dist = (wp_dx * wp_dx + wp_dz * wp_dz).sqrt();
+        let dir_x = if wp_dist > 0.0 { wp_dx / wp_dist } else { goal_dir[0] };
+        let dir_z = if wp_dist > 0.0 { wp_dz / wp_dist } else { goal_dir[1] };
+        let is_first_jump = self.jumps_used == 0;
+        // First jump throttled by jump_cooldown; later jumps of the same
+        // airborne sequence are apex-timed instead (the cooldown would still
+        // be running and must not block them) — ADR 0008.
+        let cooldown_ready = !is_first_jump || self.jump_cooldown <= 0.0;
+        let airborne_and_past_apex = !grounded && vy <= 0.0;
+        let can_jump_now = if is_first_jump { grounded } else { airborne_and_past_apex };
+        let wants_jump = wp.requires_jump
+            && cooldown_ready
+            && can_jump_now
+            && self.jumps_used < ai.max_jumps
+            && wp_dist < ai.jump_trigger_dist;
+        if wants_jump {
+            if is_first_jump {
+                self.jump_cooldown = ai.jump_cooldown;
+            }
+            self.jumps_used += 1;
+        }
+        // Sprint approach: cross the whole segment toward a sprint waypoint
+        // at sprint speed, or the arc falls short (ADR 0011).
+        (dir_x, dir_z, wants_jump, wp.requires_sprint, false)
     }
 }
 
@@ -545,6 +560,8 @@ pub struct Engine {
     // reachability math all agree.
     gravity: f32,
     navmesh: Option<NavMesh>,
+    // Layered-pathfinding shared state (specs/engine, ADR 0011).
+    pathing: PathingShared,
     delta_tracker: DeltaTracker,
     patch_gen: PatchGenerator,
     // Transport bridge: the game layer (main thread) owns the actual WebRTC
@@ -647,6 +664,7 @@ impl Engine {
             physics: PhysicsWorld::new(gravity, dimension),
             gravity,
             navmesh: None,
+            pathing: PathingShared::new(),
             delta_tracker: DeltaTracker::new(),
             patch_gen: PatchGenerator::new(),
             inbound_net: Vec::new(),
@@ -871,6 +889,10 @@ impl Engine {
         log::debug!("tick {} — dt_secs={:.4}", self.world.tick_count(), dt_secs);
         self.sim_time += dt_secs;
 
+        // 0. Tick-boundary graph mutations: Tier-4 promotions land before
+        // any monster reads the navmesh this tick (ADR 0011).
+        self.flush_promotions();
+
         // 1. Networking inbound: apply queued peer payloads to local mirror
         // entities, greet newly connected peers with a full snapshot (late
         // join), and drop disconnected or silent peers.
@@ -937,6 +959,12 @@ impl Engine {
         }
         self.mark_replication_dirty();
         ai_ms += bullet_timer.elapsed_ms();
+
+        // 3.5. One bounded slice of background pathfinding work (flow-field
+        // builds, key-route tables, Tier-4 discovery) — counted as AI time.
+        let heavy_timer = Timer::new();
+        self.run_heavy_slice();
+        ai_ms += heavy_timer.elapsed_ms();
 
         // 4. Flush outbound deltas + despawns to all peers (plus a keepalive
         // Ping when otherwise silent — see PEER_TIMEOUT_SECS).
@@ -1247,6 +1275,7 @@ impl Engine {
 
         log::debug!("build_navmesh: {} nodes", node_ys.len());
         self.navmesh = Some(mesh);
+        self.pathing.reset_for_new_terrain();
     }
 
     /// Build (or rebuild) a 2D navmesh — the side-view platformer analogue of
@@ -1263,6 +1292,239 @@ impl Engine {
         self.physics.prepare_queries();
         let cap = navmesh2d::MovementCapability2D { walk_speed, jump_speed, max_jumps };
         self.navmesh = navmesh2d::build(&self.world, &self.physics, &self.non_walkable_terrain, &cap, self.gravity);
+        self.pathing.reset_for_new_terrain();
+    }
+
+    /// Apply Tier-4 promotions at the tick boundary — never mid-tick while
+    /// monsters are reading the graph (ADR 0011). Downstream caches rebuild:
+    /// flow fields clear (rebuilt on demand); key-route tables re-enqueue.
+    fn flush_promotions(&mut self) {
+        if self.pathing.promotions.is_empty() {
+            return;
+        }
+        let Some(mesh) = self.navmesh.as_mut() else {
+            self.pathing.promotions.clear();
+            return;
+        };
+        for p in self.pathing.promotions.drain(..) {
+            mesh.upgrade_edge(p.from, p.to, p.cost, p.requires_sprint);
+        }
+        self.pathing.flow_fields.clear();
+        self.pathing.queued_flow.clear();
+        let caps: Vec<pathing::CapKey> = self.pathing.key_routes.keys().copied().collect();
+        self.pathing.key_routes.clear();
+        self.pathing.queued_caps.clear();
+        let keys = self.navmesh.as_ref().expect("checked above").derive_key_nodes();
+        for cap in caps {
+            self.pathing.enqueue_key_routes(cap, keys.clone());
+        }
+    }
+
+    /// One bounded slice of background pathfinding work per tick — the
+    /// "slow tiers compute while fast tiers serve" lane (specs/engine).
+    fn run_heavy_slice(&mut self) {
+        let Some(job) = self.pathing.jobs.pop_front() else {
+            return;
+        };
+        let timer = Timer::new();
+        match job {
+            HeavyJob::BuildFlowField { key } => {
+                if self.navmesh.is_some() {
+                    let field = self
+                        .navmesh
+                        .as_ref()
+                        .expect("checked")
+                        .flow_field_to_node(key.0, key.1, key.2);
+                    self.pathing.insert_flow_field(key, field);
+                } else {
+                    self.pathing.queued_flow.remove(&key);
+                }
+            }
+            HeavyJob::BuildKeyRoutes { cap, keys, mut fields } => {
+                if let Some(mesh) = &self.navmesh {
+                    if fields.len() < keys.len() {
+                        let k = keys[fields.len()];
+                        fields.push(mesh.flow_field_to_node(k, cap.0, cap.1));
+                    }
+                    if fields.len() < keys.len() {
+                        // One field per slice; requeue at the front so the
+                        // build finishes before other jobs interleave.
+                        self.pathing
+                            .jobs
+                            .push_front(HeavyJob::BuildKeyRoutes { cap, keys, fields });
+                    } else {
+                        if let Some(kr) = pathfinding::KeyRoutes::from_parts(keys, fields) {
+                            self.pathing.key_routes.insert(cap, kr);
+                        }
+                        self.pathing.queued_caps.remove(&cap);
+                    }
+                } else {
+                    self.pathing.queued_caps.remove(&cap);
+                }
+            }
+            HeavyJob::DiscoverEdges { cursor } => self.run_discover_slice(cursor),
+        }
+        let elapsed = timer.elapsed_ms();
+        self.pathing.tune_slice(elapsed);
+    }
+
+    /// One slice of the Tier-4 discovery sweep: real ballistic solving over
+    /// candidate node pairs the mesh doesn't already connect, walk-speed
+    /// profile first, sprint second (specs/engine, ADR 0011). Zero-gravity
+    /// engines discover nothing (flight_time is None), by design.
+    fn run_discover_slice(&mut self, mut cursor: usize) {
+        let Some(mesh) = &self.navmesh else {
+            self.pathing.discover_pending = false;
+            return;
+        };
+        let ai = self.ai;
+        let g = self.gravity.abs();
+        let reach = ballistic3d::max_reach(ai.jump_speed, ai.sprint_speed, g);
+        let n = mesh.node_count();
+        let mut budget = self.pathing.slice_units;
+        let mut found: Vec<PendingPromotion> = Vec::new();
+
+        'outer: while cursor < n && budget > 0 {
+            let from_id = cursor as pathfinding::NodeId;
+            let Some(from) = mesh.node_position(from_id) else {
+                cursor += 1;
+                continue;
+            };
+            for cand in mesh.nodes_within(from[0], from[2], reach) {
+                if budget == 0 {
+                    // Mid-node exit: resume at this node next slice (its
+                    // earlier candidates re-check; promotion is idempotent).
+                    break 'outer;
+                }
+                budget -= 1;
+                if cand == from_id || mesh.has_edge(from_id, cand) {
+                    continue;
+                }
+                let Some(to) = mesh.node_position(cand) else { continue };
+                let dist_xz =
+                    ((to[0] - from[0]).powi(2) + (to[2] - from[2]).powi(2)).sqrt();
+                if dist_xz < self.nav.cell_size {
+                    continue;
+                }
+                let dy = to[1] - from[1];
+                // Only genuinely new connections are interesting: a near-flat
+                // pair over continuous, unobstructed ground is already served
+                // by ordinary walking — promoting it would carpet open floors
+                // in fake jump edges (and churn the caches every flush).
+                if dy.abs() <= self.nav.jump_threshold && self.walkable_chord(from, to) {
+                    continue;
+                }
+                for (speed, sprint) in [(ai.walk_speed, false), (ai.sprint_speed, true)] {
+                    let Some(t) = ballistic3d::flight_time(dist_xz, dy, ai.jump_speed, speed, g)
+                    else {
+                        continue;
+                    };
+                    if !self.arc_is_clear(from, to, ai.jump_speed, t, g) {
+                        break; // obstructed for both speeds: same arc endpoints
+                    }
+                    if sprint && !self.runway_is_clear(from, to, ai.sprint_speed) {
+                        break;
+                    }
+                    found.push(PendingPromotion {
+                        from: from_id,
+                        to: cand,
+                        cost: dist_xz + dy.max(0.0) * 0.5,
+                        requires_sprint: sprint,
+                    });
+                    break; // walk-speed success covers sprint too
+                }
+            }
+            cursor += 1;
+        }
+
+        let done = cursor >= n;
+        self.pathing.promotions.extend(found);
+        if done {
+            self.pathing.discover_pending = false;
+        } else {
+            self.pathing.jobs.push_back(HeavyJob::DiscoverEdges { cursor });
+        }
+    }
+
+    /// True when the straight line between two nodes is plainly walkable:
+    /// nothing blocks it at knee height AND the ground beneath it is
+    /// continuous (no void). Gaps, ledges, and wall-vaults all fail one of
+    /// the two probes and stay discoverable.
+    fn walkable_chord(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        const KNEE: f32 = 0.3;
+        let a = [from[0], from[1] + KNEE, from[2]];
+        let b = [to[0], to[1] + KNEE, to[2]];
+        if let Some((eid, _)) = self.physics.cast_ray(a, b) {
+            if self.world.is_floor(eid) {
+                return false;
+            }
+        }
+        for i in 1..=3 {
+            let s = i as f32 / 4.0;
+            let probe = [
+                from[0] + (to[0] - from[0]) * s,
+                from[1].max(to[1]) + 0.5,
+                from[2] + (to[2] - from[2]) * s,
+            ];
+            let grounded = matches!(
+                self.physics.cast_ray(probe, [probe[0], probe[1] - 2.5, probe[2]]),
+                Some((eid, _)) if self.world.is_floor(eid)
+            );
+            if !grounded {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Swept obstruction probe along the jump arc, lifted half a body above
+    /// the surface; only static terrain blocks (a transient dynamic entity
+    /// must not veto a permanent map fact).
+    fn arc_is_clear(&self, from: [f32; 3], to: [f32; 3], launch_vy: f32, t_total: f32, g: f32) -> bool {
+        const LIFT: f32 = 0.5;
+        let pts = ballistic3d::arc_points(
+            [from[0], from[1] + LIFT, from[2]],
+            [to[0], to[1] + LIFT, to[2]],
+            launch_vy,
+            t_total,
+            g,
+            8,
+        );
+        pts.windows(2).all(|w| match self.physics.cast_ray(w[0], w[1]) {
+            Some((eid, _)) => !self.world.is_floor(eid),
+            None => true,
+        })
+    }
+
+    /// A sprint jump needs a clear straight run-up behind the takeoff point
+    /// (half a second at sprint speed), along the takeoff bearing.
+    fn runway_is_clear(&self, from: [f32; 3], to: [f32; 3], sprint_speed: f32) -> bool {
+        const LIFT: f32 = 0.5;
+        let dx = to[0] - from[0];
+        let dz = to[2] - from[2];
+        let len = (dx * dx + dz * dz).sqrt();
+        if len < 1e-6 {
+            return false;
+        }
+        let runway = sprint_speed * 0.5;
+        let start = [
+            from[0] - dx / len * runway,
+            from[1] + LIFT,
+            from[2] - dz / len * runway,
+        ];
+        match self.physics.cast_ray(start, [from[0], from[1] + LIFT, from[2]]) {
+            Some((eid, _)) => !self.world.is_floor(eid),
+            None => true,
+        }
+    }
+
+    /// Reactive-nudge entry point (goal layers, ADR 0011): blend a soft
+    /// influence into a monster's current velocity without replacing its
+    /// path target — the same post-AI pattern monster separation uses.
+    pub fn add_monster_nudge(&mut self, id: u32, nx: f32, ny: f32, nz: f32) {
+        if let Some(v) = self.world.velocity(id) {
+            self.world.set_velocity(id, [v[0] + nx, v[1] + ny, v[2] + nz]);
+        }
     }
 
     /// Mark a floor entity as non-walkable (or clear that) after it's already
@@ -1296,6 +1558,8 @@ impl Engine {
             goal: [goal_x, 0.0, goal_z],
             route_seed: None,
             can_jump,
+            // Manual debug query — sprint edges are for capability-tagged monsters.
+            can_sprint: false,
             start_y: Some(start_y),
         });
 
@@ -1972,6 +2236,7 @@ impl Engine {
         self.monster_capabilities.get(&mid).copied().unwrap_or(MonsterCapability {
             walk_speed: self.ai.walk_speed,
             can_jump: self.ai.can_jump,
+            can_sprint: false,
             can_fly: false,
         })
     }
@@ -2079,7 +2344,17 @@ impl Engine {
                 // monster dimensions are caller-supplied, so read the collider.
                 let foot_y = my - this.world.collider(mid).map_or(0.0, |c| c.half_height);
 
-                let (goal_x, goal_z) = this.goal_for(mid, mx, mz);
+                // Goal + source: the dispatcher needs to know whether this is
+                // the shared player chase (flow-field strategy) or a unique
+                // goal (key-route/A* strategy) — see specs/engine.
+                let (goal_x, goal_z, chasing_player) =
+                    if let Some(g) = this.monster_states.get(&mid).and_then(|s| s.goal) {
+                        (g[0], g[1], false)
+                    } else if let Some((px, pz)) = this.closest_player_position(mx, mz) {
+                        (px, pz, true)
+                    } else {
+                        (this.goal_x, this.goal_z, false)
+                    };
                 let dx = goal_x - mx;
                 let dz = goal_z - mz;
                 let dist = (dx * dx + dz * dz).sqrt();
@@ -2089,7 +2364,76 @@ impl Engine {
                     this.world.set_velocity(mid, [0.0, 0.0, 0.0]);
                     continue;
                 }
+                let goal_dir = [dx / dist, dz / dist];
+                let cap_key = (capability.can_jump, capability.can_sprint);
 
+                // --- Dispatcher: validate, then acquire, a route. ---
+                // A flow route is re-validated against the goal's current
+                // node every tick; any mismatch (goal moved nodes, field
+                // evicted, capability changed) drops it for re-acquisition.
+                let goal_node = if chasing_player {
+                    this.navmesh.as_ref().and_then(|m| m.nearest_walkable(goal_x, goal_z))
+                } else {
+                    None
+                };
+                if let Some(ActiveRoute::Flow { key }) =
+                    this.monster_states.get(&mid).and_then(|s| s.route.as_ref())
+                {
+                    let key = *key;
+                    let valid = chasing_player
+                        && goal_node == Some(key.0)
+                        && (key.1, key.2) == cap_key
+                        && this.pathing.flow_fields.contains_key(&key);
+                    if !valid {
+                        if let Some(s) = this.monster_states.get_mut(&mid) {
+                            s.route = None;
+                        }
+                    }
+                }
+
+                let mut have_route =
+                    this.monster_states.get(&mid).is_some_and(|s| s.route.is_some());
+
+                // Crowd chase rides the shared flow field (O(1) per tick, no
+                // A* token); missing fields build on the heavy queue while
+                // the monster keeps its existing behavior.
+                if !have_route && chasing_player {
+                    if let Some(gn) = goal_node {
+                        let key = (gn, cap_key.0, cap_key.1);
+                        if this.pathing.flow_fields.contains_key(&key) {
+                            if let Some(s) = this.monster_states.get_mut(&mid) {
+                                s.route = Some(ActiveRoute::Flow { key });
+                                have_route = true;
+                            }
+                        } else {
+                            this.pathing.enqueue_flow_field(key);
+                        }
+                    }
+                }
+
+                // Splice onto another monster's pooled route — free, no
+                // search; staleness-guarded inside find_splice.
+                if !have_route {
+                    if let Some((route, index)) = this.pathing.find_splice(
+                        mx,
+                        mz,
+                        [goal_x, goal_z],
+                        ai.waypoint_reach * 2.0,
+                        ai.replan_stale_dist,
+                    ) {
+                        if let Some(s) = this.monster_states.get_mut(&mid) {
+                            s.route = Some(ActiveRoute::Spliced { route, index });
+                        }
+                    }
+                }
+
+                // Flow followers never spend the A* token (the field is
+                // already shortest-path); stuck sampling still runs and drops
+                // the route on a jam.
+                let is_flow = matches!(
+                    this.monster_states.get(&mid).and_then(|s| s.route.as_ref()),
+                    Some(ActiveRoute::Flow { .. })
+                );
                 let should_replan = match this.monster_states.get_mut(&mid) {
                     Some(state) => state.update_stuck_and_replan(
                         &ai,
@@ -2098,43 +2442,140 @@ impl Engine {
                         mz,
                         goal_x,
                         goal_z,
-                        !path_requested_this_tick,
+                        !path_requested_this_tick && !is_flow,
                     ),
                     None => continue,
                 };
 
-                // Navmesh lookup needs &this.navmesh, so it runs outside the state borrow.
                 if should_replan {
-                    path_requested_this_tick = true;
-                    if let Some(navmesh) = &this.navmesh {
-                        let path_timer = Timer::new();
-                        let result = navmesh.find_path(PathRequest {
-                            start: [mx, foot_y, mz],
-                            goal: [goal_x, 0.0, goal_z],
-                            route_seed: None,
-                            can_jump: capability.can_jump,
-                            start_y: Some(foot_y),
-                        });
-                        pathfinding_ms += path_timer.elapsed_ms();
-                        if let Some(s) = this.monster_states.get_mut(&mid) {
-                            s.path = result;
-                            s.waypoint_index = 0;
+                    // Tier 3 first: a baked key plan is zero-search and does
+                    // not consume the A* token. Its own usefulness gate
+                    // rejects short hauls (see KeyRoutes::plan).
+                    let mut planned = false;
+                    if !chasing_player {
+                        if this.pathing.key_routes.contains_key(&cap_key) {
+                            if let (Some(kr), Some(mesh)) =
+                                (this.pathing.key_routes.get(&cap_key), this.navmesh.as_ref())
+                            {
+                                if let Some(plan) = kr.plan(
+                                    mesh,
+                                    [mx, foot_y, mz],
+                                    Some(foot_y),
+                                    [goal_x, 0.0, goal_z],
+                                ) {
+                                    this.pathing.pool_route(plan.waypoints.clone(), [goal_x, goal_z], ai.waypoint_reach * 3.0);
+                                    if let Some(s) = this.monster_states.get_mut(&mid) {
+                                        s.route = Some(ActiveRoute::owned(plan.waypoints));
+                                    }
+                                    planned = true;
+                                }
+                            }
+                        } else if this.navmesh.is_some()
+                            && !this.pathing.queued_caps.contains(&cap_key)
+                        {
+                            let keys = this.navmesh.as_ref().expect("checked").derive_key_nodes();
+                            this.pathing.enqueue_key_routes(cap_key, keys);
+                        }
+                    }
+                    if !planned {
+                        path_requested_this_tick = true;
+                        if let Some(navmesh) = &this.navmesh {
+                            let path_timer = Timer::new();
+                            let result = navmesh.find_path(PathRequest {
+                                start: [mx, foot_y, mz],
+                                goal: [goal_x, 0.0, goal_z],
+                                route_seed: None,
+                                can_jump: capability.can_jump,
+                                can_sprint: capability.can_sprint,
+                                start_y: Some(foot_y),
+                            });
+                            pathfinding_ms += path_timer.elapsed_ms();
+                            if let Some(path) = &result {
+                                this.pathing.pool_route(path.clone(), [goal_x, goal_z], ai.waypoint_reach * 3.0);
+                            }
+                            if let Some(s) = this.monster_states.get_mut(&mid) {
+                                s.route = result.map(ActiveRoute::owned);
+                            }
                         }
                     }
                 }
 
-                let (desired_x, desired_z, wants_jump) = match this.monster_states.get_mut(&mid) {
-                    Some(state) => state.follow_waypoints(
-                        &ai,
-                        mx,
-                        mz,
-                        foot_y,
-                        grounded,
-                        vy,
-                        [dx / dist, dz / dist],
-                    ),
+                // --- Follow the active route. Exhaustion policy is per
+                // shape: a fully-walked owned/spliced route earns an instant
+                // replan (a FAILED search stays None and keeps its cooldown —
+                // zeroing it would turn one bad goal into a per-tick storm of
+                // full-mesh searches); a flow route just fetches a fresh hop
+                // next tick. ---
+                let mut route = match this.monster_states.get_mut(&mid) {
+                    Some(state) => state.route.take(),
                     None => continue,
                 };
+                let mut walked_out = false;
+                let (desired_x, desired_z, wants_jump, wants_sprint) =
+                    match (&mut route, this.monster_states.get_mut(&mid)) {
+                        (Some(ActiveRoute::Owned { path, index }), Some(state)) => {
+                            let (ddx, ddz, jump, sprint, exhausted) = state.follow_slice(
+                                &ai, path, index, mx, mz, foot_y, grounded, vy, goal_dir,
+                            );
+                            walked_out = exhausted;
+                            (ddx, ddz, jump, sprint)
+                        }
+                        (Some(ActiveRoute::Spliced { route: shared, index }), Some(state)) => {
+                            let (ddx, ddz, jump, sprint, exhausted) = state.follow_slice(
+                                &ai,
+                                &shared.waypoints,
+                                index,
+                                mx,
+                                mz,
+                                foot_y,
+                                grounded,
+                                vy,
+                                goal_dir,
+                            );
+                            walked_out = exhausted;
+                            (ddx, ddz, jump, sprint)
+                        }
+                        (Some(ActiveRoute::Flow { key }), Some(state)) => {
+                            let hop_wp = this.pathing.flow_fields.get(key).and_then(|field| {
+                                let mesh = this.navmesh.as_ref()?;
+                                let node = mesh.nearest_walkable_3d(mx, foot_y, mz)?;
+                                let hop = field.next_hop(node)?;
+                                let p = mesh.node_position(hop.to)?;
+                                Some(Waypoint {
+                                    x: p[0],
+                                    y: p[1],
+                                    z: p[2],
+                                    requires_jump: hop.requires_jump,
+                                    requires_sprint: hop.requires_sprint,
+                                    is_ledge_drop: hop.is_ledge_drop,
+                                })
+                            });
+                            match hop_wp {
+                                Some(wp) => {
+                                    let buf = [wp];
+                                    let mut i0 = 0usize;
+                                    let (ddx, ddz, jump, sprint, _) = state.follow_slice(
+                                        &ai, &buf, &mut i0, mx, mz, foot_y, grounded, vy, goal_dir,
+                                    );
+                                    (ddx, ddz, jump, sprint)
+                                }
+                                // At the goal's own node (or briefly off-mesh):
+                                // direct steering covers the last mile.
+                                None => (goal_dir[0], goal_dir[1], false, false),
+                            }
+                        }
+                        (None, Some(_)) => (goal_dir[0], goal_dir[1], false, false),
+                        (_, None) => continue,
+                    };
+                if walked_out {
+                    route = None;
+                    if let Some(s) = this.monster_states.get_mut(&mid) {
+                        s.replan_cooldown = 0.0;
+                    }
+                }
+                if let Some(s) = this.monster_states.get_mut(&mid) {
+                    s.route = route;
+                }
 
                 // Rotation: yaw faces the walk direction. 2D has no yaw
                 // (side view; facing is a sprite flip driven from TS instead)
@@ -2148,11 +2589,14 @@ impl Engine {
                 }
 
                 let vy = if wants_jump { ai.jump_speed } else { 0.0 };
+                // Sprint waypoints are approached at sprint speed (ADR 0011).
+                let speed = if wants_sprint && capability.can_sprint {
+                    ai.sprint_speed
+                } else {
+                    capability.walk_speed
+                };
                 // Desired direction stored as velocity; separation adjusts it below.
-                this.world.set_velocity(
-                    mid,
-                    [desired_x * capability.walk_speed, vy, desired_z * capability.walk_speed],
-                );
+                this.world.set_velocity(mid, [desired_x * speed, vy, desired_z * speed]);
             }
 
             pathfinding_ms
@@ -2737,6 +3181,7 @@ mod tests {
                 goal: [31.0, 0.0, -6.0],
                 route_seed: None,
                 can_jump: true,
+                can_sprint: false,
                 start_y: Some(0.0),
             })
             .expect("east stair should route to the platform");
@@ -2795,6 +3240,7 @@ mod tests {
             goal: [222.0, 0.0, 200.0],
             route_seed: None,
             can_jump: true,
+            can_sprint: false,
             start_y: Some(0.0),
         });
         assert!(
@@ -2824,6 +3270,7 @@ mod tests {
                 goal: [39.9, 0.0, -6.0],
                 route_seed: None,
                 can_jump: true,
+                can_sprint: false,
                 start_y: Some(4.0),
             })
             .expect("goal hugging the east parapet must resolve to a platform node");
@@ -2877,6 +3324,7 @@ mod tests {
             goal: [0.0, 0.0, 5.0],
             route_seed: None,
             can_jump: true,
+            can_sprint: false,
             start_y: Some(0.0),
         });
         assert!(
@@ -3346,6 +3794,7 @@ mod tests {
             y,
             z,
             requires_jump,
+            requires_sprint: false,
             is_ledge_drop: false,
         }
     }
@@ -3354,8 +3803,15 @@ mod tests {
     /// instead of whatever A* produces.
     fn inject_path(engine: &mut Engine, mid: u32, path: Vec<Waypoint>) {
         let state = engine.monster_states.get_mut(&mid).expect("monster state");
-        state.path = Some(path);
-        state.waypoint_index = 0;
+        state.route = Some(ActiveRoute::owned(path));
+    }
+
+    /// The injected/owned route's (path, index) view, for assertions.
+    fn owned_route(engine: &Engine, mid: u32) -> Option<(&[Waypoint], usize)> {
+        match engine.monster_states.get(&mid)?.route.as_ref()? {
+            ActiveRoute::Owned { path, index } => Some((path, *index)),
+            _ => None,
+        }
     }
 
     #[test]
@@ -3396,8 +3852,8 @@ mod tests {
 
         engine.tick_monster_ai(0.004);
 
-        let state = engine.monster_states.get(&m).expect("state");
-        assert_eq!(state.waypoint_index, 1, "first waypoint is within reach → advance");
+        let (_, index) = owned_route(&engine, m).expect("route");
+        assert_eq!(index, 1, "first waypoint is within reach → advance");
         let v = engine.world.velocity(m).expect("velocity");
         assert!(v[0] > 2.0, "must now steer toward the second waypoint (+x), got {v:?}");
     }
@@ -3485,7 +3941,7 @@ mod tests {
         let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
         engine.monster_capabilities.insert(
             m,
-            MonsterCapability { walk_speed: 99.0, can_jump: true, can_fly: false },
+            MonsterCapability { walk_speed: 99.0, can_jump: true, can_sprint: false, can_fly: false },
         );
         engine.update_monster_goal(10.0, 0.0);
 
@@ -3520,7 +3976,7 @@ mod tests {
         let weak = engine.spawn_box_entity(0.5, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
         engine.monster_capabilities.insert(
             weak,
-            MonsterCapability { walk_speed: engine.ai.walk_speed, can_jump: false, can_fly: false },
+            MonsterCapability { walk_speed: engine.ai.walk_speed, can_jump: false, can_sprint: false, can_fly: false },
         );
         engine.update_monster_goal(6.0, 0.0);
         engine.monster_states.get_mut(&capable).unwrap().replan_cooldown = 0.0;
@@ -3532,8 +3988,8 @@ mod tests {
         engine.tick_monster_ai(0.004);
         engine.tick_monster_ai(0.004);
 
-        let capable_path = engine.monster_states.get(&capable).unwrap().path.clone();
-        let weak_path = engine.monster_states.get(&weak).unwrap().path.clone();
+        let capable_path = owned_route(&engine, capable).map(|(p, _)| p.to_vec());
+        let weak_path = owned_route(&engine, weak).map(|(p, _)| p.to_vec());
         assert!(
             capable_path.as_ref().is_some_and(|p| p.iter().any(|wp| wp.requires_jump)),
             "default (can_jump) monster should find a path using the jump, got {capable_path:?}",
@@ -3553,7 +4009,7 @@ mod tests {
         let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
         engine.monster_capabilities.insert(
             m,
-            MonsterCapability { walk_speed: 10.0, can_jump: true, can_fly: true },
+            MonsterCapability { walk_speed: 10.0, can_jump: true, can_sprint: false, can_fly: true },
         );
 
         engine.tick_monster_ai(0.004);
@@ -3575,8 +4031,115 @@ mod tests {
             );
         }
         assert!(
-            engine.monster_states.get(&m).unwrap().path.is_none(),
+            engine.monster_states.get(&m).unwrap().route.is_none(),
             "a flying monster must never touch the navmesh/pathfinding system",
+        );
+    }
+
+    #[test]
+    fn crowd_chasers_adopt_a_shared_flow_field_once_it_builds() {
+        let mut engine = engine_with_flat_floor();
+        let player =
+            engine.spawn_box_entity(10.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL | NET_REPLICATED);
+        engine.register_player(player);
+        let m1 = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        let m2 = engine.spawn_box_entity(-1.0, 0.9, 1.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+
+        // Enough ticks for the heavy queue to finish discovery and build the
+        // shared field; monsters direct-steer meanwhile (never blocked).
+        for _ in 0..600 {
+            engine.tick_core(0.004);
+        }
+
+        for m in [m1, m2] {
+            assert!(
+                matches!(
+                    engine.monster_states.get(&m).and_then(|s| s.route.as_ref()),
+                    Some(ActiveRoute::Flow { .. })
+                ),
+                "chaser {m} must ride the shared flow field once built",
+            );
+            let p = engine.world.position(m).expect("alive");
+            assert!(p[0] > 1.0, "chaser {m} must have progressed toward the player, got {p:?}");
+        }
+        assert_eq!(
+            engine.pathing.flow_fields.len(),
+            1,
+            "one shared field serves every same-goal chaser",
+        );
+    }
+
+    #[test]
+    fn tier4_discovers_a_sprint_only_gap_and_only_sprinters_may_use_it() {
+        // Two islands; nearest cross-gap nodes ~6.0 apart — beyond the
+        // walk-jump reach (~3.25 at defaults) but within sprint reach (~6.5).
+        let mut engine = Engine::new(None, None);
+        engine.load_map_blocks(&[
+            MapBlock {
+                x: -4.0, y: -0.5, z: 0.0, hw: 4.0, hh: 0.5, hd: 4.0,
+                kind: "floor".into(), walkable: true,
+            },
+            MapBlock {
+                x: 7.5, y: -0.5, z: 0.0, hw: 4.0, hh: 0.5, hd: 4.0,
+                kind: "floor".into(), walkable: true,
+            },
+        ]);
+
+        for _ in 0..600 {
+            engine.tick_core(0.004);
+        }
+
+        let mesh = engine.navmesh.as_ref().expect("navmesh");
+        let request = |can_sprint: bool| PathRequest {
+            start: [-4.0, 0.0, 0.0],
+            goal: [7.5, 0.0, 0.0],
+            route_seed: None,
+            can_jump: true,
+            can_sprint,
+            start_y: Some(0.0),
+        };
+        let sprint_path = mesh.find_path(request(true));
+        assert!(
+            sprint_path.as_ref().is_some_and(|p| p.iter().any(|wp| wp.requires_sprint)),
+            "a sprinter must cross via the discovered sprint edge, got {sprint_path:?}",
+        );
+        assert!(
+            mesh.find_path(request(false)).is_none(),
+            "a non-sprinter must never be offered the sprint-only crossing",
+        );
+    }
+
+    #[test]
+    fn a_second_monster_splices_onto_a_pooled_route_without_its_own_search() {
+        let mut engine = engine_with_flat_floor();
+        let a = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        let b = engine.spawn_box_entity(0.5, 0.9, 0.5, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        // A bent long-haul goal (not straight-line) so the route survives
+        // simplify with real length and pools.
+        engine.update_monster_goal(15.0, 8.0);
+        engine.monster_states.get_mut(&a).unwrap().replan_cooldown = 0.0;
+        // b is never granted a search of its own this test.
+        engine.monster_states.get_mut(&b).unwrap().replan_cooldown = 100.0;
+
+        engine.tick_monster_ai(0.004);
+
+        assert!(
+            matches!(
+                engine.monster_states.get(&a).and_then(|s| s.route.as_ref()),
+                Some(ActiveRoute::Owned { .. })
+            ),
+            "a computed and owns the route",
+        );
+        assert!(
+            matches!(
+                engine.monster_states.get(&b).and_then(|s| s.route.as_ref()),
+                Some(ActiveRoute::Spliced { .. })
+            ),
+            "b must ride a's pooled route without a search of its own",
+        );
+        assert!(
+            engine.monster_states.get(&b).unwrap().replan_cooldown > 90.0,
+            "b's cooldown untouched — it truly never searched",
         );
     }
 
@@ -3586,7 +4149,7 @@ mod tests {
         let a = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
         engine.monster_capabilities.insert(
             a,
-            MonsterCapability { walk_speed: 99.0, can_jump: false, can_fly: true },
+            MonsterCapability { walk_speed: 99.0, can_jump: false, can_sprint: false, can_fly: true },
         );
         engine.destroy_entity(a);
         assert!(engine.monster_capabilities.get(&a).is_none());
@@ -3623,7 +4186,8 @@ mod tests {
             "stuck escape must zero the cooldown so a replan happens, got {}",
             state.replan_cooldown,
         );
-        let first = state.path.as_ref().and_then(|p| p.first()).expect("replanned path");
+        let (path, _) = owned_route(&engine, m).expect("replanned path");
+        let first = path.first().expect("non-empty");
         assert_ne!(first.z, 42.0, "the sentinel path must have been replaced by a replan");
     }
 
@@ -4097,6 +4661,7 @@ mod tests {
             goal: [10.0, 0.0, 10.0],
             route_seed: None,
             can_jump: true,
+            can_sprint: false,
             start_y: Some(301.0),
         });
         assert!(path.is_some(), "path must exist on a high-altitude floor");

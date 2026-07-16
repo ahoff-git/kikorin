@@ -2,6 +2,7 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_engine_free: (a: number, b: number) => void;
+export const engine_add_monster_nudge: (a: number, b: number, c: number, d: number, e: number) => void;
 export const engine_build_navmesh: (a: number) => void;
 export const engine_build_navmesh_2d: (a: number, b: number, c: number, d: number) => void;
 export const engine_clear_monster_capability: (a: number, b: number) => void;

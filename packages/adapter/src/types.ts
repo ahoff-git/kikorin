@@ -200,6 +200,8 @@ export interface AiConfigInput {
 export interface MonsterCapabilityInput {
   walk_speed?: number;
   can_jump?: boolean;
+  /** Unlocks Tier-4 discovered sprint-jump routes (see ADR 0011). */
+  can_sprint?: boolean;
   can_fly?: boolean;
 }
 

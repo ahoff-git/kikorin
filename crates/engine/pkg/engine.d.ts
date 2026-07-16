@@ -8,6 +8,12 @@ export class Engine {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * Reactive-nudge entry point (goal layers, ADR 0011): blend a soft
+     * influence into a monster's current velocity without replacing its
+     * path target — the same post-AI pattern monster separation uses.
+     */
+    add_monster_nudge(id: number, nx: number, ny: number, nz: number): void;
+    /**
      * Build (or rebuild) the navmesh by scanning floor geometry via the physics world.
      * Bounds are derived from the loaded floor entities (AABB padded by one cell), so
      * maps of any size and location work without engine changes.

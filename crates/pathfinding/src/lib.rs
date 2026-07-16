@@ -1,3 +1,9 @@
+mod flow;
+mod key_routes;
+
+pub use flow::{FlowField, FlowHop};
+pub use key_routes::{KeyPlan, KeyRoutes};
+
 use pathfinding_crate::prelude::astar;
 use std::collections::HashMap;
 
@@ -9,7 +15,7 @@ const SNAP_RADIUS_CELLS: i32 = 2;
 // A* runs on integer costs; the edge cost and the heuristic must scale by the
 // same factor — if they diverged the heuristic could overestimate and break
 // A*'s shortest-path guarantee.
-const COST_SCALE: f32 = 1000.0;
+pub(crate) const COST_SCALE: f32 = 1000.0;
 
 // Optional per-request cost jitter so monster groups don't single-file: each
 // (node, edge, seed) triple hashes to a deterministic bump of at most this
@@ -32,6 +38,8 @@ pub struct Waypoint {
     pub y: f32,
     pub z: f32,
     pub requires_jump: bool,
+    /// Jump needing a sprint-speed approach — see specs/pathfinding.
+    pub requires_sprint: bool,
     pub is_ledge_drop: bool,
 }
 
@@ -42,27 +50,31 @@ pub struct PathRequest {
     /// When false, edges that require a jump impulse are skipped.
     /// Monsters that cannot jump will route around step-up edges or return None.
     pub can_jump: bool,
+    /// Sprint counterpart of `can_jump` — filters `requires_sprint` edges.
+    pub can_sprint: bool,
     /// Floor Y of the entity at start. When provided, start-node lookup uses
     /// 3D distance so monsters on the ground don't anchor to an elevated platform
     /// overhead that happens to share the same XZ cell.
     pub start_y: Option<f32>,
 }
 
-struct Edge {
-    to: NodeId,
-    cost: f32,
-    requires_jump: bool,
-    is_ledge_drop: bool,
+pub(crate) struct Edge {
+    pub(crate) to: NodeId,
+    pub(crate) cost: f32,
+    pub(crate) requires_jump: bool,
+    /// Set only by `upgrade_edge` — sprint-speed approach required.
+    pub(crate) requires_sprint: bool,
+    pub(crate) is_ledge_drop: bool,
 }
 
 /// NavMesh wrapping the `pathfinding` crate's A* implementation.
 /// Nodes are 3-D world positions; edges carry cost and jump/drop metadata.
 pub struct NavMesh {
-    nodes: Vec<[f32; 3]>,
-    edges: Vec<Vec<Edge>>,
+    pub(crate) nodes: Vec<[f32; 3]>,
+    pub(crate) edges: Vec<Vec<Edge>>,
     // spatial index: bucket (grid_x, grid_z) → Vec<NodeId>
     grid: HashMap<(i32, i32), Vec<NodeId>>,
-    cell_size: f32,
+    pub(crate) cell_size: f32,
 }
 
 impl NavMesh {
@@ -99,9 +111,72 @@ impl NavMesh {
                 to,
                 cost,
                 requires_jump,
+                requires_sprint: false,
                 is_ledge_drop,
             });
         }
+    }
+
+    /// Add or cost-improve a post-construction discovered jump connection
+    /// (Tier-4 promotion). Different capability requirements stay parallel
+    /// edges, never merged — see specs/pathfinding for why.
+    pub fn upgrade_edge(&mut self, from: NodeId, to: NodeId, cost: f32, requires_sprint: bool) {
+        let Some(edges) = self.edges.get_mut(from as usize) else {
+            return;
+        };
+        if let Some(e) = edges
+            .iter_mut()
+            .find(|e| e.to == to && e.requires_sprint == requires_sprint && !e.is_ledge_drop)
+        {
+            e.cost = e.cost.min(cost);
+        } else {
+            edges.push(Edge {
+                to,
+                cost,
+                requires_jump: true,
+                requires_sprint,
+                is_ledge_drop: false,
+            });
+        }
+    }
+
+    /// Whether a direct edge `from → to` already exists — lets a discovery
+    /// pass (Tier 4) skip pairs the mesh already connects.
+    pub fn has_edge(&self, from: NodeId, to: NodeId) -> bool {
+        self.edges
+            .get(from as usize)
+            .is_some_and(|edges| edges.iter().any(|e| e.to == to))
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn node_position(&self, id: NodeId) -> Option<[f32; 3]> {
+        self.nodes.get(id as usize).copied()
+    }
+
+    /// All nodes within `radius` (XZ) of a point, via the grid index —
+    /// bounds a discovery pass's candidate window without an O(V) scan.
+    pub fn nodes_within(&self, x: f32, z: f32, radius: f32) -> Vec<NodeId> {
+        let cells = (radius / self.cell_size).ceil() as i32;
+        let (gx, gz) = self.grid_key(x, z);
+        let r_sq = radius * radius;
+        let mut out = Vec::new();
+        for dx in -cells..=cells {
+            for dz in -cells..=cells {
+                let Some(candidates) = self.grid.get(&(gx + dx, gz + dz)) else {
+                    continue;
+                };
+                for &id in candidates {
+                    let [nx, _, nz] = self.nodes[id as usize];
+                    if (nx - x).powi(2) + (nz - z).powi(2) <= r_sq {
+                        out.push(id);
+                    }
+                }
+            }
+        }
+        out
     }
 
     pub fn nearest_walkable(&self, x: f32, z: f32) -> Option<NodeId> {
@@ -154,12 +229,13 @@ impl NavMesh {
         let goal_node = self.nearest_walkable(req.goal[0], req.goal[2])?;
 
         if start_node == goal_node {
-            return Some(vec![self.node_to_waypoint(goal_node, false, false)]);
+            return Some(vec![self.node_to_waypoint(goal_node, false, false, false)]);
         }
 
         let [gx, gy, gz] = self.nodes[goal_node as usize];
         let seed = req.route_seed;
         let can_jump = req.can_jump;
+        let can_sprint = req.can_sprint;
 
         let result = astar(
             &start_node,
@@ -171,7 +247,7 @@ impl NavMesh {
                 self.edges[n_usize]
                     .iter()
                     .filter_map(|e| {
-                        if !can_jump && e.requires_jump {
+                        if (!can_jump && e.requires_jump) || (!can_sprint && e.requires_sprint) {
                             return None;
                         }
                         let noise = seed.map_or(0.0, |s| {
@@ -197,44 +273,60 @@ impl NavMesh {
         );
 
         let (node_path, _cost) = result?;
-        let waypoints = self.build_waypoints(&node_path);
+        let waypoints = self.build_waypoints(&node_path, can_jump, can_sprint);
         Some(self.simplify(&waypoints))
     }
 
-    fn node_to_waypoint(&self, id: NodeId, requires_jump: bool, is_ledge_drop: bool) -> Waypoint {
+    fn node_to_waypoint(
+        &self,
+        id: NodeId,
+        requires_jump: bool,
+        requires_sprint: bool,
+        is_ledge_drop: bool,
+    ) -> Waypoint {
         let [x, y, z] = self.nodes[id as usize];
         Waypoint {
             x,
             y,
             z,
             requires_jump,
+            requires_sprint,
             is_ledge_drop,
         }
     }
 
-    fn build_waypoints(&self, node_path: &[NodeId]) -> Vec<Waypoint> {
+    /// Metadata lookup is capability-filtered and picks the cheapest
+    /// admissible edge — with parallel edges (see `upgrade_edge`), the
+    /// unfiltered first match could claim a requirement the searcher
+    /// didn't (couldn't) use.
+    fn build_waypoints(&self, node_path: &[NodeId], can_jump: bool, can_sprint: bool) -> Vec<Waypoint> {
         let Some(&first) = node_path.first() else {
             return Vec::new();
         };
 
         let mut waypoints = Vec::with_capacity(node_path.len());
-        waypoints.push(self.node_to_waypoint(first, false, false));
+        waypoints.push(self.node_to_waypoint(first, false, false, false));
 
         for window in node_path.windows(2) {
             let from = window[0];
             let to = window[1];
-            let (jump, ledge) = self.edges[from as usize]
+            let (jump, sprint, ledge) = self.edges[from as usize]
                 .iter()
-                .find(|e| e.to == to)
-                .map(|e| (e.requires_jump, e.is_ledge_drop))
-                .unwrap_or((false, false));
-            waypoints.push(self.node_to_waypoint(to, jump, ledge));
+                .filter(|e| {
+                    e.to == to
+                        && (can_jump || !e.requires_jump)
+                        && (can_sprint || !e.requires_sprint)
+                })
+                .min_by(|a, b| a.cost.total_cmp(&b.cost))
+                .map(|e| (e.requires_jump, e.requires_sprint, e.is_ledge_drop))
+                .unwrap_or((false, false, false));
+            waypoints.push(self.node_to_waypoint(to, jump, sprint, ledge));
         }
         waypoints
     }
 
     /// Remove intermediate waypoints where the 3-D direction doesn't change more than ~23°.
-    fn simplify(&self, waypoints: &[Waypoint]) -> Vec<Waypoint> {
+    pub(crate) fn simplify(&self, waypoints: &[Waypoint]) -> Vec<Waypoint> {
         if waypoints.len() <= 2 {
             return waypoints.to_vec();
         }
@@ -258,7 +350,7 @@ impl NavMesh {
                 let dot = (dir_in[0] / len_in) * (dir_out[0] / len_out)
                     + (dir_in[1] / len_in) * (dir_out[1] / len_out)
                     + (dir_in[2] / len_in) * (dir_out[2] / len_out);
-                dot < cos_threshold || curr.requires_jump || curr.is_ledge_drop
+                dot < cos_threshold || curr.requires_jump || curr.requires_sprint || curr.is_ledge_drop
             };
 
             if keep {
@@ -381,6 +473,7 @@ mod tests {
             goal: [gx, 0.0, gz],
             route_seed: None,
             can_jump: true,
+            can_sprint: false,
             start_y: None,
         });
 
@@ -407,6 +500,7 @@ mod tests {
             goal: [3.5, 0.0, 3.5],
             route_seed: None,
             can_jump: true,
+            can_sprint: false,
             start_y: None,
         });
         assert!(path.is_none(), "expected no path for disconnected graph");
@@ -423,6 +517,7 @@ mod tests {
             goal: [15.5, 0.0, 15.5],
             route_seed: Some(seed),
             can_jump: true,
+            can_sprint: false,
             start_y: None,
         };
 
@@ -454,6 +549,7 @@ mod tests {
                 goal: [4.5, 0.0, 0.5],
                 route_seed: None,
                 can_jump: true,
+                can_sprint: false,
                 start_y: None,
             })
             .expect("straight chain must have a path");
@@ -483,6 +579,7 @@ mod tests {
                 goal: [3.5, 0.0, 0.5],
                 route_seed: None,
                 can_jump: true,
+                can_sprint: false,
                 start_y: None,
             })
             .expect("chain with jump edge must have a path");
@@ -517,6 +614,7 @@ mod tests {
             goal: [2.5, 0.0, 0.5],
             route_seed: None,
             can_jump: true,
+            can_sprint: false,
             start_y: None,
         });
         assert!(
@@ -529,6 +627,7 @@ mod tests {
             goal: [2.5, 0.0, 0.5],
             route_seed: None,
             can_jump: false,
+            can_sprint: false,
             start_y: None,
         });
         assert!(
@@ -551,6 +650,7 @@ mod tests {
                 goal: [1.5, 1.0, 0.5],
                 route_seed: None,
                 can_jump: true,
+                can_sprint: false,
                 start_y: Some(0.0),
             })
             .expect("jump edge should be traversable");
@@ -588,6 +688,7 @@ mod tests {
             goal: [2.5, 0.0, 0.5],
             route_seed: None,
             can_jump: true,
+            can_sprint: false,
             start_y: Some(0.0),
         });
         assert!(

@@ -6,6 +6,13 @@
 ## Features: 
 - ~~configuration for the 'nearby' channel~~ — **done**: `createChatController`'s `nearbyRadius` is now a per-game construction-time parameter instead of one fixed constant. See [specs/chat/README.md](chat/README.md).
 - ~~docs for the chat stuff~~ — **done**: [specs/chat/README.md](chat/README.md).
+- Work through 8 way paper doll (layered sprite) sprite animations
+  - Should support armor, weapons, multiple attack patterns / animations, etc. 
+- add pathing for flying monsters. They don't have to stay at one altitude
+- add an incorporeal flag that lets things run through walls (will need to update pathing for this as well)
 
 ## Questions: 
 - ~~Is the bootstrap service using https://awari-bootstrap-service.vercel.app/ or something else entirely?~~ — **answered and fixed**: it wasn't (a purely local, in-memory stand-in). Now switched to the real service, proxied through this app's own `/api/bootstrap(/hints)` routes (the live service sends no CORS headers, so a browser can't call it directly). Verified against the live service with two real browser tabs. See [ADR 0009](decisions/0009-real-bootstrap-service.md).
+
+## Chores: 
+- Clean up crossed out (done) stuff in the todo. 

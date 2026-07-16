@@ -13,6 +13,18 @@ export class Engine {
         wasm.__wbg_engine_free(ptr, 0);
     }
     /**
+     * Reactive-nudge entry point (goal layers, ADR 0011): blend a soft
+     * influence into a monster's current velocity without replacing its
+     * path target — the same post-AI pattern monster separation uses.
+     * @param {number} id
+     * @param {number} nx
+     * @param {number} ny
+     * @param {number} nz
+     */
+    add_monster_nudge(id, nx, ny, nz) {
+        wasm.engine_add_monster_nudge(this.__wbg_ptr, id, nx, ny, nz);
+    }
+    /**
      * Build (or rebuild) the navmesh by scanning floor geometry via the physics world.
      * Bounds are derived from the loaded floor entities (AABB padded by one cell), so
      * maps of any size and location work without engine changes.
