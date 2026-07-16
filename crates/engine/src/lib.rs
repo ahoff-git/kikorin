@@ -42,6 +42,12 @@ const REPLAN_STAGGER_BUCKETS: u32 = 30;
 const JUMP_FRAME_VY_THRESHOLD: f32 = 0.1;
 // Terrain layers scanned per navmesh column before giving up (stacked platforms).
 const MAX_TERRAIN_LAYERS_PER_COLUMN: usize = 8;
+// Height above the taller of two candidate navmesh nodes at which the lateral
+// wall-obstruction probe (see `horizontally_blocked`) is cast. Above either
+// node's own walkable surface (so a legitimate step-up/stair edge, whose
+// riser tops out at the tread's own height, is never mistaken for a wall)
+// but well below any standing wall's top.
+const WALL_PROBE_CLEARANCE: f32 = 0.15;
 
 // The WebRTC transport has no disconnect callback, so liveness is inferred from
 // traffic: a peer silent for longer than this (sim time) is dropped and its
@@ -71,6 +77,13 @@ pub struct AiConfig {
     /// When false, monsters route around jump edges (or fail to path).
     pub can_jump: bool,
     pub jump_speed: f32,
+    /// Jump budget between groundings (2 = double jump) — must match whatever
+    /// capability the navmesh was built for (`build_navmesh`'s implicit 1, or
+    /// `build_navmesh_2d`'s explicit `max_jumps` argument), the same way
+    /// PlayerConfig::max_jumps must match the player's own jump capability.
+    /// A mismatch either strands a monster mid-air (mesh assumes more jumps
+    /// than this grants) or needlessly routes around gaps it could clear.
+    pub max_jumps: u32,
     pub jump_trigger_dist: f32,
     pub jump_cooldown: f32,
     pub jump_height_tolerance: f32,
@@ -89,6 +102,7 @@ impl Default for AiConfig {
             walk_speed: 2.5,
             can_jump: true,
             jump_speed: 13.0,
+            max_jumps: 1,
             jump_trigger_dist: 2.5,
             jump_cooldown: 0.9,
             jump_height_tolerance: 0.5,
@@ -313,6 +327,9 @@ struct MonsterState {
     waypoint_index: usize,
     replan_cooldown: f32,
     jump_cooldown: f32,
+    /// Jumps used since last grounded — mirrors PlayerState::jumps_used.
+    /// Reset in `follow_waypoints` whenever `grounded` is true.
+    jumps_used: u32,
     stuck_timer: f32,
     last_sample_x: f32,
     last_sample_z: f32,
@@ -329,6 +346,7 @@ impl MonsterState {
             waypoint_index: 0,
             replan_cooldown: initial_replan_cooldown,
             jump_cooldown: 0.0,
+            jumps_used: 0,
             stuck_timer: 0.0,
             last_sample_x: f32::INFINITY,
             last_sample_z: f32::INFINITY,
@@ -395,6 +413,16 @@ impl MonsterState {
     /// Advance past reached waypoints, then return the desired XZ walk
     /// direction and whether to jump this tick (starting the jump cooldown when
     /// so). Falls back to the direct goal bearing when the path is exhausted.
+    ///
+    /// A `requires_jump` waypoint may need more than one jump — the navmesh's
+    /// `jump_reachable` already solves multi-jump gaps assuming each
+    /// subsequent jump is "re-triggered exactly at the previous jump's
+    /// apex" (see `navmesh2d.rs`), so execution mirrors that exact strategy:
+    /// the first jump only fires grounded (as before); every jump after that
+    /// fires only while airborne and only once `vy` has crossed to
+    /// non-positive (the apex has passed), up to `AiConfig::max_jumps`. The
+    /// budget resets whenever the monster is grounded, mirroring
+    /// `PlayerState::jumps_used`.
     fn follow_waypoints(
         &mut self,
         ai: &AiConfig,
@@ -402,8 +430,13 @@ impl MonsterState {
         mz: f32,
         foot_y: f32,
         grounded: bool,
+        vy: f32,
         goal_dir: [f32; 2],
     ) -> (f32, f32, bool) {
+        if grounded {
+            self.jumps_used = 0;
+        }
+
         let path_len = self.path.as_ref().map_or(0, |p| p.len());
 
         while self.waypoint_index < path_len {
@@ -441,12 +474,26 @@ impl MonsterState {
             let wp_dist = (wp_dx * wp_dx + wp_dz * wp_dz).sqrt();
             let dir_x = if wp_dist > 0.0 { wp_dx / wp_dist } else { goal_dir[0] };
             let dir_z = if wp_dist > 0.0 { wp_dz / wp_dist } else { goal_dir[1] };
+            let is_first_jump = self.jumps_used == 0;
+            // The first jump of a sequence is throttled by jump_cooldown (as
+            // before, unchanged for a max_jumps=1 monster); a jump beyond the
+            // first is a continuation of the SAME airborne sequence, timed by
+            // the apex crossing instead — jump_cooldown would still be active
+            // at that point (its default 0.9s outlasts a typical jump apex)
+            // and must not block it.
+            let cooldown_ready = !is_first_jump || self.jump_cooldown <= 0.0;
+            let airborne_and_past_apex = !grounded && vy <= 0.0;
+            let can_jump_now = if is_first_jump { grounded } else { airborne_and_past_apex };
             let wants_jump = req_jump
-                && self.jump_cooldown <= 0.0
-                && grounded
+                && cooldown_ready
+                && can_jump_now
+                && self.jumps_used < ai.max_jumps
                 && wp_dist < ai.jump_trigger_dist;
             if wants_jump {
-                self.jump_cooldown = ai.jump_cooldown;
+                if is_first_jump {
+                    self.jump_cooldown = ai.jump_cooldown;
+                }
+                self.jumps_used += 1;
             }
             (dir_x, dir_z, wants_jump)
         }
@@ -530,6 +577,7 @@ pub struct Engine {
     scratch_ids: Vec<u32>,
     scratch_positions: Vec<[f32; 3]>,
     scratch_snapshots: Vec<(u32, [f32; 3])>,
+    scratch_mirror_bullets: Vec<(u32, [f32; 3])>,
 }
 
 #[wasm_bindgen]
@@ -596,6 +644,7 @@ impl Engine {
             scratch_ids: Vec::new(),
             scratch_positions: Vec::new(),
             scratch_snapshots: Vec::new(),
+            scratch_mirror_bullets: Vec::new(),
         }
     }
 
@@ -1066,6 +1115,8 @@ impl Engine {
                     None => continue,
                 };
                 let from_y = node_ys[from_id as usize];
+                let from_x = min_x + (col as f32 + 0.5) * cell_size;
+                let from_z = min_z + (row as f32 + 0.5) * cell_size;
 
                 for &(dirs, base_cost) in dir_sets {
                     for &(dc, dr) in dirs {
@@ -1078,7 +1129,14 @@ impl Engine {
                             Some(id) => id,
                             None => continue,
                         };
-                        let height_diff = node_ys[to_id as usize] - from_y;
+                        let to_y = node_ys[to_id as usize];
+                        let height_diff = to_y - from_y;
+
+                        let to_x = min_x + (nc as f32 + 0.5) * cell_size;
+                        let to_z = min_z + (nr as f32 + 0.5) * cell_size;
+                        if self.horizontally_blocked([from_x, from_y, from_z], [to_x, to_y, to_z]) {
+                            continue;
+                        }
 
                         if dc != 0 && dr != 0 {
                             let side_col_id = match node_grid[row * cols + nc as usize] {
@@ -1489,22 +1547,31 @@ impl Engine {
     }
 
     /// Height of the topmost WALKABLE floor surface at (x, z), for navmesh node
-    /// placement. Unlike physics.floor_height_at, this skips non-walkable terrain
-    /// (walls) and non-floor entities, continuing the scan below them — so a cell
-    /// whose column passes through a parapet top gets its node on the platform
-    /// underneath instead of an unreachable node on the wall.
+    /// placement. Unlike physics.floor_height_at, this skips non-floor entities
+    /// (e.g. a dynamic entity transiently occupying the column), continuing the
+    /// scan below them. A non-walkable **floor** entity (a wall or parapet) is
+    /// different: it terminates the scan with no node at all, not a node on
+    /// whatever's underneath it — a wall standing on a walkable floor must not
+    /// get a navmesh node at its own footprint, or `horizontally_blocked` would
+    /// have nothing to disconnect (the node itself would still sit at zero
+    /// height difference from its neighbors, bypassing the wall in two hops
+    /// instead of one). A goal or query landing on the wall's footprint instead
+    /// falls back to the nearest real node via `nearest_walkable`'s snap radius.
     /// The scan window (`scan_top` → `scan_bottom`) is derived by the caller from
     /// the loaded floor geometry — never hardcoded, so maps at any altitude work.
     fn walkable_height_at(&self, x: f32, z: f32, scan_top: f32, scan_bottom: f32) -> Option<f32> {
         let mut from_y = scan_top;
         for _ in 0..MAX_TERRAIN_LAYERS_PER_COLUMN {
             let (eid, toi) = self.physics.cast_ray([x, from_y, z], [x, scan_bottom, z])?;
-            let hit_y = from_y - toi;
-            if self.world.is_floor(eid) && !self.non_walkable_terrain.contains(&eid) {
-                return Some(hit_y);
+            if self.world.is_floor(eid) {
+                if self.non_walkable_terrain.contains(&eid) {
+                    return None;
+                }
+                return Some(from_y - toi);
             }
-            // Resume below the blocking entity's bottom face — resuming just below
-            // its top would start inside the box and re-hit it at toi = 0.
+            // Not floor terrain — resume below the blocking entity's bottom face
+            // (resuming just below its top would start inside the box and re-hit
+            // it at toi = 0).
             let pos = self.world.position(eid)?;
             let col = self.world.collider(eid)?;
             from_y = pos[1] - col.half_height - 0.01;
@@ -1513,6 +1580,27 @@ impl Engine {
             }
         }
         None
+    }
+
+    /// True if a non-walkable ("wall") entity stands laterally between two
+    /// candidate navmesh node positions — i.e. an obstacle a mover can't pass
+    /// *through*. `walkable_height_at` already keeps a node from being placed
+    /// *on* a wall's own footprint, but that alone doesn't stop two nodes on
+    /// either side of a wall thinner than `NavConfig::cell_size` from landing
+    /// as ordinary grid neighbors with zero height difference between them —
+    /// this catches that case.
+    /// Probed once, at `WALL_PROBE_CLEARANCE` above the higher endpoint —
+    /// above either node's own walkable surface (so a step-up/stair edge,
+    /// whose riser tops out at the tread's own height, is never mistaken for
+    /// a wall) but still well below any standing wall's top.
+    fn horizontally_blocked(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        let probe_y = from[1].max(to[1]) + WALL_PROBE_CLEARANCE;
+        let probe_from = [from[0], probe_y, from[2]];
+        let probe_to = [to[0], probe_y, to[2]];
+        matches!(
+            self.physics.cast_ray(probe_from, probe_to),
+            Some((eid, _)) if self.non_walkable_terrain.contains(&eid)
+        )
     }
 
     /// Native-callable core of load_map: spawn each block as a static floor entity and
@@ -1862,6 +1950,9 @@ impl Engine {
                     None => continue,
                 };
                 let grounded = this.world.is_grounded(mid).unwrap_or(false);
+                // A subsequent jump in a multi-jump sequence times off this —
+                // see follow_waypoints' doc comment.
+                let vy = this.world.velocity(mid).map_or(0.0, |v| v[1]);
                 // Foot height anchors navmesh lookups to the correct floor layer;
                 // monster dimensions are caller-supplied, so read the collider.
                 let foot_y = my - this.world.collider(mid).map_or(0.0, |c| c.half_height);
@@ -1917,6 +2008,7 @@ impl Engine {
                         mz,
                         foot_y,
                         grounded,
+                        vy,
                         [dx / dist, dz / dist],
                     ),
                     None => continue,
@@ -2030,13 +2122,23 @@ impl Engine {
     /// are destroyed, hit monsters take PlayerConfig::bullet_damage, and dead
     /// monsters despawn (respawning per MonsterConfig). Returns one HitPatch per
     /// collision and one per expiry (target_eid = None) as UI events.
+    ///
+    /// Also checks every visible **bullet mirror** (another peer's bullet,
+    /// replicated here as a display-only entity with no real net_flags) against
+    /// this engine's own locally-simulated monsters. A monster's health is only
+    /// ever mutated by its owner, so this is what makes a bullet fired by one
+    /// peer able to damage a monster owned by another: the owner is already
+    /// receiving that bullet's replicated position, it just wasn't checking it.
+    /// No new wire message needed — see ADR 0007.
     fn tick_bullets(&mut self, dt_secs: f32) -> Vec<HitPatch> {
         let (hits, spent_bullets, damaged_monsters) = self.with_scratch_ids(|this, bullet_ids| {
             Self::collect_by_flag(&this.world, NET_BULLET, bullet_ids);
+            let any_mirror_bullets = this.mirror_flags.values().any(|&f| f & NET_BULLET != 0);
 
-            // No bullets in flight: skip the monster snapshot scan+alloc entirely. Bullets are
-            // transient, so the common case is zero bullets — most ticks return here.
-            if bullet_ids.is_empty() {
+            // No local bullets in flight and no remote bullets to check against our
+            // own monsters: skip the monster snapshot scan+alloc entirely. This is
+            // the common case for a session with no peers connected yet.
+            if bullet_ids.is_empty() && !any_mirror_bullets {
                 return (Vec::new(), Vec::new(), Vec::new());
             }
 
@@ -2170,6 +2272,39 @@ impl Engine {
                         break;
                     }
                 }
+            }
+
+            // Bullet mirrors (other peers' bullets) vs our own monsters — see
+            // this fn's doc comment. Skipped entirely when nothing qualifies,
+            // so a session with no remote bullet mirrors pays nothing extra.
+            if any_mirror_bullets && !monster_snapshots.is_empty() {
+                let mut mirror_bullets = std::mem::take(&mut this.scratch_mirror_bullets);
+                mirror_bullets.clear();
+                mirror_bullets.extend(
+                    this.mirror_flags
+                        .iter()
+                        .filter(|&(_, &flags)| flags & NET_BULLET != 0)
+                        .filter_map(|(&id, _)| Some((id, this.world.position(id)?))),
+                );
+
+                for &(bid, bpos) in &mirror_bullets {
+                    for &(mid, mpos) in &monster_snapshots {
+                        let dx = bpos[0] - mpos[0];
+                        let dy = bpos[1] - mpos[1];
+                        let dz = bpos[2] - mpos[2];
+                        if dx * dx + dy * dy + dz * dz < BULLET_HIT_RADIUS_SQ {
+                            hits.push(HitPatch {
+                                bullet_eid: bid,
+                                target_eid: Some(mid),
+                            });
+                            spent_bullets.push(bid);
+                            damaged_monsters.push(mid);
+                            break;
+                        }
+                    }
+                }
+
+                this.scratch_mirror_bullets = mirror_bullets;
             }
 
             // Return the buffer so its capacity is reused next tick.
@@ -2577,6 +2712,55 @@ mod tests {
                 "no waypoint may sit on the parapet top (y≈5.6): {wp:?}",
             );
         }
+    }
+
+    #[test]
+    fn full_height_wall_thinner_than_a_cell_still_blocks_lateral_pathing() {
+        // A maze-style partition wall (unlike a parapet) has open, walkable
+        // floor on BOTH sides at the SAME height — the case that originally
+        // slipped through: the wall is thinner (1.0) than NavConfig's default
+        // cell_size (1.5), so its footprint can fall entirely between two
+        // neighboring grid nodes without covering either one's sample point.
+        // Without horizontally_blocked, those two nodes would still connect at
+        // zero height-difference cost, letting monsters walk straight through.
+        let mut engine = Engine::new(None, None);
+        engine.load_map_blocks(&[
+            MapBlock {
+                x: 0.0,
+                y: -0.5,
+                z: 0.0,
+                hw: 10.0,
+                hh: 0.5,
+                hd: 10.0,
+                kind: "floor".into(),
+                walkable: true,
+            },
+            // A wall spanning the full width, no doorway — the two sides
+            // must be entirely disconnected, not just longer to route between.
+            MapBlock {
+                x: 0.0,
+                y: 1.0,
+                z: 0.0,
+                hw: 10.0,
+                hh: 1.0,
+                hd: 0.5,
+                kind: "wall".into(),
+                walkable: false,
+            },
+        ]);
+        let navmesh = engine.navmesh.as_ref().expect("navmesh should be built");
+
+        let path = navmesh.find_path(PathRequest {
+            start: [0.0, 0.0, -5.0],
+            goal: [0.0, 0.0, 5.0],
+            route_seed: None,
+            can_jump: true,
+            start_y: Some(0.0),
+        });
+        assert!(
+            path.is_none(),
+            "a full-width wall must fully disconnect the two sides, got: {path:?}",
+        );
     }
 
     #[test]
@@ -3117,6 +3301,63 @@ mod tests {
     }
 
     #[test]
+    fn monster_with_a_jump_budget_double_jumps_at_the_first_apex_not_before() {
+        // AiConfig::max_jumps must let a monster actually execute a gap the
+        // navmesh solved assuming more than one jump — otherwise the mesh
+        // and the mover disagree and it strands mid-air. See ADR 0008.
+        let mut engine = engine_with_flat_floor();
+        engine.ai.max_jumps = 2;
+        let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.world.set_grounded(m, true);
+        engine.update_monster_goal(2.0, 0.0);
+        inject_path(&mut engine, m, vec![waypoint(2.0, 4.0, 0.0, true)]);
+        // Long enough that neither tick below risks an incidental replan
+        // clobbering the injected path.
+        engine.monster_states.get_mut(&m).unwrap().replan_cooldown = 10.0;
+
+        engine.tick_monster_ai(0.004);
+        assert_eq!(
+            engine.world.velocity(m).unwrap()[1],
+            engine.ai.jump_speed,
+            "grounded + close jump waypoint → first jump",
+        );
+        assert_eq!(engine.monster_states.get(&m).unwrap().jumps_used, 1);
+
+        // Still rising (vy > 0): a second jump this early would overshoot
+        // jump_reachable's apex-chaining assumption — must not fire yet.
+        engine.world.set_grounded(m, false);
+        engine.world.set_velocity(m, [0.0, 5.0, 0.0]);
+        engine.tick_monster_ai(0.004);
+        assert_eq!(
+            engine.world.velocity(m).unwrap()[1],
+            0.0,
+            "still rising past the first jump — must not double-jump early",
+        );
+        assert_eq!(engine.monster_states.get(&m).unwrap().jumps_used, 1);
+
+        // Past the apex (vy <= 0), still airborne, budget remaining → the
+        // second jump fires now, timed to match the reachability solve.
+        engine.world.set_velocity(m, [0.0, -0.5, 0.0]);
+        engine.tick_monster_ai(0.004);
+        assert_eq!(
+            engine.world.velocity(m).unwrap()[1],
+            engine.ai.jump_speed,
+            "past the apex with budget remaining → second jump",
+        );
+        assert_eq!(engine.monster_states.get(&m).unwrap().jumps_used, 2);
+
+        // Budget exhausted: a third attempt (still airborne, past another
+        // apex) must not fire.
+        engine.world.set_velocity(m, [0.0, -0.5, 0.0]);
+        engine.tick_monster_ai(0.004);
+        assert_eq!(
+            engine.world.velocity(m).unwrap()[1],
+            0.0,
+            "budget exhausted (max_jumps=2) — must not jump a third time",
+        );
+    }
+
+    #[test]
     fn stuck_monster_clears_its_path_and_replans() {
         let mut engine = engine_with_flat_floor();
         // Zero walk speed pins the monster in place so the stuck sampler fires;
@@ -3551,6 +3792,44 @@ mod tests {
                 "every mirror must have a live position on B",
             );
         }
+    }
+
+    #[test]
+    fn a_bullet_fired_by_one_peer_damages_a_monster_owned_by_another() {
+        // A owns the monster (real, local, authoritative health); B fires the
+        // bullet (real, local to B). Before mirror-bullet hit detection, A's
+        // tick_bullets only ever checked LOCAL bullets against LOCAL monsters —
+        // B's bullet arrives on A as a display-only mirror with no real
+        // net_flags, invisible to that scan, so the monster never took damage.
+        let mut a = engine_with_flat_floor();
+        let mut b = engine_with_flat_floor();
+
+        let monster = a.spawn_box_entity(
+            5.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100,
+            NET_LOCAL | NET_MONSTER | NET_REPLICATED | NET_LOW_URGENCY,
+        );
+        // B's bullet spawns already overlapping the monster's known position
+        // and holds still (zero velocity) — no aiming logic under test here,
+        // just whether a hit against a mirror ever gets checked at all.
+        b.spawn_bullet(5.0, 0.9, 0.0, 0.0, 0.0, 0.0, NET_REPLICATED | NET_PREDICTABLE);
+
+        a.net_peer_connected("peer-b");
+        b.net_peer_connected("peer-a");
+
+        for _ in 0..5 {
+            b.tick_core(0.004);
+            for (_target, bytes) in b.take_outbound() {
+                a.net_ingest("peer-b", &bytes);
+            }
+            a.tick_core(0.004);
+            a.take_outbound();
+        }
+
+        assert_eq!(
+            a.world.health(monster),
+            Some(100 - a.player_cfg.bullet_damage),
+            "the monster's owner must apply damage from a bullet it only sees as a mirror",
+        );
     }
 
     #[test]

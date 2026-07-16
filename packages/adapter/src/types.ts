@@ -168,6 +168,10 @@ export type TerrainBlockInput = Omit<JsTerrainBlock, 'eid'> & {
 export interface AiConfigInput {
   walk_speed?: number;
   jump_speed?: number;
+  /** Jump budget between groundings (2 = double jump) — must match whatever
+   * capability the navmesh was built for (build_navmesh's implicit 1, or
+   * build_navmesh_2d's max_jumps argument). */
+  max_jumps?: number;
   jump_trigger_dist?: number;
   jump_cooldown?: number;
   jump_height_tolerance?: number;

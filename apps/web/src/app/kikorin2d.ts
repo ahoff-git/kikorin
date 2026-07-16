@@ -60,14 +60,14 @@ const MONSTER_HALF = 0.4;
 const MONSTER_HEALTH = 30;
 const MONSTER_SPAWN_Y = 4.0;
 const MONSTER_SPAWN_X_SPREAD = 9.0;
-// Monsters currently get only one jump per waypoint trigger — MonsterState
-// (crates/engine/src/lib.rs) has no multi-jump budget the way PlayerState
-// does (see specs/engine/README.md's PlayerConfig.max_jumps note), so the navmesh
-// must be built assuming single-jump reach even though the player can
-// double-jump. Monsters will route around anything that needs a second
-// jump rather than get stuck mid-air attempting it. Giving monsters a real
-// jump budget is a natural follow-up, not done here.
-const MONSTER_MAX_JUMPS = 1;
+// Monsters can double-jump too, matching the player's own budget — MonsterState
+// (crates/engine/src/lib.rs) times the second jump off the first one's apex,
+// the same "re-triggered exactly at the apex" strategy the navmesh's
+// reachability solve assumes (see ADR 0008). Must match set_ai_config's
+// max_jumps below, and both must match what build_navmesh_2d was built for —
+// a mismatch either strands a monster mid-air or needlessly routes around a
+// gap it could actually clear.
+const MONSTER_MAX_JUMPS = 2;
 
 const CAM_Y_OFFSET = 1.0;
 const CAM_Z = 5.0;
@@ -114,12 +114,17 @@ export async function setupGame2D(
   // pathfinding) — so this must match set_ai_config below, not the player's
   // own (higher) jump budget.
   await engine.build_navmesh_2d(MOVE_SPEED, JUMP_IMPULSE_VY, MONSTER_MAX_JUMPS);
-  // Monster AI tuning: walk/jump speed must match the capability the
-  // navmesh above was built for. The rest of AiConfig's defaults (waypoint
-  // reach, replan timing, stuck detection, separation radius) are tuned for
-  // 3D's world scale but close enough in magnitude to 2D's that they're left
-  // as-is for now — revisit after playtesting if monsters feel off.
-  engine.set_ai_config({ walk_speed: MOVE_SPEED, jump_speed: JUMP_IMPULSE_VY });
+  // Monster AI tuning: walk/jump speed and max_jumps must match the
+  // capability the navmesh above was built for. The rest of AiConfig's
+  // defaults (waypoint reach, replan timing, stuck detection, separation
+  // radius) are tuned for 3D's world scale but close enough in magnitude to
+  // 2D's that they're left as-is for now — revisit after playtesting if
+  // monsters feel off.
+  engine.set_ai_config({
+    walk_speed: MOVE_SPEED,
+    jump_speed: JUMP_IMPULSE_VY,
+    max_jumps: MONSTER_MAX_JUMPS,
+  });
   // respawn:false — respawn_monster() (crates/engine/src/lib.rs) places the
   // replacement on a 3D ring, which would write a nonzero Z into a 2D
   // entity and break the Z=0 invariant every other monster-AI/hit-detection
