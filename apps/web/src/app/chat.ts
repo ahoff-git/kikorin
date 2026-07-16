@@ -28,7 +28,13 @@ export type ChatMessage = {
 
 const MAX_TEXT_LENGTH = 280;
 export const MAX_CHAT_HISTORY = 200;
-export const NEARBY_RADIUS = 15;
+/**
+ * Fallback "nearby" radius, used only where a game doesn't pass its own —
+ * see `createChatController`'s `nearbyRadius` param. Tuned for the 3D game's
+ * world scale; a smaller game world (2D's side view, the top-down maze)
+ * should pass a smaller radius of its own rather than rely on this.
+ */
+export const DEFAULT_NEARBY_RADIUS = 15;
 const MIN_SEND_INTERVAL_MS = 300;
 
 /** A short, stable, human-scannable stand-in for a full PeerJS id. */
@@ -63,11 +69,15 @@ function distanceSq(a: [number, number, number], b: [number, number, number]): n
 /**
  * Whether a reader with `joinedGroups`/`readerPos` should see `message`.
  * System notices (join/leave) are always visible, regardless of channel.
+ * `nearbyRadius` should match whatever the sender's game passed to
+ * `createChatController` — a mismatch just means one side's notion of
+ * "nearby" is stale, not a crash.
  */
 export function isVisibleTo(
   message: ChatMessage,
   joinedGroups: ReadonlySet<string>,
   readerPos: [number, number, number] | null,
+  nearbyRadius: number = DEFAULT_NEARBY_RADIUS,
 ): boolean {
   if (message.from === "system") return true;
   switch (message.channel.kind) {
@@ -77,7 +87,7 @@ export function isVisibleTo(
       return joinedGroups.has(message.channel.name);
     case "nearby":
       return readerPos !== null && message.pos !== undefined
-        && distanceSq(readerPos, message.pos) <= NEARBY_RADIUS * NEARBY_RADIUS;
+        && distanceSq(readerPos, message.pos) <= nearbyRadius * nearbyRadius;
   }
 }
 
@@ -116,6 +126,11 @@ export type ChatController = {
  * filtered by `isVisibleTo` before reaching `onDeliver`; outgoing messages are
  * sanitized, rate-limited, delivered locally (as `from: "me"`) immediately —
  * the sender never receives its own broadcast back — then published.
+ *
+ * `nearbyRadius` (default `DEFAULT_NEARBY_RADIUS`) should match the calling
+ * game's own world scale — kikorin's three games span very different
+ * distances (3D's sprawling arena vs. 2D's side view vs. the top-down maze),
+ * so one fixed radius can't read as "the same closeness" in all of them.
  */
 export function createChatController(
   transport: ChatTransport,
@@ -123,6 +138,7 @@ export function createChatController(
   onDeliver: (message: ChatMessage) => void,
   getJoinedGroups: () => ReadonlySet<string>,
   getSelfPosition: () => [number, number, number] | null,
+  nearbyRadius: number = DEFAULT_NEARBY_RADIUS,
 ): ChatController {
   let lastSentAt = 0;
 
@@ -130,7 +146,7 @@ export function createChatController(
     if (!isChatPayload(raw.payload)) return;
     const { message } = raw.payload;
     if (message.from === selfPeerId) return;
-    if (isVisibleTo(message, getJoinedGroups(), getSelfPosition())) {
+    if (isVisibleTo(message, getJoinedGroups(), getSelfPosition(), nearbyRadius)) {
       onDeliver(message);
     }
   });

@@ -9,11 +9,18 @@
 //   outbound  proxy.onNetOut           → session.publish({type:"room"}, bytes)
 //   presence  session.onPeerJoined/Left → proxy.net_peer_(dis)connected
 // The transport must still live on the main thread: RTCPeerConnection does
-// not exist inside Web Workers. On mount, every client tries to join the
-// same shared game room (see gameRoom.ts) via a well-known anchor peer id —
-// no bootstrap-service, no pasted id required; see the anchor-claim-or-
-// fallback dance in start() below. `connect()` remains as a manual override
-// for a private ad hoc session outside the shared room.
+// not exist inside Web Workers. On mount, every client joins the same shared
+// game room (see gameRoom.ts) via the real, shared awari bootstrap service
+// (httpBootstrapClient.ts) — awari's own join() orchestrates genesis-vs-join
+// entirely internally (whoever gets there first becomes genesis, per
+// awari's own bootstrap-genesis ADR), so nothing here does that manually —
+// see this repo's specs/decisions/0009-real-bootstrap-service.md for why
+// that switch happened and what it replaced. `connect()` remains a manual
+// override for a private ad hoc session outside the shared room, keyed by
+// a pasted peer id — a different mechanism (direct dial, no discovery
+// needed) with its own dedicated bootstrap client instance
+// (manualBootstrap.ts), since the real service has no "just connect to this
+// exact peer" primitive.
 
 import { log, logLevels } from "@kikorin/util";
 import { netChannel } from "@kikorin/adapter";
@@ -22,7 +29,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createAwari, type Transport } from "@awari/core";
 import type { PeerRef, RoomSession } from "@awari/protocol";
 import { createPeerJsTransport, readPeerJsId } from "@awari/transport-peerjs";
-import { createManualBootstrapClient, type ManualBootstrapClient } from "./manualBootstrap";
+import { createHttpBootstrapClient } from "./httpBootstrapClient";
+import { createManualBootstrapClient } from "./manualBootstrap";
 import { getGameRoom, type GameKey } from "./gameRoom";
 import type { WorkerEngineProxy } from "../workers/WorkerEngineProxy";
 import {
@@ -71,6 +79,9 @@ export function useNetworking(
   gameKey: GameKey,
   playerEid: number | null,
   _ownedEids: readonly number[],
+  // Should match the calling game's own world scale — see chat.ts's
+  // createChatController doc comment. Defaults to DEFAULT_NEARBY_RADIUS.
+  nearbyRadius?: number,
 ): UseNetworkingReturn {
   const [localPeerId, setLocalPeerId] = useState<string | null>(null);
   const [transportError, setTransportError] = useState<string | null>(null);
@@ -79,8 +90,13 @@ export function useNetworking(
   const [activeChatChannel, setActiveChatChannel] = useState<ChatChannel>({ kind: "global" });
   const [joinedChatGroups, setJoinedChatGroups] = useState<string[]>([]);
   const sessionRef = useRef<RoomSession | null>(null);
+  // Primary: the shared game room, discovered via the real bootstrap
+  // service. Manual: connect()'s pasted-peer-id override, a direct dial with
+  // no discovery — its own awari instance since createAwari bakes in one
+  // bootstrap client for its lifetime and the two need different ones.
   const awariRef = useRef<ReturnType<typeof createAwari> | null>(null);
-  const bootstrapRef = useRef<ManualBootstrapClient | null>(null);
+  const manualAwariRef = useRef<ReturnType<typeof createAwari> | null>(null);
+  const manualBootstrapRef = useRef<ReturnType<typeof createManualBootstrapClient> | null>(null);
   const chatControllerRef = useRef<ChatController | null>(null);
   const selfPeerIdRef = useRef<string | null>(null);
   // Latest-value refs so the chat controller (created once per session
@@ -161,35 +177,25 @@ export function useNetworking(
           });
           return pos;
         },
+        nearbyRadius,
       );
     }
     attachSessionRef.current = attachSession;
 
     async function start() {
-      // Auto-discovery with no separate directory service: try to claim a
-      // well-known PeerJS id derived from this game's room (see gameRoom.ts —
-      // scoped by gameKey so the 2D and 3D games never share a room). Whoever
-      // gets there first becomes the room's anchor (genesis leader); everyone
-      // after that fails to claim it — that failure itself is the discovery
-      // signal — and dials it directly instead of needing a pasted id.
-      const { roomId, anchorPeerId } = getGameRoom(gameKey);
-      let isAnchor = true;
-      let transportAttempt = createPeerJsTransport({ id: anchorPeerId });
+      const { roomId } = getGameRoom(gameKey);
+      // An ordinary, auto-assigned PeerJS id — no well-known id to claim.
+      // The real bootstrap service (below) is what lets peers find each
+      // other now, not a shared, guessable id.
+      const transportAttempt = createPeerJsTransport();
       let selfId: string;
       try {
         selfId = await transportAttempt.selfId;
-      } catch {
-        isAnchor = false;
-        void transportAttempt.destroy();
-        transportAttempt = createPeerJsTransport();
-        try {
-          selfId = await transportAttempt.selfId;
-        } catch (err) {
-          if (disposed) return;
-          log(logLevels.error, "[transport] peer error", ["network"], err);
-          setTransportError(String(err));
-          return;
-        }
+      } catch (err) {
+        if (disposed) return;
+        log(logLevels.error, "[transport] peer error", ["network"], err);
+        setTransportError(String(err));
+        return;
       }
       if (disposed) {
         void transportAttempt.destroy();
@@ -197,20 +203,27 @@ export function useNetworking(
       }
       transport = transportAttempt;
 
-      log(logLevels.debug, "[transport] broker connected", ["network"], selfId, { isAnchor });
+      log(logLevels.debug, "[transport] broker connected", ["network"], selfId);
       selfPeerIdRef.current = selfId;
       setLocalPeerId(selfId);
       setTransportError(null);
 
-      const bootstrap = createManualBootstrapClient();
-      bootstrapRef.current = bootstrap;
-      if (!isAnchor) {
-        // We're not the anchor, so someone else already is — dial them.
-        bootstrap.seedContact(roomId, anchorPeerId);
-      }
-
+      const bootstrap = createHttpBootstrapClient();
       const awari = createAwari({ transport, bootstrap, resolveConnectionId: readPeerJsId, peerId: selfId });
       awariRef.current = awari;
+
+      // connect()'s own instance, for the unrelated pasted-peer-id override —
+      // see this file's module doc comment for why it needs a separate
+      // bootstrap client (and therefore a separate awari instance) from the
+      // primary one just above.
+      const manualBootstrap = createManualBootstrapClient();
+      manualBootstrapRef.current = manualBootstrap;
+      manualAwariRef.current = createAwari({
+        transport,
+        bootstrap: manualBootstrap,
+        resolveConnectionId: readPeerJsId,
+        peerId: selfId,
+      });
 
       try {
         const session = await awari.join({ roomId, sessionId: sessionIdRef.current });
@@ -245,7 +258,8 @@ export function useNetworking(
       disposed = true;
       attachSessionRef.current = null;
       awariRef.current = null;
-      bootstrapRef.current = null;
+      manualAwariRef.current = null;
+      manualBootstrapRef.current = null;
       activeEngine.onNetOut(null);
       chatControllerRef.current?.dispose();
       chatControllerRef.current = null;
@@ -254,7 +268,7 @@ export function useNetworking(
       void transport?.destroy();
       setLocalPeerId(null);
     };
-  }, [engine, gameKey]);
+  }, [engine, gameKey, nearbyRadius]);
 
   // Live peer list from engine net events: peer_joined fires when the room
   // session bridge reports a new peer (before any entity data), entity
@@ -297,8 +311,8 @@ export function useNetworking(
   // default, or another private room). Useful for testing or a session
   // deliberately kept off the shared game room.
   const connect = useCallback((remotePeerId: string) => {
-    const awari = awariRef.current;
-    const bootstrap = bootstrapRef.current;
+    const awari = manualAwariRef.current;
+    const bootstrap = manualBootstrapRef.current;
     const attach = attachSessionRef.current;
     if (!awari || !bootstrap || !attach) {
       log(logLevels.debug, "[transport] connect: not ready", ["network"], remotePeerId);

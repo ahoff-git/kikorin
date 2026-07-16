@@ -8,6 +8,11 @@
  * `dimension: "3d"` to `useEngine` (it reuses the 3D pipeline) but still
  * gets its own `"topdown"` room, distinct from the real 3D game's.
  *
+ * Discovery (finding who else is already in this room, or becoming its
+ * genesis leader if nobody is) goes through the real, shared awari
+ * bootstrap service (see `httpBootstrapClient.ts` and `useNetworking.ts`) —
+ * this module only owns the room's *name*, not how peers find each other.
+ *
  * Override the shared base via NEXT_PUBLIC_KIKORIN_ROOM_ID (e.g. in
  * .env.local) if you fork this app; every game's room moves together since
  * they derive from the same base, but stay distinct from each other.
@@ -18,17 +23,8 @@ export type GameKey = "2d" | "3d" | "topdown";
 
 export interface GameRoom {
   roomId: string;
-  /**
-   * A well-known PeerJS id derived from roomId, prefixed to avoid colliding
-   * with unrelated apps sharing the same public PeerJS broker. The first
-   * instance of this game to start claims it and becomes the room's anchor
-   * (genesis leader); everyone after that fails to claim it and dials it
-   * directly instead — auto-discovery with no separate directory service.
-   */
-  anchorPeerId: string;
 }
 
 export function getGameRoom(gameKey: GameKey): GameRoom {
-  const roomId = `${BASE_ROOM_ID}-${gameKey}`;
-  return { roomId, anchorPeerId: `kikorin-room-${roomId}` };
+  return { roomId: `${BASE_ROOM_ID}-${gameKey}` };
 }

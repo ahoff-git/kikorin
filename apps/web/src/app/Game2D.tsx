@@ -42,6 +42,9 @@ export default function Game2D() {
     "2d",
     playerEid,
     ownedEids,
+    // KIKORIN_2D_MAP spans x in roughly [-20, 20] — much smaller than the 3D
+    // game's default (15) radius, which would read as "everyone" here.
+    8,
   );
 
   // Wire scene setup to run once the WASM engine is ready.

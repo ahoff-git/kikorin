@@ -46,6 +46,9 @@ export default function GameTopDown() {
     "topdown",
     playerEid,
     ownedEids,
+    // KIKORIN_TOPDOWN_MAP's maze spans x/z in roughly [-20, 20] — about one
+    // room-to-room hop, smaller than the 3D game's default (15) radius.
+    10,
   );
 
   // Wire scene setup to run once the WASM engine is ready.

@@ -58,6 +58,8 @@ export default function Game3D() {
     "3d",
     playerEid,
     ownedEids,
+    // No explicit nearbyRadius — this game's sprawling arena is exactly what
+    // chat.ts's DEFAULT_NEARBY_RADIUS (15) was tuned for.
   );
 
   // Wire scene setup to run once the WASM engine is ready.
