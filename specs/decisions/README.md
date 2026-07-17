@@ -26,6 +26,8 @@ Lightweight architecture decision record (ADR) log for kikorin.
 - [0009: Room discovery uses the real, shared awari bootstrap service, proxied same-origin](./0009-real-bootstrap-service.md)
 - [0010: Monster type templates via a narrow per-monster capability override](./0010-monster-type-templates.md)
 - [0011: Layered pathfinding — tiered planners, shared flow fields, baked key routes, and Tier-4 discovery](./0011-layered-pathfinding.md)
+- [0012: Frontier-only discovery with a detour-ratio filter; flying reactive avoidance](./0012-discovery-pacing-and-flying-avoidance.md)
+- [0013: Incorporeal (can_phase) — collision groups + phase edges](./0013-incorporeal-phase-capability.md)
 
 ## Open Questions
 

@@ -16,7 +16,7 @@ import type { MonsterCapabilityInput } from "@kikorin/adapter";
 // MonsterCapabilityInput's own doc comment (packages/adapter/src/types.ts)
 // for why varying them per monster against one shared navmesh is unsafe.
 
-export type MonsterTemplateName = "agile" | "slow" | "flying";
+export type MonsterTemplateName = "agile" | "slow" | "flying" | "ghost";
 
 export type MonsterTemplate = {
   name: MonsterTemplateName;
@@ -34,23 +34,31 @@ export function createMonsterTemplates(baseWalkSpeed: number): MonsterTemplate[]
       weight: 2,
       // Agile monsters sprint: Tier-4 discovered sprint-jump routes are
       // actually exercised in normal play (ADR 0011).
-      capability: { walk_speed: baseWalkSpeed * 1.6, can_jump: true, can_sprint: true, can_fly: false },
+      capability: { walk_speed: baseWalkSpeed * 1.6, can_jump: true, can_sprint: true, can_phase: false, can_fly: false },
       bodyColor: 0xffa000,
       frontColor: 0xffe082,
     },
     {
       name: "slow",
       weight: 2,
-      capability: { walk_speed: baseWalkSpeed * 0.5, can_jump: false, can_sprint: false, can_fly: false },
+      capability: { walk_speed: baseWalkSpeed * 0.5, can_jump: false, can_sprint: false, can_phase: false, can_fly: false },
       bodyColor: 0x6d4c41,
       frontColor: 0xa1887f,
     },
     {
       name: "flying",
       weight: 1,
-      capability: { walk_speed: baseWalkSpeed * 1.2, can_jump: true, can_sprint: false, can_fly: true },
+      capability: { walk_speed: baseWalkSpeed * 1.2, can_jump: true, can_sprint: false, can_phase: false, can_fly: true },
       bodyColor: 0x8e24aa,
       frontColor: 0xe1bee7,
+    },
+    {
+      name: "ghost",
+      weight: 1,
+      // Incorporeal: walks through walls (ADR 0013).
+      capability: { walk_speed: baseWalkSpeed * 0.8, can_jump: false, can_sprint: false, can_phase: true, can_fly: false },
+      bodyColor: 0x90a4ae,
+      frontColor: 0xeceff1,
     },
   ];
 }

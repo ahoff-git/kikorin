@@ -71,14 +71,14 @@ impl NavMesh {
         keys
     }
 
-    pub fn build_key_routes(&self, can_jump: bool, can_sprint: bool) -> Option<KeyRoutes> {
+    pub fn build_key_routes(&self, can_jump: bool, can_sprint: bool, can_phase: bool) -> Option<KeyRoutes> {
         let keys = self.derive_key_nodes();
         if keys.is_empty() {
             return None;
         }
         let fields = keys
             .iter()
-            .map(|&k| self.flow_field_from_node(k, can_jump, can_sprint))
+            .map(|&k| self.flow_field_from_node(k, can_jump, can_sprint, can_phase))
             .collect();
         Some(KeyRoutes { keys, fields })
     }
@@ -151,6 +151,7 @@ impl KeyRoutes {
                 z: p[2],
                 requires_jump: hop.requires_jump,
                 requires_sprint: hop.requires_sprint,
+                requires_phase: hop.requires_phase,
                 is_ledge_drop: hop.is_ledge_drop,
             });
             cur = hop.to;
@@ -218,7 +219,7 @@ mod tests {
     #[test]
     fn plan_routes_to_the_key_nearest_the_goal() {
         let mesh = open_grid(16);
-        let routes = mesh.build_key_routes(true, false).expect("routes");
+        let routes = mesh.build_key_routes(true, false, false).expect("routes");
         let goal = [15.5, 0.0, 15.5];
         let plan = routes
             .plan(&mesh, [0.5, 0.0, 0.5], Some(0.0), goal)
@@ -247,14 +248,14 @@ mod tests {
         mesh.add_edge(island, 0, 2.0, true, false);
         mesh.add_edge(0, island, 2.0, true, false);
 
-        let grounded = mesh.build_key_routes(false, false).expect("routes");
+        let grounded = mesh.build_key_routes(false, false, false).expect("routes");
         let plan = grounded.plan(&mesh, [-5.5, 0.0, 0.5], Some(0.0), [3.5, 0.0, 3.5]);
         assert!(
             plan.is_none(),
             "no key reachable without jumping from the island — must be None",
         );
 
-        let jumper = mesh.build_key_routes(true, false).expect("routes");
+        let jumper = mesh.build_key_routes(true, false, false).expect("routes");
         let plan = jumper.plan(&mesh, [-5.5, 0.0, 0.5], Some(0.0), [3.5, 0.0, 3.5]);
         assert!(plan.is_some(), "jump-capable table must cross the bridge");
     }

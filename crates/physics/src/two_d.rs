@@ -64,6 +64,11 @@ pub struct PhysicsWorld2D {
 
     tick_count: u64,
     grounded_cache: HashMap<EntityId, bool>,
+
+    // Collision-class overrides (see specs/physics "Collision Groups"):
+    // walls live in their own group so phasing bodies can filter them out.
+    wall_ids: std::collections::HashSet<EntityId>,
+    phasing_ids: std::collections::HashSet<EntityId>,
 }
 
 impl PhysicsWorld2D {
@@ -87,6 +92,55 @@ impl PhysicsWorld2D {
             touching: HashMap::new(),
             tick_count: 0,
             grounded_cache: HashMap::new(),
+            wall_ids: std::collections::HashSet::new(),
+            phasing_ids: std::collections::HashSet::new(),
+        }
+    }
+
+    /// See PhysicsWorld3D::dynamic_groups — duplicated per ADR 0001.
+    fn dynamic_groups(&self, id: EntityId) -> InteractionGroups {
+        let filter = if self.phasing_ids.contains(&id) {
+            Group::GROUP_1
+        } else {
+            Group::GROUP_1 | Group::GROUP_3
+        };
+        InteractionGroups::new(Group::GROUP_2, filter)
+    }
+
+    fn static_groups(&self, id: EntityId) -> InteractionGroups {
+        let membership = if self.wall_ids.contains(&id) {
+            Group::GROUP_3
+        } else {
+            Group::GROUP_1
+        };
+        InteractionGroups::new(membership, Group::ALL)
+    }
+
+    pub fn set_wall(&mut self, id: EntityId, is_wall: bool) {
+        if is_wall {
+            self.wall_ids.insert(id);
+        } else {
+            self.wall_ids.remove(&id);
+        }
+        let groups = self.static_groups(id);
+        if let Some(&h) = self.entity_to_col.get(&id) {
+            if let Some(col) = self.colliders.get_mut(h) {
+                col.set_collision_groups(groups);
+            }
+        }
+    }
+
+    pub fn set_phasing(&mut self, id: EntityId, phasing: bool) {
+        if phasing {
+            self.phasing_ids.insert(id);
+        } else {
+            self.phasing_ids.remove(&id);
+        }
+        let groups = self.dynamic_groups(id);
+        if let Some(&h) = self.entity_to_col.get(&id) {
+            if let Some(col) = self.colliders.get_mut(h) {
+                col.set_collision_groups(groups);
+            }
         }
     }
 
@@ -138,9 +192,9 @@ impl PhysicsWorld2D {
                     ColliderBuilder::new(shape)
                         .friction(0.0)
                         .friction_combine_rule(CoefficientCombineRule::Multiply)
-                        .collision_groups(InteractionGroups::new(Group::GROUP_2, Group::GROUP_1))
+                        .collision_groups(self.dynamic_groups(id))
                 } else {
-                    ColliderBuilder::new(shape)
+                    ColliderBuilder::new(shape).collision_groups(self.static_groups(id))
                 };
                 let col_handle = self.colliders.insert_with_parent(
                     col_builder.build(),

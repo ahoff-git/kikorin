@@ -12,6 +12,7 @@ pub struct FlowHop {
     pub to: NodeId,
     pub requires_jump: bool,
     pub requires_sprint: bool,
+    pub requires_phase: bool,
     pub is_ledge_drop: bool,
 }
 
@@ -55,9 +56,10 @@ impl NavMesh {
         goal: [f32; 3],
         can_jump: bool,
         can_sprint: bool,
+        can_phase: bool,
     ) -> Option<FlowField> {
         let goal_node = self.nearest_walkable(goal[0], goal[2])?;
-        Some(self.flow_field_from_node(goal_node, can_jump, can_sprint))
+        Some(self.flow_field_from_node(goal_node, can_jump, can_sprint, can_phase))
     }
 
     /// Field toward an exact node — the resumable-build entry point (one
@@ -67,8 +69,9 @@ impl NavMesh {
         goal_node: NodeId,
         can_jump: bool,
         can_sprint: bool,
+        can_phase: bool,
     ) -> FlowField {
-        self.flow_field_from_node(goal_node, can_jump, can_sprint)
+        self.flow_field_from_node(goal_node, can_jump, can_sprint, can_phase)
     }
 
     pub(crate) fn flow_field_from_node(
@@ -76,25 +79,33 @@ impl NavMesh {
         goal_node: NodeId,
         can_jump: bool,
         can_sprint: bool,
+        can_phase: bool,
     ) -> FlowField {
         let n = self.nodes.len();
         // Reverse adjacency: for forward edge v→u, rev[u] holds (v, cost, meta).
         // One-way edges (ledge drops) reverse correctly here: a node only
         // enterable by dropping in simply ends up unreachable in fields
         // whose goal lies back up top — safe degrade, no special case.
-        let mut rev: Vec<Vec<(NodeId, u64, bool, bool, bool)>> = vec![Vec::new(); n];
+        let mut rev: Vec<Vec<(NodeId, u64, FlowHop)>> = vec![Vec::new(); n];
         for (from, edges) in self.edges.iter().enumerate() {
             for e in edges {
-                if (!can_jump && e.requires_jump) || (!can_sprint && e.requires_sprint) {
+                if (!can_jump && e.requires_jump)
+                    || (!can_sprint && e.requires_sprint)
+                    || (!can_phase && e.requires_phase)
+                {
                     continue;
                 }
                 let cost = (e.cost * COST_SCALE) as u64;
                 rev[e.to as usize].push((
                     from as NodeId,
                     cost,
-                    e.requires_jump,
-                    e.requires_sprint,
-                    e.is_ledge_drop,
+                    FlowHop {
+                        to: e.to,
+                        requires_jump: e.requires_jump,
+                        requires_sprint: e.requires_sprint,
+                        requires_phase: e.requires_phase,
+                        is_ledge_drop: e.is_ledge_drop,
+                    },
                 ));
             }
         }
@@ -110,16 +121,11 @@ impl NavMesh {
             if d > dist[u as usize] {
                 continue;
             }
-            for &(v, cost, jump, sprint, ledge) in &rev[u as usize] {
+            for &(v, cost, hop) in &rev[u as usize] {
                 let nd = d.saturating_add(cost);
                 if nd < dist[v as usize] {
                     dist[v as usize] = nd;
-                    next_hop[v as usize] = Some(FlowHop {
-                        to: u,
-                        requires_jump: jump,
-                        requires_sprint: sprint,
-                        is_ledge_drop: ledge,
-                    });
+                    next_hop[v as usize] = Some(hop);
                     heap.push(Reverse((nd, v)));
                 }
             }
@@ -171,7 +177,7 @@ mod tests {
         let size = 8;
         let mesh = open_grid(size);
         let goal = [0.5, 0.0, 0.5];
-        let field = mesh.build_flow_field(goal, true, false).expect("field");
+        let field = mesh.build_flow_field(goal, true, false, false).expect("field");
 
         for start in 0..(size * size) as NodeId {
             let mut cur = start;
@@ -223,7 +229,7 @@ mod tests {
         }
 
         // Goal on the right side, start on the left side, both at row 0.
-        let field = mesh.build_flow_field([4.5, 0.0, 0.5], true, false).expect("field");
+        let field = mesh.build_flow_field([4.5, 0.0, 0.5], true, false, false).expect("field");
         let start = ids[0].unwrap();
         let direct_hops = 4; // manhattan without the wall
         let mut cur = start;
@@ -247,12 +253,12 @@ mod tests {
         let b = mesh.add_node(1.5, 1.0, 0.5);
         mesh.add_edge(a, b, 1.0, true, false);
 
-        let jumping = mesh.build_flow_field([1.5, 0.0, 0.5], true, false).expect("field");
+        let jumping = mesh.build_flow_field([1.5, 0.0, 0.5], true, false, false).expect("field");
         assert!(jumping.reaches(a), "jump-capable field crosses the bridge");
         assert_eq!(jumping.next_hop(a).unwrap().to, b);
         assert!(jumping.next_hop(a).unwrap().requires_jump, "hop must carry jump metadata");
 
-        let grounded = mesh.build_flow_field([1.5, 0.0, 0.5], false, false).expect("field");
+        let grounded = mesh.build_flow_field([1.5, 0.0, 0.5], false, false, false).expect("field");
         assert!(
             !grounded.reaches(a),
             "can_jump:false field must mark the far side unreachable, not mislead it",
@@ -269,11 +275,11 @@ mod tests {
         let low = mesh.add_node(1.5, 0.0, 0.5);
         mesh.add_edge(high, low, 1.0, false, true);
 
-        let field_to_high = mesh.build_flow_field([0.5, 0.0, 0.5], true, false).expect("field");
+        let field_to_high = mesh.build_flow_field([0.5, 0.0, 0.5], true, false, false).expect("field");
         assert!(field_to_high.reaches(high), "the goal itself is reachable");
         assert!(!field_to_high.reaches(low), "no forward path back up the ledge");
 
-        let field_to_low = mesh.build_flow_field([1.5, 0.0, 0.5], true, false).expect("field");
+        let field_to_low = mesh.build_flow_field([1.5, 0.0, 0.5], true, false, false).expect("field");
         assert!(field_to_low.reaches(high), "dropping down is a valid forward hop");
         assert!(field_to_low.next_hop(high).unwrap().is_ledge_drop);
     }
@@ -285,11 +291,11 @@ mod tests {
         let b = mesh.add_node(3.5, 0.0, 0.5);
         mesh.upgrade_edge(a, b, 3.0, true);
 
-        let sprinter = mesh.build_flow_field([3.5, 0.0, 0.5], true, true).expect("field");
+        let sprinter = mesh.build_flow_field([3.5, 0.0, 0.5], true, true, false).expect("field");
         assert!(sprinter.reaches(a));
         assert!(sprinter.next_hop(a).unwrap().requires_sprint);
 
-        let walker = mesh.build_flow_field([3.5, 0.0, 0.5], true, false).expect("field");
+        let walker = mesh.build_flow_field([3.5, 0.0, 0.5], true, false, false).expect("field");
         assert!(!walker.reaches(a), "sprint-only edge must not serve a non-sprinter");
     }
 }

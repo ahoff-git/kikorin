@@ -144,6 +144,23 @@ impl PhysicsWorld {
         }
     }
 
+    /// Mark static terrain as a wall — its own collision group, filterable
+    /// by phasing bodies (see specs/physics "Collision Groups").
+    pub fn set_wall(&mut self, id: EntityId, is_wall: bool) {
+        match &mut self.backend {
+            Backend::TwoD(w) => w.set_wall(id, is_wall),
+            Backend::ThreeD(w) => w.set_wall(id, is_wall),
+        }
+    }
+
+    /// Let a dynamic body pass through walls (incorporeal).
+    pub fn set_phasing(&mut self, id: EntityId, phasing: bool) {
+        match &mut self.backend {
+            Backend::TwoD(w) => w.set_phasing(id, phasing),
+            Backend::ThreeD(w) => w.set_phasing(id, phasing),
+        }
+    }
+
     pub fn remove_entity(&mut self, id: EntityId) {
         match &mut self.backend {
             Backend::TwoD(w) => w.remove_entity(id),

@@ -40,6 +40,8 @@ pub struct Waypoint {
     pub requires_jump: bool,
     /// Jump needing a sprint-speed approach — see specs/pathfinding.
     pub requires_sprint: bool,
+    /// Crosses a wall — traversable only by phasing movers (ADR 0013).
+    pub requires_phase: bool,
     pub is_ledge_drop: bool,
 }
 
@@ -52,6 +54,8 @@ pub struct PathRequest {
     pub can_jump: bool,
     /// Sprint counterpart of `can_jump` — filters `requires_sprint` edges.
     pub can_sprint: bool,
+    /// Phasing counterpart — unlocks `requires_phase` (through-wall) edges.
+    pub can_phase: bool,
     /// Floor Y of the entity at start. When provided, start-node lookup uses
     /// 3D distance so monsters on the ground don't anchor to an elevated platform
     /// overhead that happens to share the same XZ cell.
@@ -64,6 +68,8 @@ pub(crate) struct Edge {
     pub(crate) requires_jump: bool,
     /// Set only by `upgrade_edge` — sprint-speed approach required.
     pub(crate) requires_sprint: bool,
+    /// Through-wall edge, walkable only when phasing.
+    pub(crate) requires_phase: bool,
     pub(crate) is_ledge_drop: bool,
 }
 
@@ -112,6 +118,7 @@ impl NavMesh {
                 cost,
                 requires_jump,
                 requires_sprint: false,
+                requires_phase: false,
                 is_ledge_drop,
             });
         }
@@ -135,6 +142,22 @@ impl NavMesh {
                 cost,
                 requires_jump: true,
                 requires_sprint,
+                requires_phase: false,
+                is_ledge_drop: false,
+            });
+        }
+    }
+
+    /// Through-wall edge for phasing movers (built where a wall was the
+    /// only thing severing two neighbors — see specs/pathfinding).
+    pub fn add_phase_edge(&mut self, from: NodeId, to: NodeId, cost: f32) {
+        if let Some(edges) = self.edges.get_mut(from as usize) {
+            edges.push(Edge {
+                to,
+                cost,
+                requires_jump: false,
+                requires_sprint: false,
+                requires_phase: true,
                 is_ledge_drop: false,
             });
         }
@@ -150,6 +173,41 @@ impl NavMesh {
 
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// Outgoing edge count — a 3D grid node with all 8 neighbors is open
+    /// floor; discovery sweeps skip such nodes (see specs/engine).
+    pub fn edge_count(&self, id: NodeId) -> usize {
+        self.edges.get(id as usize).map_or(0, |e| e.len())
+    }
+
+    pub fn edge_targets(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        self.edges.get(id as usize).into_iter().flatten().map(|e| e.to)
+    }
+
+    // Non-phase variants: discovery reasons about *physical* connectivity —
+    // a phase edge is immaterial to normal movers and must not make a wall
+    // pair look connected/full-degree (ADR 0013).
+
+    pub fn non_phase_degree(&self, id: NodeId) -> usize {
+        self.edges
+            .get(id as usize)
+            .map_or(0, |e| e.iter().filter(|e| !e.requires_phase).count())
+    }
+
+    pub fn has_non_phase_edge(&self, from: NodeId, to: NodeId) -> bool {
+        self.edges
+            .get(from as usize)
+            .is_some_and(|edges| edges.iter().any(|e| e.to == to && !e.requires_phase))
+    }
+
+    pub fn non_phase_targets(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        self.edges
+            .get(id as usize)
+            .into_iter()
+            .flatten()
+            .filter(|e| !e.requires_phase)
+            .map(|e| e.to)
     }
 
     pub fn node_position(&self, id: NodeId) -> Option<[f32; 3]> {
@@ -229,13 +287,14 @@ impl NavMesh {
         let goal_node = self.nearest_walkable(req.goal[0], req.goal[2])?;
 
         if start_node == goal_node {
-            return Some(vec![self.node_to_waypoint(goal_node, false, false, false)]);
+            return Some(vec![self.node_to_waypoint(goal_node, false, false, false, false)]);
         }
 
         let [gx, gy, gz] = self.nodes[goal_node as usize];
         let seed = req.route_seed;
         let can_jump = req.can_jump;
         let can_sprint = req.can_sprint;
+        let can_phase = req.can_phase;
 
         let result = astar(
             &start_node,
@@ -247,7 +306,10 @@ impl NavMesh {
                 self.edges[n_usize]
                     .iter()
                     .filter_map(|e| {
-                        if (!can_jump && e.requires_jump) || (!can_sprint && e.requires_sprint) {
+                        if (!can_jump && e.requires_jump)
+                            || (!can_sprint && e.requires_sprint)
+                            || (!can_phase && e.requires_phase)
+                        {
                             return None;
                         }
                         let noise = seed.map_or(0.0, |s| {
@@ -273,7 +335,7 @@ impl NavMesh {
         );
 
         let (node_path, _cost) = result?;
-        let waypoints = self.build_waypoints(&node_path, can_jump, can_sprint);
+        let waypoints = self.build_waypoints(&node_path, can_jump, can_sprint, can_phase);
         Some(self.simplify(&waypoints))
     }
 
@@ -282,6 +344,7 @@ impl NavMesh {
         id: NodeId,
         requires_jump: bool,
         requires_sprint: bool,
+        requires_phase: bool,
         is_ledge_drop: bool,
     ) -> Waypoint {
         let [x, y, z] = self.nodes[id as usize];
@@ -291,6 +354,7 @@ impl NavMesh {
             z,
             requires_jump,
             requires_sprint,
+            requires_phase,
             is_ledge_drop,
         }
     }
@@ -299,28 +363,35 @@ impl NavMesh {
     /// admissible edge — with parallel edges (see `upgrade_edge`), the
     /// unfiltered first match could claim a requirement the searcher
     /// didn't (couldn't) use.
-    fn build_waypoints(&self, node_path: &[NodeId], can_jump: bool, can_sprint: bool) -> Vec<Waypoint> {
+    fn build_waypoints(
+        &self,
+        node_path: &[NodeId],
+        can_jump: bool,
+        can_sprint: bool,
+        can_phase: bool,
+    ) -> Vec<Waypoint> {
         let Some(&first) = node_path.first() else {
             return Vec::new();
         };
 
         let mut waypoints = Vec::with_capacity(node_path.len());
-        waypoints.push(self.node_to_waypoint(first, false, false, false));
+        waypoints.push(self.node_to_waypoint(first, false, false, false, false));
 
         for window in node_path.windows(2) {
             let from = window[0];
             let to = window[1];
-            let (jump, sprint, ledge) = self.edges[from as usize]
+            let (jump, sprint, phase, ledge) = self.edges[from as usize]
                 .iter()
                 .filter(|e| {
                     e.to == to
                         && (can_jump || !e.requires_jump)
                         && (can_sprint || !e.requires_sprint)
+                        && (can_phase || !e.requires_phase)
                 })
                 .min_by(|a, b| a.cost.total_cmp(&b.cost))
-                .map(|e| (e.requires_jump, e.requires_sprint, e.is_ledge_drop))
-                .unwrap_or((false, false, false));
-            waypoints.push(self.node_to_waypoint(to, jump, sprint, ledge));
+                .map(|e| (e.requires_jump, e.requires_sprint, e.requires_phase, e.is_ledge_drop))
+                .unwrap_or((false, false, false, false));
+            waypoints.push(self.node_to_waypoint(to, jump, sprint, phase, ledge));
         }
         waypoints
     }
@@ -474,6 +545,7 @@ mod tests {
             route_seed: None,
             can_jump: true,
             can_sprint: false,
+            can_phase: false,
             start_y: None,
         });
 
@@ -501,6 +573,7 @@ mod tests {
             route_seed: None,
             can_jump: true,
             can_sprint: false,
+            can_phase: false,
             start_y: None,
         });
         assert!(path.is_none(), "expected no path for disconnected graph");
@@ -518,6 +591,7 @@ mod tests {
             route_seed: Some(seed),
             can_jump: true,
             can_sprint: false,
+            can_phase: false,
             start_y: None,
         };
 
@@ -550,6 +624,7 @@ mod tests {
                 route_seed: None,
                 can_jump: true,
                 can_sprint: false,
+                can_phase: false,
                 start_y: None,
             })
             .expect("straight chain must have a path");
@@ -580,6 +655,7 @@ mod tests {
                 route_seed: None,
                 can_jump: true,
                 can_sprint: false,
+                can_phase: false,
                 start_y: None,
             })
             .expect("chain with jump edge must have a path");
@@ -615,6 +691,7 @@ mod tests {
             route_seed: None,
             can_jump: true,
             can_sprint: false,
+            can_phase: false,
             start_y: None,
         });
         assert!(
@@ -628,6 +705,7 @@ mod tests {
             route_seed: None,
             can_jump: false,
             can_sprint: false,
+            can_phase: false,
             start_y: None,
         });
         assert!(
@@ -651,6 +729,7 @@ mod tests {
                 route_seed: None,
                 can_jump: true,
                 can_sprint: false,
+                can_phase: false,
                 start_y: Some(0.0),
             })
             .expect("jump edge should be traversable");
@@ -689,6 +768,7 @@ mod tests {
             route_seed: None,
             can_jump: true,
             can_sprint: false,
+            can_phase: false,
             start_y: Some(0.0),
         });
         assert!(

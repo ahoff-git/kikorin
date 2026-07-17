@@ -412,6 +412,7 @@ mod tests {
                 route_seed: None,
                 can_jump: true,
                 can_sprint: false,
+                can_phase: false,
                 start_y: Some(0.0),
             })
             .expect("a node near ground level under the platform must exist");
@@ -428,6 +429,7 @@ mod tests {
                 route_seed: None,
                 can_jump: true,
                 can_sprint: false,
+                can_phase: false,
                 start_y: Some(1.8),
             })
             .expect("a node on top of the platform must exist");
@@ -462,6 +464,7 @@ mod tests {
             route_seed: None,
             can_jump: true,
             can_sprint: false,
+            can_phase: false,
             start_y: Some(0.0),
         });
         assert!(path.is_none(), "excluding the only floor entity must leave no walkable nodes");

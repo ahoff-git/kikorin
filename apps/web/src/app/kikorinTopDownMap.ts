@@ -55,31 +55,46 @@ function splitPartition(
 }
 
 export const KIKORIN_TOPDOWN_MAP: TerrainBlockInput[] = [
-  // Floor spans x/z in [-20, 20].
-  floor(0, -0.5, 0, 20, 0.5, 20),
+  // Floor spans x/z in [-30, 30] — a 5x5 district grid: open center hall,
+  // ringed by rooms of varying size, every neighbor pair connected by its
+  // own doorway.
+  floor(0, -0.5, 0, 30, 0.5, 30),
 
-  // Perimeter — keeps the player/monsters from wandering off the floor edge.
-  wall(0, WALL_Y, -19.5, 20, WALL_HALF_HEIGHT, WALL_HALF_THICKNESS),
-  wall(0, WALL_Y, 19.5, 20, WALL_HALF_HEIGHT, WALL_HALF_THICKNESS),
-  wall(-19.5, WALL_Y, 0, WALL_HALF_THICKNESS, WALL_HALF_HEIGHT, 20),
-  wall(19.5, WALL_Y, 0, WALL_HALF_THICKNESS, WALL_HALF_HEIGHT, 20),
+  // Perimeter.
+  wall(0, WALL_Y, -29.5, 30, WALL_HALF_HEIGHT, WALL_HALF_THICKNESS),
+  wall(0, WALL_Y, 29.5, 30, WALL_HALF_HEIGHT, WALL_HALF_THICKNESS),
+  wall(-29.5, WALL_Y, 0, WALL_HALF_THICKNESS, WALL_HALF_HEIGHT, 30),
+  wall(29.5, WALL_Y, 0, WALL_HALF_THICKNESS, WALL_HALF_HEIGHT, 30),
 
-  // Vertical partitions at x=-5 and x=5, separating the west/east columns
-  // from the center column. Each of these runs only ever covered z in
-  // [-15,-3] or [3,15] (z in [-3,3] — the hub doorway — was never walled),
-  // and each now gets its own doorway too, so the corner room on either end
-  // connects to its neighboring edge room instead of being sealed off.
-  ...splitPartition('z', -5, -9, 6),
-  ...splitPartition('z', -5, 9, 6),
-  ...splitPartition('z', 5, -9, 6),
-  ...splitPartition('z', 5, 9, 6),
+  // Inner ring at ±7 around the center hall (hall spans ±7), a doorway in
+  // the middle of each side.
+  ...splitPartition('z', -7, 0, 7),
+  ...splitPartition('z', 7, 0, 7),
+  ...splitPartition('x', -7, 0, 7),
+  ...splitPartition('x', 7, 0, 7),
 
-  // Horizontal partitions at z=-5 and z=5, same doorway-gap pattern along x.
-  // The hub's own doorway to each of these runs (x in [-3, 3]) is already
-  // open — these two runs only ever covered x in [-15,-3] and [3,15] to
-  // begin with, so there was never a wall to remove there.
-  ...splitPartition('x', -5, -9, 6),
-  ...splitPartition('x', -5, 9, 6),
-  ...splitPartition('x', 5, -9, 6),
-  ...splitPartition('x', 5, 9, 6),
+  // Middle band partitions at ±18: rooms between the inner ring and the
+  // outer edge, staggered doorways so routes wind rather than run straight.
+  ...splitPartition('z', -18, -12, 8),
+  ...splitPartition('z', -18, 12, 8),
+  ...splitPartition('z', 18, -12, 8),
+  ...splitPartition('z', 18, 12, 8),
+  ...splitPartition('x', -18, -12, 8),
+  ...splitPartition('x', -18, 12, 8),
+  ...splitPartition('x', 18, -12, 8),
+  ...splitPartition('x', 18, 12, 8),
+
+  // Cross-corridor spokes connecting inner ring to middle band, each with
+  // its own doorway, offset from the ring doorways for winding paths.
+  ...splitPartition('z', -12, 0, 4),
+  ...splitPartition('z', 12, 0, 4),
+  ...splitPartition('x', -12, 0, 4),
+  ...splitPartition('x', 12, 0, 4),
+
+  // A few freestanding pillars in the center hall for cover (and for the
+  // pathing to weave around).
+  wall(-3.5, WALL_Y, -3.5, 0.8, WALL_HALF_HEIGHT, 0.8),
+  wall(3.5, WALL_Y, -3.5, 0.8, WALL_HALF_HEIGHT, 0.8),
+  wall(-3.5, WALL_Y, 3.5, 0.8, WALL_HALF_HEIGHT, 0.8),
+  wall(3.5, WALL_Y, 3.5, 0.8, WALL_HALF_HEIGHT, 0.8),
 ];

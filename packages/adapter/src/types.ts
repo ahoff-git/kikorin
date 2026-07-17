@@ -206,6 +206,8 @@ export interface MonsterCapabilityInput {
   can_jump?: boolean;
   /** Unlocks Tier-4 discovered sprint-jump routes (see ADR 0011). */
   can_sprint?: boolean;
+  /** Incorporeal: passes through walls, unlocks phase routes (ADR 0013). */
+  can_phase?: boolean;
   can_fly?: boolean;
 }
 

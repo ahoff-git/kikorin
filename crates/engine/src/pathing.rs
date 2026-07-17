@@ -7,11 +7,11 @@ use std::rc::Rc;
 
 use pathfinding::{FlowField, KeyRoutes, NodeId, Waypoint};
 
-/// (can_jump, can_sprint) — the capability tuple caches are keyed by.
-pub(crate) type CapKey = (bool, bool);
-/// (goal node, can_jump, can_sprint) — flow field identity. Keyed on the
+/// (can_jump, can_sprint, can_phase) — the capability tuple caches are keyed by.
+pub(crate) type CapKey = (bool, bool, bool);
+/// (goal node, can_jump, can_sprint, can_phase) — flow field identity. Keyed on the
 /// fine navmesh node, never a key node (ADR 0011).
-pub(crate) type FlowKey = (NodeId, bool, bool);
+pub(crate) type FlowKey = (NodeId, bool, bool, bool);
 
 /// Resumable background jobs — one bounded slice runs per tick.
 pub(crate) enum HeavyJob {
@@ -24,8 +24,10 @@ pub(crate) enum HeavyJob {
         keys: Vec<NodeId>,
         fields: Vec<FlowField>,
     },
-    /// Tier-4 discovery sweep; cursor = next node index to process.
+    /// Tier-4 discovery sweep over frontier nodes only (built on the first
+    /// slice); cursor = next frontier index.
     DiscoverEdges {
+        frontier: Vec<NodeId>,
         cursor: usize,
     },
 }
@@ -90,7 +92,7 @@ impl PathingShared {
         self.queued_caps.clear();
         self.promotions.clear();
         self.route_pool.clear();
-        self.jobs.push_back(HeavyJob::DiscoverEdges { cursor: 0 });
+        self.jobs.push_back(HeavyJob::DiscoverEdges { frontier: Vec::new(), cursor: 0 });
         self.discover_pending = true;
     }
 
@@ -151,6 +153,7 @@ impl PathingShared {
         goal_tolerance: f32,
         can_jump: bool,
         can_sprint: bool,
+        can_phase: bool,
     ) -> Option<(Rc<SharedRoute>, usize)> {
         let splice_sq = splice_radius * splice_radius;
         let goal_sq = goal_tolerance * goal_tolerance;
@@ -160,7 +163,9 @@ impl PathingShared {
                 continue;
             }
             let too_demanding = route.waypoints.iter().any(|wp| {
-                (!can_jump && wp.requires_jump) || (!can_sprint && wp.requires_sprint)
+                (!can_jump && wp.requires_jump)
+                    || (!can_sprint && wp.requires_sprint)
+                    || (!can_phase && wp.requires_phase)
             });
             if too_demanding {
                 continue;
@@ -196,6 +201,7 @@ mod tests {
             z,
             requires_jump: false,
             requires_sprint: false,
+            requires_phase: false,
             is_ledge_drop: false,
         }
     }
@@ -210,14 +216,14 @@ mod tests {
         );
 
         // Near waypoint 1, same goal → splice at index 1.
-        let hit = shared.find_splice(2.2, 0.1, [6.0, 0.0], 1.0, 4.0, true, true);
+        let hit = shared.find_splice(2.2, 0.1, [6.0, 0.0], 1.0, 4.0, true, true, true);
         assert!(matches!(hit, Some((_, 1))));
 
         // Same position, distant goal → stale, no splice.
-        assert!(shared.find_splice(2.2, 0.1, [50.0, 0.0], 1.0, 4.0, true, true).is_none());
+        assert!(shared.find_splice(2.2, 0.1, [50.0, 0.0], 1.0, 4.0, true, true, true).is_none());
 
         // Matching goal but nowhere near the route → no splice.
-        assert!(shared.find_splice(20.0, 20.0, [6.0, 0.0], 1.0, 4.0, true, true).is_none());
+        assert!(shared.find_splice(20.0, 20.0, [6.0, 0.0], 1.0, 4.0, true, true, true).is_none());
     }
 
     #[test]
@@ -229,15 +235,15 @@ mod tests {
 
         // A jumper may splice; a non-jumper must never be offered a route
         // whose remainder demands a jump it would genuinely attempt.
-        assert!(shared.find_splice(0.2, 0.0, [6.0, 0.0], 1.0, 4.0, true, false).is_some());
-        assert!(shared.find_splice(0.2, 0.0, [6.0, 0.0], 1.0, 4.0, false, false).is_none());
+        assert!(shared.find_splice(0.2, 0.0, [6.0, 0.0], 1.0, 4.0, true, false, true).is_some());
+        assert!(shared.find_splice(0.2, 0.0, [6.0, 0.0], 1.0, 4.0, false, false, true).is_none());
 
         let mut sprint_wp = wp(4.0, 2.0);
         sprint_wp.requires_jump = true;
         sprint_wp.requires_sprint = true;
         shared.pool_route(vec![wp(0.0, 2.0), wp(2.0, 2.0), sprint_wp, wp(6.0, 2.0)], [6.0, 2.0], 5.0);
-        assert!(shared.find_splice(0.2, 2.0, [6.0, 2.0], 1.0, 4.0, true, true).is_some());
-        assert!(shared.find_splice(0.2, 2.0, [6.0, 2.0], 1.0, 4.0, true, false).is_none());
+        assert!(shared.find_splice(0.2, 2.0, [6.0, 2.0], 1.0, 4.0, true, true, true).is_some());
+        assert!(shared.find_splice(0.2, 2.0, [6.0, 2.0], 1.0, 4.0, true, false, true).is_none());
     }
 
     #[test]
@@ -268,11 +274,11 @@ mod tests {
     #[test]
     fn enqueue_dedups_by_key() {
         let mut shared = PathingShared::new();
-        shared.enqueue_flow_field((7, true, false));
-        shared.enqueue_flow_field((7, true, false));
+        shared.enqueue_flow_field((7, true, false, false));
+        shared.enqueue_flow_field((7, true, false, false));
         assert_eq!(shared.jobs.len(), 1);
-        shared.enqueue_key_routes((true, false), vec![1, 2]);
-        shared.enqueue_key_routes((true, false), vec![1, 2]);
+        shared.enqueue_key_routes((true, false, false), vec![1, 2]);
+        shared.enqueue_key_routes((true, false, false), vec![1, 2]);
         assert_eq!(shared.jobs.len(), 2);
     }
 }

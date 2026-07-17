@@ -153,6 +153,8 @@ pub struct MonsterCapability {
     pub can_jump: bool,
     /// Unlocks `requires_sprint` edges (Tier-4 promotions) — see ADR 0011.
     pub can_sprint: bool,
+    /// Incorporeal: passes through walls, unlocks phase edges (ADR 0013).
+    pub can_phase: bool,
     pub can_fly: bool,
 }
 
@@ -162,6 +164,7 @@ impl Default for MonsterCapability {
             walk_speed: AiConfig::default().walk_speed,
             can_jump: AiConfig::default().can_jump,
             can_sprint: false,
+            can_phase: false,
             can_fly: false,
         }
     }
@@ -408,6 +411,7 @@ fn flow_target(
             z: p[2],
             requires_jump: hop.requires_jump,
             requires_sprint: hop.requires_sprint,
+            requires_phase: hop.requires_phase,
             is_ledge_drop: hop.is_ledge_drop,
         };
         if hop.requires_jump || hop.requires_sprint || hop.is_ledge_drop {
@@ -833,8 +837,9 @@ impl Engine {
     /// config in this engine already uses). Invalid input is ignored with a
     /// warning.
     pub fn set_monster_capability(&mut self, id: u32, cfg: JsValue) {
-        match serde_wasm_bindgen::from_value(cfg) {
+        match serde_wasm_bindgen::from_value::<MonsterCapability>(cfg) {
             Ok(c) => {
+                self.physics.set_phasing(id, c.can_phase);
                 self.monster_capabilities.insert(id, c);
             }
             Err(e) => log::warn!("set_monster_capability: invalid config ignored: {e}"),
@@ -843,6 +848,7 @@ impl Engine {
 
     /// Revert a monster to the engine-global AiConfig's capability.
     pub fn clear_monster_capability(&mut self, id: u32) {
+        self.physics.set_phasing(id, false);
         self.monster_capabilities.remove(&id);
     }
 
@@ -1309,6 +1315,12 @@ impl Engine {
                         let to_x = min_x + (nc as f32 + 0.5) * cell_size;
                         let to_z = min_z + (nr as f32 + 0.5) * cell_size;
                         if self.horizontally_blocked([from_x, from_y, from_z], [to_x, to_y, to_z]) {
+                            // A wall severs this pair for normal movers, but
+                            // an incorporeal one walks straight through —
+                            // keep the connection as a phase edge (ADR 0013).
+                            if height_diff.abs() <= nav.max_step_up {
+                                mesh.add_phase_edge(from_id, to_id, base_cost);
+                            }
                             continue;
                         }
 
@@ -1423,7 +1435,7 @@ impl Engine {
                         .navmesh
                         .as_ref()
                         .expect("checked")
-                        .flow_field_to_node(key.0, key.1, key.2);
+                        .flow_field_to_node(key.0, key.1, key.2, key.3);
                     self.pathing.insert_flow_field(key, field);
                 } else {
                     self.pathing.queued_flow.remove(&key);
@@ -1433,7 +1445,7 @@ impl Engine {
                 if let Some(mesh) = &self.navmesh {
                     if fields.len() < keys.len() {
                         let k = keys[fields.len()];
-                        fields.push(mesh.flow_field_to_node(k, cap.0, cap.1));
+                        fields.push(mesh.flow_field_to_node(k, cap.0, cap.1, cap.2));
                     }
                     if fields.len() < keys.len() {
                         // One field per slice; requeue at the front so the
@@ -1451,7 +1463,9 @@ impl Engine {
                     self.pathing.queued_caps.remove(&cap);
                 }
             }
-            HeavyJob::DiscoverEdges { cursor } => self.run_discover_slice(cursor),
+            HeavyJob::DiscoverEdges { frontier, cursor } => {
+                self.run_discover_slice(frontier, cursor)
+            }
         }
         let elapsed = timer.elapsed_ms();
         self.pathing.tune_slice(elapsed);
@@ -1461,32 +1475,53 @@ impl Engine {
     /// candidate node pairs the mesh doesn't already connect, walk-speed
     /// profile first, sprint second (specs/engine, ADR 0011). Zero-gravity
     /// engines discover nothing (flight_time is None), by design.
-    fn run_discover_slice(&mut self, mut cursor: usize) {
+    ///
+    /// Sweeps FRONTIER nodes only (degree < 8 — where the walkable surface
+    /// is interrupted; open floor can't anchor a vault), and skips pairs
+    /// already connected within two hops without any raycast — both cuts
+    /// are what make the sweep finish in ticks instead of tens of seconds.
+    fn run_discover_slice(&mut self, mut frontier: Vec<pathfinding::NodeId>, mut cursor: usize) {
         let Some(mesh) = &self.navmesh else {
             self.pathing.discover_pending = false;
             return;
         };
+        const FULL_DEGREE: usize = 8;
+        if frontier.is_empty() && cursor == 0 {
+            frontier = (0..mesh.node_count() as u32)
+                .filter(|&id| mesh.non_phase_degree(id) < FULL_DEGREE)
+                .collect();
+        }
+
         let ai = self.ai;
         let g = self.gravity.abs();
         let reach = ballistic3d::max_reach(ai.jump_speed, ai.sprint_speed, g);
-        let n = mesh.node_count();
         let mut budget = self.pathing.slice_units;
         let mut found: Vec<PendingPromotion> = Vec::new();
 
-        'outer: while cursor < n && budget > 0 {
-            let from_id = cursor as pathfinding::NodeId;
+        'outer: while cursor < frontier.len() && budget > 4 {
+            let from_id = frontier[cursor];
             let Some(from) = mesh.node_position(from_id) else {
                 cursor += 1;
                 continue;
             };
-            for cand in mesh.nodes_within(from[0], from[2], reach) {
+            let cands = mesh.nodes_within(from[0], from[2], reach);
+            // One ray-free window Dijkstra per frontier node: graph distance
+            // to every candidate through EXISTING edges (None = severed).
+            // The boring test below is a detour ratio, not reachability —
+            // a wall you can walk around in 3× the distance still deserves
+            // its vault.
+            let graph_dist = Self::window_graph_distances(mesh, from_id, &cands);
+            budget = budget.saturating_sub(4);
+            for (ci, &cand) in cands.iter().enumerate() {
                 if budget == 0 {
                     // Mid-node exit: resume at this node next slice (its
                     // earlier candidates re-check; promotion is idempotent).
                     break 'outer;
                 }
-                budget -= 1;
-                if cand == from_id || mesh.has_edge(from_id, cand) {
+                if cand == from_id
+                    || mesh.non_phase_degree(cand) >= FULL_DEGREE
+                    || mesh.has_non_phase_edge(from_id, cand)
+                {
                     continue;
                 }
                 let Some(to) = mesh.node_position(cand) else { continue };
@@ -1496,13 +1531,15 @@ impl Engine {
                     continue;
                 }
                 let dy = to[1] - from[1];
-                // Only genuinely new connections are interesting: a near-flat
-                // pair over continuous, unobstructed ground is already served
-                // by ordinary walking — promoting it would carpet open floors
-                // in fake jump edges (and churn the caches every flush).
-                if dy.abs() <= self.nav.jump_threshold && self.walkable_chord(from, to) {
+                // Boring skip (no rays): a near-flat pair the existing graph
+                // already serves without a serious detour is just walking —
+                // promoting it would carpet open floors in fake jump edges.
+                if dy.abs() <= self.nav.jump_threshold
+                    && graph_dist[ci].is_some_and(|d| d <= dist_xz * 2.0)
+                {
                     continue;
                 }
+                budget = budget.saturating_sub(8);
                 for (speed, sprint) in [(ai.walk_speed, false), (ai.sprint_speed, true)] {
                     let Some(t) = ballistic3d::flight_time(dist_xz, dy, ai.jump_speed, speed, g)
                     else {
@@ -1526,44 +1563,61 @@ impl Engine {
             cursor += 1;
         }
 
-        let done = cursor >= n;
+        let done = cursor >= frontier.len();
         self.pathing.promotions.extend(found);
         if done {
             self.pathing.discover_pending = false;
         } else {
-            self.pathing.jobs.push_back(HeavyJob::DiscoverEdges { cursor });
+            self.pathing.jobs.push_back(HeavyJob::DiscoverEdges { frontier, cursor });
         }
     }
 
-    /// True when the straight line between two nodes is plainly walkable:
-    /// nothing blocks it at knee height AND the ground beneath it is
-    /// continuous (no void). Gaps, ledges, and wall-vaults all fail one of
-    /// the two probes and stay discoverable.
-    fn walkable_chord(&self, from: [f32; 3], to: [f32; 3]) -> bool {
-        const KNEE: f32 = 0.3;
-        let a = [from[0], from[1] + KNEE, from[2]];
-        let b = [to[0], to[1] + KNEE, to[2]];
-        if let Some((eid, _)) = self.physics.cast_ray(a, b) {
-            if self.world.is_floor(eid) {
-                return false;
+    /// Ray-free graph distances from `from` to each candidate, through
+    /// existing edges, restricted to the candidate window (plus `from`).
+    /// Edge costs approximated by node-to-node euclidean distance — this
+    /// feeds a detour *ratio*, not an exact cost. None = severed within the
+    /// window (a wall or void cuts the local graph).
+    fn window_graph_distances(
+        mesh: &NavMesh,
+        from: pathfinding::NodeId,
+        cands: &[pathfinding::NodeId],
+    ) -> Vec<Option<f32>> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+        let mut index: HashMap<pathfinding::NodeId, usize> = HashMap::with_capacity(cands.len() + 1);
+        for (i, &c) in cands.iter().enumerate() {
+            index.insert(c, i);
+        }
+        let in_window = |id: pathfinding::NodeId| id == from || index.contains_key(&id);
+        let mut dist: HashMap<pathfinding::NodeId, u32> = HashMap::with_capacity(cands.len() + 1);
+        let mut heap = BinaryHeap::new();
+        dist.insert(from, 0);
+        heap.push(Reverse((0u32, from)));
+        while let Some(Reverse((d, u))) = heap.pop() {
+            if dist.get(&u).is_some_and(|&best| d > best) {
+                continue;
+            }
+            let Some(up) = mesh.node_position(u) else { continue };
+            for v in mesh.non_phase_targets(u) {
+                if !in_window(v) {
+                    continue;
+                }
+                let Some(vp) = mesh.node_position(v) else { continue };
+                let step = ((vp[0] - up[0]).powi(2)
+                    + (vp[1] - up[1]).powi(2)
+                    + (vp[2] - up[2]).powi(2))
+                .sqrt();
+                let nd = d + (step * 100.0) as u32;
+                if dist.get(&v).is_none_or(|&best| nd < best) {
+                    dist.insert(v, nd);
+                    heap.push(Reverse((nd, v)));
+                }
             }
         }
-        for i in 1..=3 {
-            let s = i as f32 / 4.0;
-            let probe = [
-                from[0] + (to[0] - from[0]) * s,
-                from[1].max(to[1]) + 0.5,
-                from[2] + (to[2] - from[2]) * s,
-            ];
-            let grounded = matches!(
-                self.physics.cast_ray(probe, [probe[0], probe[1] - 2.5, probe[2]]),
-                Some((eid, _)) if self.world.is_floor(eid)
-            );
-            if !grounded {
-                return false;
-            }
-        }
-        true
+        cands
+            .iter()
+            .map(|c| dist.get(c).map(|&d| d as f32 / 100.0))
+            .collect()
     }
 
     /// Swept obstruction probe along the jump arc, lifted half a body above
@@ -1626,6 +1680,9 @@ impl Engine {
         } else {
             self.non_walkable_terrain.insert(id);
         }
+        // Walls get their own collision group so incorporeal bodies can
+        // filter them out (ADR 0013).
+        self.physics.set_wall(id, !walkable);
     }
 
     /// Find a path from (startX, startY, startZ) to (goalX, goalZ).
@@ -1649,6 +1706,7 @@ impl Engine {
             can_jump,
             // Manual debug query — sprint edges are for capability-tagged monsters.
             can_sprint: false,
+            can_phase: false,
             start_y: Some(start_y),
         });
 
@@ -2023,6 +2081,7 @@ impl Engine {
                 let eid = self.spawn_floor_entity(b.x, b.y, b.z, b.hw, b.hh, b.hd);
                 if !b.walkable {
                     self.non_walkable_terrain.insert(eid);
+                    self.physics.set_wall(eid, true);
                 }
                 JsTerrainBlock {
                     eid,
@@ -2326,6 +2385,7 @@ impl Engine {
             walk_speed: self.ai.walk_speed,
             can_jump: self.ai.can_jump,
             can_sprint: false,
+            can_phase: false,
             can_fly: false,
         })
     }
@@ -2415,7 +2475,40 @@ impl Engine {
                         continue;
                     }
                     let speed = capability.walk_speed;
-                    let (vx, vy, vz) = (dx / dist * speed, dy / dist * speed, dz / dist * speed);
+                    let (mut vx, mut vy, mut vz) =
+                        (dx / dist * speed, dy / dist * speed, dz / dist * speed);
+                    // Reactive vertical avoidance: terrain on the flight line
+                    // within a speed-derived lookahead → climb over it (keep
+                    // a little forward drive so the ascent clears the face,
+                    // not hovers against it). Once high enough for a clear
+                    // line, the normal beeline resumes — an emergent arc
+                    // over walls with no pathfinding involved (ADR 0012).
+                    let lookahead = speed.max(2.0);
+                    let inv = 1.0 / speed;
+                    // Probe starts past the flyer's own collider — a ray from
+                    // the body center solid-hits itself at t=0.
+                    let skin = 1.05;
+                    let probe_from = [
+                        mx + vx * inv * skin,
+                        my + vy * inv * skin,
+                        mz + vz * inv * skin,
+                    ];
+                    let probe_to = [
+                        mx + vx * inv * lookahead,
+                        my + vy * inv * lookahead,
+                        mz + vz * inv * lookahead,
+                    ];
+                    let blocked = matches!(
+                        this.physics.cast_ray(probe_from, probe_to),
+                        Some((eid, _)) if this.world.is_floor(eid)
+                    );
+                    if blocked {
+                        let h = (vx * vx + vz * vz).sqrt().max(1e-6);
+                        let (fx, fz) = (vx / h, vz / h);
+                        vx = fx * 0.35 * speed;
+                        vy = 0.85 * speed;
+                        vz = fz * 0.35 * speed;
+                    }
                     if !is_2d {
                         let yaw = vx.atan2(vz);
                         this.world.set_rotation(mid, [yaw, 0.0, 0.0]);
@@ -2454,7 +2547,7 @@ impl Engine {
                     continue;
                 }
                 let goal_dir = [dx / dist, dz / dist];
-                let cap_key = (capability.can_jump, capability.can_sprint);
+                let cap_key = (capability.can_jump, capability.can_sprint, capability.can_phase);
 
                 // Frustration: moving-but-not-closing escalation. Drops
                 // whatever route is being trusted (flow/splice included),
@@ -2488,7 +2581,7 @@ impl Engine {
                     let key = *key;
                     let valid = chasing_player
                         && goal_node == Some(key.0)
-                        && (key.1, key.2) == cap_key
+                        && (key.1, key.2, key.3) == cap_key
                         && this.pathing.flow_fields.contains_key(&key);
                     if !valid {
                         if let Some(s) = this.monster_states.get_mut(&mid) {
@@ -2505,7 +2598,7 @@ impl Engine {
                 // the monster keeps its existing behavior.
                 if !have_route && chasing_player && frustration == 0 {
                     if let Some(gn) = goal_node {
-                        let key = (gn, cap_key.0, cap_key.1);
+                        let key = (gn, cap_key.0, cap_key.1, cap_key.2);
                         match this.pathing.flow_fields.get(&key) {
                             // Adopt only if the field can actually route this
                             // monster — an unreachable pocket falls through to
@@ -2541,6 +2634,7 @@ impl Engine {
                         ai.replan_stale_dist,
                         capability.can_jump,
                         capability.can_sprint,
+                        capability.can_phase,
                     ) {
                         if let Some(s) = this.monster_states.get_mut(&mid) {
                             s.route = Some(ActiveRoute::Spliced { route, index });
@@ -2616,6 +2710,7 @@ impl Engine {
                                 route_seed,
                                 can_jump: capability.can_jump,
                                 can_sprint: capability.can_sprint,
+                                can_phase: capability.can_phase,
                                 start_y: Some(foot_y),
                             });
                             pathfinding_ms += path_timer.elapsed_ms();
@@ -3302,6 +3397,7 @@ mod tests {
                 route_seed: None,
                 can_jump: true,
                 can_sprint: false,
+                can_phase: false,
                 start_y: Some(0.0),
             })
             .expect("east stair should route to the platform");
@@ -3361,6 +3457,7 @@ mod tests {
             route_seed: None,
             can_jump: true,
             can_sprint: false,
+            can_phase: false,
             start_y: Some(0.0),
         });
         assert!(
@@ -3391,6 +3488,7 @@ mod tests {
                 route_seed: None,
                 can_jump: true,
                 can_sprint: false,
+                can_phase: false,
                 start_y: Some(4.0),
             })
             .expect("goal hugging the east parapet must resolve to a platform node");
@@ -3445,6 +3543,7 @@ mod tests {
             route_seed: None,
             can_jump: true,
             can_sprint: false,
+            can_phase: false,
             start_y: Some(0.0),
         });
         assert!(
@@ -3915,6 +4014,7 @@ mod tests {
             z,
             requires_jump,
             requires_sprint: false,
+            requires_phase: false,
             is_ledge_drop: false,
         }
     }
@@ -4061,7 +4161,7 @@ mod tests {
         let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
         engine.monster_capabilities.insert(
             m,
-            MonsterCapability { walk_speed: 99.0, can_jump: true, can_sprint: false, can_fly: false },
+            MonsterCapability { walk_speed: 99.0, can_jump: true, can_sprint: false, can_phase: false, can_fly: false },
         );
         engine.update_monster_goal(10.0, 0.0);
 
@@ -4096,7 +4196,7 @@ mod tests {
         let weak = engine.spawn_box_entity(0.5, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
         engine.monster_capabilities.insert(
             weak,
-            MonsterCapability { walk_speed: engine.ai.walk_speed, can_jump: false, can_sprint: false, can_fly: false },
+            MonsterCapability { walk_speed: engine.ai.walk_speed, can_jump: false, can_sprint: false, can_phase: false, can_fly: false },
         );
         engine.update_monster_goal(6.0, 0.0);
         engine.monster_states.get_mut(&capable).unwrap().replan_cooldown = 0.0;
@@ -4129,7 +4229,7 @@ mod tests {
         let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
         engine.monster_capabilities.insert(
             m,
-            MonsterCapability { walk_speed: 10.0, can_jump: true, can_sprint: false, can_fly: true },
+            MonsterCapability { walk_speed: 10.0, can_jump: true, can_sprint: false, can_phase: false, can_fly: true },
         );
 
         engine.tick_monster_ai(0.004);
@@ -4319,6 +4419,152 @@ mod tests {
         }
     }
 
+    /// Run ticks with the heavy-slice budget forced wide open — debug
+    /// builds run raycasts ~50x slower than release/wasm, so the adaptive
+    /// tuner correctly throttles to its floor here and sweeps that finish
+    /// in ~1s of release gameplay would take thousands of debug ticks.
+    /// Tests assert functionality, not debug-build pacing.
+    fn tick_fast(engine: &mut Engine, ticks: usize) {
+        for _ in 0..ticks {
+            engine.pathing.slice_units = 1_000_000;
+            engine.tick_core(0.004);
+        }
+    }
+
+    #[test]
+    fn incorporeal_monster_walks_through_a_wall_that_stops_normal_ones() {
+        // Full-width tall wall — phasing is the only way across (too high
+        // to vault, no way around).
+        let mut engine = Engine::new(None, None);
+        engine.load_map_blocks(&[
+            MapBlock {
+                x: 0.0, y: -1.0, z: 0.0, hw: 10.0, hh: 1.0, hd: 10.0,
+                kind: "floor".into(), walkable: true,
+            },
+            MapBlock {
+                x: 0.0, y: 4.0, z: 0.0, hw: 10.0, hh: 4.0, hd: 0.4,
+                kind: "wall".into(), walkable: false,
+            },
+        ]);
+        engine.update_monster_goal(0.0, 6.0);
+        let ghost = engine.spawn_box_entity(-2.0, 0.9, -6.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.monster_capabilities.insert(
+            ghost,
+            MonsterCapability {
+                walk_speed: 2.5, can_jump: false, can_sprint: false, can_phase: true, can_fly: false,
+            },
+        );
+        engine.physics.set_phasing(ghost, true);
+        let normal = engine.spawn_box_entity(2.0, 0.9, -6.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.monster_states.get_mut(&ghost).unwrap().replan_cooldown = 0.0;
+
+        tick_fast(&mut engine, 3_000);
+
+        let gp = engine.world.position(ghost).unwrap();
+        let np = engine.world.position(normal).unwrap();
+        assert!(
+            gp[2] > 1.0,
+            "the ghost must phase through the wall toward the goal, ended at {gp:?}",
+        );
+        assert!(
+            np[2] < 0.0,
+            "the normal monster must still be blocked by the wall, ended at {np:?}",
+        );
+    }
+
+    #[test]
+    fn flying_monster_climbs_over_a_tall_wall_instead_of_hugging_it() {
+        // Tall wall (top y=8) between a flying monster and the player —
+        // the old beeline pressed against the face forever.
+        let mut engine = Engine::new(None, None);
+        engine.load_map_blocks(&[
+            MapBlock {
+                x: 0.0, y: -1.0, z: 0.0, hw: 10.0, hh: 1.0, hd: 10.0,
+                kind: "floor".into(), walkable: true,
+            },
+            MapBlock {
+                x: 0.0, y: 4.0, z: 0.0, hw: 10.0, hh: 4.0, hd: 0.4,
+                kind: "wall".into(), walkable: false,
+            },
+        ]);
+        let player =
+            engine.spawn_box_entity(0.0, 0.9, 6.0, 0.4, 0.9, 0.4, 100, NET_LOCAL | NET_REPLICATED);
+        engine.register_player(player);
+        let m = engine.spawn_box_entity(0.0, 0.9, -6.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.monster_capabilities.insert(
+            m,
+            MonsterCapability { walk_speed: 8.0, can_jump: false, can_sprint: false, can_phase: false, can_fly: true },
+        );
+
+        let mut max_y = 0.0_f32;
+        let mut crossed = false;
+        for _ in 0..2_000 {
+            engine.tick_core(0.004);
+            let p = engine.world.position(m).unwrap();
+            max_y = max_y.max(p[1]);
+            if p[2] > 1.0 {
+                crossed = true;
+                break;
+            }
+        }
+        let p = engine.world.position(m).unwrap();
+        assert!(crossed, "flyer must cross the wall, ended at {p:?} (max_y {max_y})");
+        assert!(max_y > 8.0, "it must have climbed above the wall top, max_y {max_y}");
+    }
+
+    #[test]
+    fn discovery_finds_vaults_over_the_castle_low_walls() {
+        // The ±5 pen walls (top y=3.0) are under the jump apex (4.2) —
+        // after the discovery sweep, cross-wall vault edges must exist.
+        let mut engine = engine_with_static_map();
+        tick_fast(&mut engine, 10);
+        let mesh = engine.navmesh.as_ref().unwrap();
+        let outside = mesh.nearest_walkable(-6.5, -7.0).unwrap();
+        let inside = mesh.nearest_walkable(-3.5, -7.0).unwrap();
+        assert_ne!(outside, inside, "snap must find distinct nodes across the wall");
+        assert!(
+            mesh.has_edge(outside, inside) || mesh.has_edge(inside, outside),
+            "a vault edge across the low pen wall must have been discovered",
+        );
+    }
+
+    #[test]
+    fn monsters_vault_a_low_wall_when_it_is_the_only_route() {
+        // Full-width low wall (top y=2.0, jump apex 4.2): no way around, so
+        // the Tier-4 vault edge must be discovered AND executable.
+        let mut engine = Engine::new(None, None);
+        engine.load_map_blocks(&[
+            MapBlock {
+                x: 0.0, y: -1.0, z: 0.0, hw: 10.0, hh: 1.0, hd: 10.0,
+                kind: "floor".into(), walkable: true,
+            },
+            MapBlock {
+                x: 0.0, y: 1.0, z: 0.0, hw: 10.0, hh: 1.0, hd: 0.4,
+                kind: "wall".into(), walkable: false,
+            },
+        ]);
+        engine.update_monster_goal(0.0, 6.0);
+        let m = engine.spawn_box_entity(0.0, 0.9, -6.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+
+        // ~14s: discovery sweep, promotion flush, replan, walk, vault.
+        let mut crossed_at = None;
+        for tick in 0..3_500 {
+            engine.tick_core(0.004);
+            if crossed_at.is_none() {
+                let p = engine.world.position(m).unwrap();
+                if p[2] > 1.0 {
+                    crossed_at = Some(tick);
+                    break;
+                }
+            }
+        }
+        let p = engine.world.position(m).unwrap();
+        assert!(
+            crossed_at.is_some(),
+            "monster must vault the low wall (the only route), ended at {p:?}",
+        );
+    }
+
     #[test]
     fn tier4_discovers_a_sprint_only_gap_and_only_sprinters_may_use_it() {
         // Two islands; nearest cross-gap nodes ~6.0 apart — beyond the
@@ -4346,6 +4592,7 @@ mod tests {
             route_seed: None,
             can_jump: true,
             can_sprint,
+            can_phase: false,
             start_y: Some(0.0),
         };
         let sprint_path = mesh.find_path(request(true));
@@ -4399,7 +4646,7 @@ mod tests {
         let a = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
         engine.monster_capabilities.insert(
             a,
-            MonsterCapability { walk_speed: 99.0, can_jump: false, can_sprint: false, can_fly: true },
+            MonsterCapability { walk_speed: 99.0, can_jump: false, can_sprint: false, can_phase: false, can_fly: true },
         );
         engine.destroy_entity(a);
         assert!(engine.monster_capabilities.get(&a).is_none());
@@ -4912,6 +5159,7 @@ mod tests {
             route_seed: None,
             can_jump: true,
             can_sprint: false,
+            can_phase: false,
             start_y: Some(301.0),
         });
         assert!(path.is_some(), "path must exist on a high-altitude floor");

@@ -65,6 +65,11 @@ pub struct PhysicsWorld3D {
     // See GROUNDED_STRIDE for the caching policy.
     tick_count: u64,
     grounded_cache: HashMap<EntityId, bool>,
+
+    // Collision-class overrides (see specs/physics "Collision Groups"):
+    // walls live in their own group so phasing bodies can filter them out.
+    wall_ids: std::collections::HashSet<EntityId>,
+    phasing_ids: std::collections::HashSet<EntityId>,
 }
 
 impl PhysicsWorld3D {
@@ -88,6 +93,61 @@ impl PhysicsWorld3D {
             touching: HashMap::new(),
             tick_count: 0,
             grounded_cache: HashMap::new(),
+            wall_ids: std::collections::HashSet::new(),
+            phasing_ids: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Group filter for a dynamic body: floors + walls, minus walls when
+    /// phasing (incorporeal — see specs/physics "Collision Groups").
+    fn dynamic_groups(&self, id: EntityId) -> InteractionGroups {
+        let filter = if self.phasing_ids.contains(&id) {
+            Group::GROUP_1
+        } else {
+            Group::GROUP_1 | Group::GROUP_3
+        };
+        InteractionGroups::new(Group::GROUP_2, filter)
+    }
+
+    /// Static terrain memberships: walls get GROUP_3 (filterable by phasing
+    /// bodies); ordinary floors GROUP_1. Raycasts ignore groups either way.
+    fn static_groups(&self, id: EntityId) -> InteractionGroups {
+        let membership = if self.wall_ids.contains(&id) {
+            Group::GROUP_3
+        } else {
+            Group::GROUP_1
+        };
+        InteractionGroups::new(membership, Group::ALL)
+    }
+
+    /// Mark (or unmark) a static terrain entity as a wall. Applied at body
+    /// creation and live if the collider already exists.
+    pub fn set_wall(&mut self, id: EntityId, is_wall: bool) {
+        if is_wall {
+            self.wall_ids.insert(id);
+        } else {
+            self.wall_ids.remove(&id);
+        }
+        let groups = self.static_groups(id);
+        if let Some(&h) = self.entity_to_col.get(&id) {
+            if let Some(col) = self.colliders.get_mut(h) {
+                col.set_collision_groups(groups);
+            }
+        }
+    }
+
+    /// Let a dynamic body pass through walls (incorporeal) — or not.
+    pub fn set_phasing(&mut self, id: EntityId, phasing: bool) {
+        if phasing {
+            self.phasing_ids.insert(id);
+        } else {
+            self.phasing_ids.remove(&id);
+        }
+        let groups = self.dynamic_groups(id);
+        if let Some(&h) = self.entity_to_col.get(&id) {
+            if let Some(col) = self.colliders.get_mut(h) {
+                col.set_collision_groups(groups);
+            }
         }
     }
 
@@ -144,15 +204,15 @@ impl PhysicsWorld3D {
                 let col_builder = if cfg.sensor {
                     ColliderBuilder::new(shape).sensor(true)
                 } else if is_dynamic {
-                    // Zero-friction + Multiply combine + GROUP_2→GROUP_1 broadphase
-                    // filter — rationale in specs/physics/README.md ("Zero Friction" and
-                    // "Collision Groups" sections).
+                    // Zero-friction + Multiply combine + group filter —
+                    // rationale in specs/physics/README.md ("Zero Friction"
+                    // and "Collision Groups" sections).
                     ColliderBuilder::new(shape)
                         .friction(0.0)
                         .friction_combine_rule(CoefficientCombineRule::Multiply)
-                        .collision_groups(InteractionGroups::new(Group::GROUP_2, Group::GROUP_1))
+                        .collision_groups(self.dynamic_groups(id))
                 } else {
-                    ColliderBuilder::new(shape)
+                    ColliderBuilder::new(shape).collision_groups(self.static_groups(id))
                 };
                 let col_handle = self.colliders.insert_with_parent(
                     col_builder.build(),
