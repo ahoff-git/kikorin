@@ -2420,6 +2420,8 @@ impl Engine {
                         [goal_x, goal_z],
                         ai.waypoint_reach * 2.0,
                         ai.replan_stale_dist,
+                        capability.can_jump,
+                        capability.can_sprint,
                     ) {
                         if let Some(s) = this.monster_states.get_mut(&mid) {
                             s.route = Some(ActiveRoute::Spliced { route, index });

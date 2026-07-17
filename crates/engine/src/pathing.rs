@@ -136,9 +136,12 @@ impl PathingShared {
     }
 
     /// A pooled route usable from near (x, z) toward `goal`: its own goal
-    /// must still match (staleness guard reusing replan_stale_dist), and
-    /// some waypoint must be within `splice_radius`. Returns (route, index
-    /// of the splice-on waypoint).
+    /// must still match (staleness guard reusing replan_stale_dist), some
+    /// waypoint must be within `splice_radius`, and the route must demand
+    /// nothing beyond the splicer's capability — a route computed BY a
+    /// jumper/sprinter contains waypoints a weaker splicer would genuinely
+    /// attempt and fail (the ADR 0006/0008 stranding class). Returns
+    /// (route, index of the splice-on waypoint).
     pub fn find_splice(
         &self,
         x: f32,
@@ -146,12 +149,20 @@ impl PathingShared {
         goal: [f32; 2],
         splice_radius: f32,
         goal_tolerance: f32,
+        can_jump: bool,
+        can_sprint: bool,
     ) -> Option<(Rc<SharedRoute>, usize)> {
         let splice_sq = splice_radius * splice_radius;
         let goal_sq = goal_tolerance * goal_tolerance;
         for route in self.route_pool.iter().rev() {
             let dg = (route.goal[0] - goal[0]).powi(2) + (route.goal[1] - goal[1]).powi(2);
             if dg > goal_sq {
+                continue;
+            }
+            let too_demanding = route.waypoints.iter().any(|wp| {
+                (!can_jump && wp.requires_jump) || (!can_sprint && wp.requires_sprint)
+            });
+            if too_demanding {
                 continue;
             }
             let hit = route.waypoints.iter().position(|wp| {
@@ -199,14 +210,34 @@ mod tests {
         );
 
         // Near waypoint 1, same goal → splice at index 1.
-        let hit = shared.find_splice(2.2, 0.1, [6.0, 0.0], 1.0, 4.0);
+        let hit = shared.find_splice(2.2, 0.1, [6.0, 0.0], 1.0, 4.0, true, true);
         assert!(matches!(hit, Some((_, 1))));
 
         // Same position, distant goal → stale, no splice.
-        assert!(shared.find_splice(2.2, 0.1, [50.0, 0.0], 1.0, 4.0).is_none());
+        assert!(shared.find_splice(2.2, 0.1, [50.0, 0.0], 1.0, 4.0, true, true).is_none());
 
         // Matching goal but nowhere near the route → no splice.
-        assert!(shared.find_splice(20.0, 20.0, [6.0, 0.0], 1.0, 4.0).is_none());
+        assert!(shared.find_splice(20.0, 20.0, [6.0, 0.0], 1.0, 4.0, true, true).is_none());
+    }
+
+    #[test]
+    fn splice_never_offers_a_route_beyond_the_splicer_capability() {
+        let mut shared = PathingShared::new();
+        let mut jump_wp = wp(4.0, 0.0);
+        jump_wp.requires_jump = true;
+        shared.pool_route(vec![wp(0.0, 0.0), wp(2.0, 0.0), jump_wp, wp(6.0, 0.0)], [6.0, 0.0], 5.0);
+
+        // A jumper may splice; a non-jumper must never be offered a route
+        // whose remainder demands a jump it would genuinely attempt.
+        assert!(shared.find_splice(0.2, 0.0, [6.0, 0.0], 1.0, 4.0, true, false).is_some());
+        assert!(shared.find_splice(0.2, 0.0, [6.0, 0.0], 1.0, 4.0, false, false).is_none());
+
+        let mut sprint_wp = wp(4.0, 2.0);
+        sprint_wp.requires_jump = true;
+        sprint_wp.requires_sprint = true;
+        shared.pool_route(vec![wp(0.0, 2.0), wp(2.0, 2.0), sprint_wp, wp(6.0, 2.0)], [6.0, 2.0], 5.0);
+        assert!(shared.find_splice(0.2, 2.0, [6.0, 2.0], 1.0, 4.0, true, true).is_some());
+        assert!(shared.find_splice(0.2, 2.0, [6.0, 2.0], 1.0, 4.0, true, false).is_none());
     }
 
     #[test]
