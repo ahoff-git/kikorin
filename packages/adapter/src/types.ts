@@ -182,6 +182,10 @@ export interface AiConfigInput {
   stuck_move_threshold?: number;
   stuck_escape_after?: number;
   separation_radius?: number;
+  /** Frustration escalation window — no goal progress for this long → escalate (see specs/engine). */
+  no_progress_after?: number;
+  /** Minimum distance-to-goal improvement that counts as progress. */
+  progress_epsilon?: number;
 }
 
 /**

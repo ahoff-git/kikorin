@@ -101,6 +101,12 @@ pub struct AiConfig {
     pub stuck_move_threshold: f32,
     pub stuck_escape_after: f32,
     pub separation_radius: f32,
+    /// Frustration escalation: with no goal-distance progress for this long,
+    /// a monster drops its route (flow included), pierces its replan
+    /// cooldown, and retries with route variety — see specs/engine.
+    pub no_progress_after: f32,
+    /// Minimum distance-to-goal improvement that counts as progress.
+    pub progress_epsilon: f32,
 }
 
 impl Default for AiConfig {
@@ -121,6 +127,8 @@ impl Default for AiConfig {
             stuck_move_threshold: 0.5,
             stuck_escape_after: 1.6,
             separation_radius: 2.0,
+            no_progress_after: 2.0,
+            progress_epsilon: 0.25,
         }
     }
 }
@@ -446,6 +454,13 @@ struct MonsterState {
     /// Per-monster goal override (set_monster_goal); None = the engine-wide
     /// default goal (update_monster_goal).
     goal: Option<[f32; 2]>,
+    // Frustration escalation (specs/engine): moving-but-not-closing
+    // detection — complements the stuck sampler, which only catches
+    // zero movement.
+    progress_goal: [f32; 2],
+    best_goal_dist: f32,
+    progress_timer: f32,
+    frustration: u32,
 }
 
 impl MonsterState {
@@ -460,7 +475,38 @@ impl MonsterState {
             last_sample_z: f32::INFINITY,
             stuck_sample_timer: 0.0,
             goal: None,
+            progress_goal: [f32::INFINITY, f32::INFINITY],
+            best_goal_dist: f32::INFINITY,
+            progress_timer: 0.0,
+            frustration: 0,
         }
+    }
+
+    /// True when this monster should escalate: no goal-distance improvement
+    /// (beyond `progress_epsilon`) for `no_progress_after` seconds. A goal
+    /// that itself jumped (player fled/teleported) re-baselines instead of
+    /// counting as failure; real progress clears frustration entirely.
+    fn update_progress(&mut self, ai: &AiConfig, dt_secs: f32, dist: f32, goal: [f32; 2]) -> bool {
+        let goal_moved = (goal[0] - self.progress_goal[0])
+            .hypot(goal[1] - self.progress_goal[1])
+            > ai.replan_stale_dist;
+        if goal_moved || dist + ai.progress_epsilon < self.best_goal_dist {
+            self.progress_goal = goal;
+            self.best_goal_dist = dist;
+            self.progress_timer = 0.0;
+            if !goal_moved {
+                self.frustration = 0;
+            }
+            return false;
+        }
+        self.progress_timer += dt_secs;
+        if self.progress_timer >= ai.no_progress_after {
+            self.progress_timer = 0.0;
+            self.best_goal_dist = dist;
+            self.frustration = (self.frustration + 1).min(8);
+            return true;
+        }
+        false
     }
 
     /// Decay cooldowns, run stuck sampling, and decide whether this monster
@@ -2410,6 +2456,23 @@ impl Engine {
                 let goal_dir = [dx / dist, dz / dist];
                 let cap_key = (capability.can_jump, capability.can_sprint);
 
+                // Frustration: moving-but-not-closing escalation. Drops
+                // whatever route is being trusted (flow/splice included),
+                // pierces the replan cooldown, and — while frustrated —
+                // shuns shared answers in favor of its own seeded A* (route
+                // variety), so each escalation genuinely tries harder.
+                let escalated = match this.monster_states.get_mut(&mid) {
+                    Some(state) => state.update_progress(&ai, dt_secs, dist, [goal_x, goal_z]),
+                    None => continue,
+                };
+                if escalated {
+                    if let Some(s) = this.monster_states.get_mut(&mid) {
+                        s.route = None;
+                        s.replan_cooldown = 0.0;
+                    }
+                }
+                let frustration = this.monster_states.get(&mid).map_or(0, |s| s.frustration);
+
                 // --- Dispatcher: validate, then acquire, a route. ---
                 // A flow route is re-validated against the goal's current
                 // node every tick; any mismatch (goal moved nodes, field
@@ -2440,7 +2503,7 @@ impl Engine {
                 // Crowd chase rides the shared flow field (O(1) per tick, no
                 // A* token); missing fields build on the heavy queue while
                 // the monster keeps its existing behavior.
-                if !have_route && chasing_player {
+                if !have_route && chasing_player && frustration == 0 {
                     if let Some(gn) = goal_node {
                         let key = (gn, cap_key.0, cap_key.1);
                         match this.pathing.flow_fields.get(&key) {
@@ -2467,8 +2530,9 @@ impl Engine {
                 }
 
                 // Splice onto another monster's pooled route — free, no
-                // search; staleness-guarded inside find_splice.
-                if !have_route {
+                // search; staleness-guarded inside find_splice. Frustrated
+                // monsters shun shared routes (one may be why they're stuck).
+                if !have_route && frustration == 0 {
                     if let Some((route, index)) = this.pathing.find_splice(
                         mx,
                         mz,
@@ -2507,9 +2571,11 @@ impl Engine {
                 if should_replan {
                     // Tier 3 first: a baked key plan is zero-search and does
                     // not consume the A* token. Its own usefulness gate
-                    // rejects short hauls (see KeyRoutes::plan).
+                    // rejects short hauls (see KeyRoutes::plan). Frustrated
+                    // monsters skip it — a deterministic baked answer that
+                    // isn't working would just be retried identically.
                     let mut planned = false;
-                    if !chasing_player {
+                    if !chasing_player && frustration == 0 {
                         if this.pathing.key_routes.contains_key(&cap_key) {
                             if let (Some(kr), Some(mesh)) =
                                 (this.pathing.key_routes.get(&cap_key), this.navmesh.as_ref())
@@ -2538,10 +2604,16 @@ impl Engine {
                         path_requested_this_tick = true;
                         if let Some(navmesh) = &this.navmesh {
                             let path_timer = Timer::new();
+                            // Each escalation retries with a different seed —
+                            // deterministic route variety, so "try harder"
+                            // means "try a different way", not the same
+                            // failing route again.
+                            let route_seed = (frustration > 0)
+                                .then(|| mid.wrapping_mul(31).wrapping_add(frustration));
                             let result = navmesh.find_path(PathRequest {
                                 start: [mx, foot_y, mz],
                                 goal: [goal_x, 0.0, goal_z],
-                                route_seed: None,
+                                route_seed,
                                 can_jump: capability.can_jump,
                                 can_sprint: capability.can_sprint,
                                 start_y: Some(foot_y),
@@ -4169,6 +4241,80 @@ mod tests {
             assert!(
                 mx > 4.0 || mz > -1.0,
                 "monster crossed the wall line without using the gap: ({mx},{mz})",
+            );
+        }
+    }
+
+    #[test]
+    fn frustration_escalates_on_no_progress_and_resets_on_real_progress() {
+        let ai = AiConfig::default();
+        let mut state = MonsterState::new(0.0);
+
+        // First observation baselines (goal "moved" from the INFINITY init).
+        assert!(!state.update_progress(&ai, 0.1, 10.0, [10.0, 0.0]));
+        assert_eq!(state.frustration, 0);
+
+        // Closing distance is progress — timer resets, no escalation.
+        assert!(!state.update_progress(&ai, 0.1, 9.0, [10.0, 0.0]));
+
+        // Moving without closing: escalates once the window elapses.
+        let mut fired = 0;
+        for _ in 0..40 {
+            if state.update_progress(&ai, 0.1, 9.2, [10.0, 0.0]) {
+                fired += 1;
+            }
+        }
+        assert_eq!(fired, 2, "4s of no progress at a 2s window = 2 escalations");
+        assert_eq!(state.frustration, 2);
+
+        // The goal itself jumping re-baselines without penalizing.
+        assert!(!state.update_progress(&ai, 0.1, 25.0, [30.0, 0.0]));
+        assert_eq!(state.frustration, 2, "a fleeing goal is not the monster's failure");
+
+        // Real progress clears frustration entirely.
+        assert!(!state.update_progress(&ai, 0.1, 20.0, [30.0, 0.0]));
+        assert_eq!(state.frustration, 0);
+    }
+
+    #[test]
+    fn frustration_pierces_a_cold_replan_cooldown_and_finds_a_way_around() {
+        // A monster beelining into a wall (no route, replan cooldown far in
+        // the future) used to do so forever. Frustration must notice the
+        // lack of progress, pierce the cooldown, and get a real route.
+        let mut engine = Engine::new(None, None);
+        engine.load_map_blocks(&[
+            MapBlock {
+                x: 0.0, y: -1.0, z: 0.0, hw: 10.0, hh: 1.0, hd: 10.0,
+                kind: "floor".into(), walkable: true,
+            },
+            MapBlock {
+                x: -2.0, y: 3.0, z: 0.0, hw: 8.0, hh: 3.0, hd: 0.4,
+                kind: "wall".into(), walkable: false,
+            },
+        ]);
+        // Fallback goal beyond the wall (no player → no flow field lane).
+        engine.update_monster_goal(-8.0, 8.0);
+        let m = engine.spawn_box_entity(-8.0, 0.9, -8.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        engine.monster_states.get_mut(&m).unwrap().replan_cooldown = 1_000.0;
+        engine.ai.stuck_escape_after = 1_000.0; // isolate frustration from stuck-escape
+
+        // ~10s: ~3s of legitimate approach progress, then the wall jam, the
+        // 2s no-progress window, and time to route east after escalation.
+        for _ in 0..2_500 {
+            engine.tick_core(0.004);
+        }
+
+        let state = engine.monster_states.get(&m).unwrap();
+        assert!(
+            state.route.is_some(),
+            "escalation must have pierced the cooldown and produced a route",
+        );
+        let v = engine.world.velocity(m).unwrap();
+        let [mx, _, mz] = engine.world.position(m).unwrap();
+        if mz < -1.0 {
+            assert!(
+                v[0] > 0.3,
+                "behind the wall the route must head east toward the gap, got {v:?} at ({mx},{mz})",
             );
         }
     }

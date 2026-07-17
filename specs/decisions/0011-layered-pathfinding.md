@@ -26,6 +26,8 @@ An adversarial design review before implementation surfaced one "broken as desig
 
 **Goal layers**: concrete goals replace the target (override → closest player → fallback, unchanged); reactive influences only perturb velocity after the route picked a direction — `apply_monster_separation` was already this pattern; `add_monster_nudge` generalizes it.
 
+**Frustration escalation** (added after playtesting): the stuck sampler only catches zero movement, so a monster moving without closing distance (wall-sliding, doorway jams, a shared route that doesn't work *for it*) never recovered. Per-monster progress tracking (`no_progress_after` / `progress_epsilon`, both `AiConfig`-tunable) escalates by dropping the trusted route, piercing the replan cooldown, and — while frustrated — shunning all shared answers in favor of its own `route_seed`-varied A*, giving the route-noise mechanism its first real consumer. Fleeing goals re-baseline rather than penalize; progress clears frustration.
+
 `sprint_speed` is engine-global in `AiConfig` (like `jump_speed` — the mesh is solved for one canonical profile); `can_sprint` is per-monster in `MonsterCapability`. The "agile" template sprints by default so the discovery→promotion→execution pipeline is exercised in normal play.
 
 ## Consequences
