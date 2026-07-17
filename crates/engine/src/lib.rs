@@ -375,6 +375,49 @@ enum ActiveRoute {
     Flow { key: pathing::FlowKey },
 }
 
+/// Chain flow hops into one steering target safely beyond `reach` — a
+/// single adjacent-node hop (cell_size 1.5 < waypoint_reach 1.8) is
+/// instantly "reached" by follow_slice and would collapse flow following
+/// into direct pursuit. Chains break at jump/sprint/ledge hops so jump
+/// timing still happens at the correct node.
+fn flow_target(
+    mesh: &NavMesh,
+    field: &pathfinding::FlowField,
+    start: pathfinding::NodeId,
+    reach: f32,
+) -> Option<Waypoint> {
+    const MAX_CHAIN: usize = 8;
+    let mut node = start;
+    let mut acc = 0.0_f32;
+    let mut last: Option<Waypoint> = None;
+    let mut last_pos = mesh.node_position(start)?;
+    for _ in 0..MAX_CHAIN {
+        let Some(hop) = field.next_hop(node) else { break };
+        let p = mesh.node_position(hop.to)?;
+        let wp = Waypoint {
+            x: p[0],
+            y: p[1],
+            z: p[2],
+            requires_jump: hop.requires_jump,
+            requires_sprint: hop.requires_sprint,
+            is_ledge_drop: hop.is_ledge_drop,
+        };
+        if hop.requires_jump || hop.requires_sprint || hop.is_ledge_drop {
+            // The special hop itself when it's next; otherwise stop just
+            // before it so it becomes "next" once the flat run is walked.
+            return Some(last.unwrap_or(wp));
+        }
+        acc += ((p[0] - last_pos[0]).powi(2) + (p[2] - last_pos[2]).powi(2)).sqrt();
+        last_pos = p;
+        last = Some(wp);
+        if acc > reach * 1.5 {
+            break;
+        }
+        node = hop.to;
+    }
+    last
+}
+
 impl ActiveRoute {
     fn owned(path: Vec<Waypoint>) -> Self {
         ActiveRoute::Owned { path, index: 0 }
@@ -2400,13 +2443,25 @@ impl Engine {
                 if !have_route && chasing_player {
                     if let Some(gn) = goal_node {
                         let key = (gn, cap_key.0, cap_key.1);
-                        if this.pathing.flow_fields.contains_key(&key) {
-                            if let Some(s) = this.monster_states.get_mut(&mid) {
-                                s.route = Some(ActiveRoute::Flow { key });
-                                have_route = true;
+                        match this.pathing.flow_fields.get(&key) {
+                            // Adopt only if the field can actually route this
+                            // monster — an unreachable pocket falls through to
+                            // splice/A* (which will also fail, but must not be
+                            // silently suppressed by holding a dead Flow route).
+                            Some(field) => {
+                                let reachable = this
+                                    .navmesh
+                                    .as_ref()
+                                    .and_then(|m| m.nearest_walkable_3d(mx, foot_y, mz))
+                                    .is_some_and(|n| field.reaches(n));
+                                if reachable {
+                                    if let Some(s) = this.monster_states.get_mut(&mid) {
+                                        s.route = Some(ActiveRoute::Flow { key });
+                                        have_route = true;
+                                    }
+                                }
                             }
-                        } else {
-                            this.pathing.enqueue_flow_field(key);
+                            None => this.pathing.enqueue_flow_field(key),
                         }
                     }
                 }
@@ -2541,16 +2596,7 @@ impl Engine {
                             let hop_wp = this.pathing.flow_fields.get(key).and_then(|field| {
                                 let mesh = this.navmesh.as_ref()?;
                                 let node = mesh.nearest_walkable_3d(mx, foot_y, mz)?;
-                                let hop = field.next_hop(node)?;
-                                let p = mesh.node_position(hop.to)?;
-                                Some(Waypoint {
-                                    x: p[0],
-                                    y: p[1],
-                                    z: p[2],
-                                    requires_jump: hop.requires_jump,
-                                    requires_sprint: hop.requires_sprint,
-                                    is_ledge_drop: hop.is_ledge_drop,
-                                })
+                                flow_target(mesh, field, node, ai.waypoint_reach)
                             });
                             match hop_wp {
                                 Some(wp) => {
@@ -4069,6 +4115,62 @@ mod tests {
             1,
             "one shared field serves every same-goal chaser",
         );
+    }
+
+    #[test]
+    fn flow_field_followers_detour_around_walls_instead_of_beelining() {
+        // Regression: cell_size (1.5) < waypoint_reach (1.8) made every flat
+        // flow hop instantly "reached", collapsing flow following into direct
+        // pursuit — invisible on a flat floor, wall-hugging on a real map.
+        let mut engine = Engine::new(None, None);
+        engine.load_map_blocks(&[
+            MapBlock {
+                x: 0.0, y: -1.0, z: 0.0, hw: 10.0, hh: 1.0, hd: 10.0,
+                kind: "floor".into(), walkable: true,
+            },
+            // Tall wall across z=0 leaving only an east gap (x in [6,10]).
+            MapBlock {
+                x: -2.0, y: 3.0, z: 0.0, hw: 8.0, hh: 3.0, hd: 0.4,
+                kind: "wall".into(), walkable: false,
+            },
+        ]);
+        let player =
+            engine.spawn_box_entity(-8.0, 0.9, 8.0, 0.4, 0.9, 0.4, 100, NET_LOCAL | NET_REPLICATED);
+        engine.register_player(player);
+        let m = engine.spawn_box_entity(-8.0, 0.9, -8.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
+        // Isolate the flow path: no A* of its own (a valid Owned route would
+        // correctly be kept until exhausted), no stuck-escape resets.
+        engine.monster_states.get_mut(&m).unwrap().replan_cooldown = 1_000.0;
+        engine.ai.stuck_escape_after = 1_000.0;
+
+        // Enough ticks for discovery to finish and the flow field to build.
+        for _ in 0..400 {
+            engine.tick_core(0.004);
+        }
+        assert!(
+            matches!(
+                engine.monster_states.get(&m).and_then(|s| s.route.as_ref()),
+                Some(ActiveRoute::Flow { .. })
+            ),
+            "chaser must be riding the flow field by now",
+        );
+
+        let [mx, _, mz] = engine.world.position(m).unwrap();
+        if mz < -1.0 {
+            // Still on the wall's far side: the field must steer east toward
+            // the gap, not straight at the player (direct is pure +z here).
+            let v = engine.world.velocity(m).unwrap();
+            assert!(
+                v[0] > v[2].abs() * 0.5 && v[0] > 0.5,
+                "flow follower behind the wall must head east toward the gap, got {v:?} at ({mx},{mz})",
+            );
+        } else {
+            // Already through: it can only have gotten here via the east gap.
+            assert!(
+                mx > 4.0 || mz > -1.0,
+                "monster crossed the wall line without using the gap: ({mx},{mz})",
+            );
+        }
     }
 
     #[test]
