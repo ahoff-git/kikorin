@@ -205,13 +205,15 @@ export const KIKORIN_ANIM_DEFS: AnimationDefsInput = {
       ],
       looping: true,
     },
-    // 2: attack — one-shot, blocking; the strike frame is a little longer
+    // 2: attack — one-shot, blocking; the strike frame (3) is a little longer
+    // and carries event 1 (FIRE): the engine spawns the player's bullet exactly
+    // when the swing connects, regardless of how the attack is timed (ADR 0017).
     {
       frames: [
         { optimal_ms: 60 },
         { optimal_ms: 50 },
         { optimal_ms: 60 },
-        { optimal_ms: 120 },
+        { optimal_ms: 120, event: 1 },
         { optimal_ms: 140 },
       ],
       looping: false,

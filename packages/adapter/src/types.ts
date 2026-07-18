@@ -251,6 +251,12 @@ export interface AnimFrameInput {
   skippable?: boolean;
   /** Opens an interrupt window even under a block/queue policy. */
   cancelable?: boolean;
+  /**
+   * Frame-synced event id fired once when playback enters this frame. The engine
+   * maps ids to gameplay actions (e.g. 1 = spawn the player's projectile), so an
+   * effect stays locked to the frame regardless of animation speed (ADR 0017).
+   */
+  event?: number;
 }
 
 export interface AnimFamilyInput {

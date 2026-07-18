@@ -740,6 +740,10 @@ const ANIM_KIND_ATTACK: u16 = 2;
 // Squared horizontal speed above which an animated entity reads as "walking".
 const ANIM_WALK_EPS_SQ: f32 = 0.05;
 
+// Frame-event ids the engine dispatches (ADR 0017). Games mark the matching
+// frame in their animation defs; the engine maps the id to a gameplay action.
+const ANIM_EVENT_FIRE: u16 = 1; // spawn the player's projectile
+
 // --- load_animations boundary DTO: game-authored animation definitions ---
 // The art (sheets/layers) stays in the TS manifest; this is the timing/behavior
 // half loaded into the engine (the sprite analog of load_map). See ADR 0015.
@@ -754,6 +758,8 @@ struct JsAnimFrame {
     skippable: bool,
     #[serde(default)]
     cancelable: bool,
+    #[serde(default)]
+    event: Option<u16>,
 }
 
 #[derive(serde::Deserialize)]
@@ -806,6 +812,7 @@ fn build_animation_set(dto: JsAnimationSet) -> animation::AnimationSet {
                     cancelable: f.cancelable,
                     hitbox: None,
                     hurtbox: None,
+                    event: f.event,
                 }
             })
             .collect();
@@ -1032,10 +1039,25 @@ impl Engine {
         }
     }
 
-    /// Fire one bullet from the player along its facing + aim pitch (tuning in
-    /// PlayerConfig). Ballistic, replicated, predictable; spawn and death reach
-    /// the game as lifecycle patches.
+    /// Fire: with animations loaded, this only *requests* the attack action —
+    /// the bullet spawns when the attack reaches its FIRE frame (drive_animation
+    /// dispatch), keeping the shot locked to the strike regardless of animation
+    /// speed. Without an animation set the bullet fires immediately (unchanged
+    /// behavior for games that don't load animations, e.g. the 2D game fires via
+    /// spawn_bullet directly and never calls this). See ADR 0017.
     pub fn player_fire(&mut self) {
+        if self.animation_set.is_some() {
+            if let Some(eid) = self.player.as_ref().map(|p| p.eid) {
+                self.request_entity_action(eid, ANIM_KIND_ATTACK, None, None);
+            }
+        } else {
+            self.fire_player_bullet();
+        }
+    }
+
+    /// Spawn one bullet from the player along its current facing + aim pitch.
+    /// Called either immediately (no animations) or on the attack's FIRE frame.
+    fn fire_player_bullet(&mut self) {
         let cfg = self.player_cfg;
         let Some((eid, yaw, aim_pitch)) = self
             .player
@@ -1058,9 +1080,6 @@ impl Engine {
             cos_y * cos_p * cfg.bullet_speed,
             NET_REPLICATED | NET_PREDICTABLE,
         );
-        // Rust owns animation: firing requests the attack action on the player's
-        // instance; its family's interrupt policy decides how it plays out.
-        self.request_entity_action(eid, ANIM_KIND_ATTACK, None, None);
     }
 
     /// Spawn `count` monsters on a ring around the origin (placement/template
@@ -1142,15 +1161,15 @@ impl Engine {
             .unwrap_or(false);
         self.request_entity_action(eid, if moving { ANIM_KIND_WALK } else { ANIM_KIND_IDLE }, None, None);
 
-        let (frame, family) = {
+        let (frame, family, event) = {
             let Some(set) = self.animation_set.as_ref() else {
                 return;
             };
             let Some(inst) = self.animation_states.get_mut(&eid) else {
                 return;
             };
-            inst.advance(set, dt_ms);
-            (inst.current_frame(), inst.family())
+            let event = inst.advance(set, dt_ms);
+            (inst.current_frame(), inst.family(), event)
         };
         let dir = self
             .world
@@ -1165,6 +1184,19 @@ impl Engine {
         if self.world.anim_cell(eid) != Some(cell) {
             self.world.set_anim_cell(eid, cell);
             self.world.mark_dirty(eid, DirtyFlags::ANIM);
+        }
+        // Frame-synced gameplay hook: a frame the animation just entered can
+        // trigger an engine action (ADR 0017).
+        if let Some(ev) = event {
+            self.on_anim_event(eid, ev);
+        }
+    }
+
+    /// Dispatch a frame event to its gameplay action. The player's attack FIRE
+    /// frame spawns the bullet, so the shot is locked to the strike frame.
+    fn on_anim_event(&mut self, eid: u32, event: u16) {
+        if event == ANIM_EVENT_FIRE && self.player.as_ref().is_some_and(|p| p.eid == eid) {
+            self.fire_player_bullet();
         }
     }
 
@@ -3811,6 +3843,66 @@ mod tests {
             walkable: true,
         }]);
         engine
+    }
+
+    fn bullet_count(engine: &Engine) -> usize {
+        engine
+            .world
+            .entities()
+            .filter(|&id| engine.world.net_flags(id).is_some_and(|f| f & NET_BULLET != 0))
+            .count()
+    }
+
+    // A 3-frame attack (fixed 100 ms each) whose FIRE event sits on frame 1, plus
+    // a trivial idle. Drives the "bullet spawns on the strike frame" contract.
+    fn fire_on_frame1_anim_set() -> animation::AnimationSet {
+        let mut set = animation::AnimationSet::new();
+        let idle = set.push_family(animation::Family {
+            frames: vec![animation::FrameSpec::fixed(100.0)],
+            looping: true,
+            next: None,
+            hold_last: false,
+            interrupt: animation::Interrupt::Always,
+            branch_frame: None,
+        });
+        let mut strike = animation::FrameSpec::fixed(100.0);
+        strike.event = Some(ANIM_EVENT_FIRE);
+        let attack = set.push_family(animation::Family {
+            frames: vec![animation::FrameSpec::fixed(100.0), strike, animation::FrameSpec::fixed(100.0)],
+            looping: false,
+            next: None,
+            hold_last: false,
+            interrupt: animation::Interrupt::Block,
+            branch_frame: None,
+        });
+        set.map_action(ANIM_KIND_IDLE, None, idle);
+        set.map_action(ANIM_KIND_ATTACK, None, attack);
+        set
+    }
+
+    #[test]
+    fn player_bullet_spawns_on_the_attack_fire_frame_not_the_click() {
+        let mut engine = engine_with_flat_floor();
+        engine.animation_set = Some(fire_on_frame1_anim_set());
+        let player = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        engine.register_player(player);
+
+        // Fire only *requests* the attack — no bullet yet (deferred to FIRE frame).
+        engine.player_fire();
+        assert_eq!(bullet_count(&engine), 0, "no bullet on the click itself");
+
+        // Frame 0 is [0,100)ms; at 4 ms/tick, frame 1 (the FIRE frame) begins at
+        // tick 25. Nothing should spawn before then.
+        for _ in 0..20 {
+            engine.tick_core(0.004);
+        }
+        assert_eq!(bullet_count(&engine), 0, "still winding up — no bullet before the strike frame");
+
+        // Cross into the FIRE frame → exactly one bullet.
+        for _ in 0..10 {
+            engine.tick_core(0.004);
+        }
+        assert_eq!(bullet_count(&engine), 1, "the strike frame spawns the bullet");
     }
 
     #[test]

@@ -50,9 +50,17 @@ from intended horizontal velocity, which the controller/AI set before physics),
 requests it (a Block/Queue one-shot like attack ignores it until done), advances
 the instance by the tick's dt, then writes the resolved `AnimCell`
 (family/frame/direction, direction quantized from the entity's yaw) into the ECS
-`anim` column and marks `ANIM` dirty only on change. `player_fire` requests the
-attack action on the player's instance. Hit/hurtbox geometry from the set is
-carried but not yet consumed — authoritative melee combat is Phase 3.
+`anim` column and marks `ANIM` dirty only on change.
+
+**Frame events (ADR 0017).** `advance` also returns the marker of a frame just
+*entered*; `drive_animation` dispatches it via `on_anim_event`. Today
+`ANIM_EVENT_FIRE` on the player spawns the bullet (`fire_player_bullet`), so the
+shot is locked to the attack's strike frame regardless of animation speed.
+Accordingly `player_fire` only *requests* the attack when an animation set is
+loaded (the bullet spawns on the FIRE frame); with no set it fires immediately
+(unchanged for games that never load animations, e.g. the 2D game). Hit/hurtbox
+geometry from the set is carried but not yet consumed — authoritative melee
+combat is Phase 3.
 
 ### NET Flags — the entity networking profile
 The `net_flags` bitmask (constants live in `crates/ecs`, mirrored in `@kikorin/adapter`) is the source of truth for how the engine simulates **and replicates** each entity. The dimensions compose — an entity's networking behavior is the combination, not one enum:

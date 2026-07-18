@@ -109,9 +109,12 @@ export class Engine {
      */
     constructor(dimension?: string | null, gravity?: number | null);
     /**
-     * Fire one bullet from the player along its facing + aim pitch (tuning in
-     * PlayerConfig). Ballistic, replicated, predictable; spawn and death reach
-     * the game as lifecycle patches.
+     * Fire: with animations loaded, this only *requests* the attack action —
+     * the bullet spawns when the attack reaches its FIRE frame (drive_animation
+     * dispatch), keeping the shot locked to the strike regardless of animation
+     * speed. Without an animation set the bullet fires immediately (unchanged
+     * behavior for games that don't load animations, e.g. the 2D game fires via
+     * spawn_bullet directly and never calls this). See ADR 0017.
      */
     player_fire(): void;
     /**

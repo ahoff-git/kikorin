@@ -56,6 +56,12 @@ instances and feeds this crate; TypeScript only renders the resolved cell.
 - **Direction**: `direction_from_yaw` quantizes to 8 rows (0 = South, clockwise;
   row index runs opposite yaw); `direction_from_yaw_relative` is the billboard
   variant.
+- **Frame events** (ADR 0017): a `FrameSpec.event: Option<u16>` marker. `advance`
+  returns the event id of a frame *entered* that call — once on entry (tracked
+  via `last_frame`), again each loop the frame recurs, never for a skipped/cut
+  frame. Frame-synced, not time-synced: the effect rides frame entry regardless
+  of how time-fitting stretched the schedule. The crate doesn't interpret ids;
+  the engine maps them to gameplay actions.
 
 ## Invariants
 - Family 0 is idle by convention and the terminal fallback of
@@ -75,4 +81,7 @@ animation section).
 the camera-relative variant; `schedule_frames` optimal / shrink / drop-skippable
 / stretch / stretch-capped; playback loop-wrap, one-shot hold+finish;
 interruptibility Always/Block/Queue and the per-frame cancel window; same-family
-no-restart; action resolution variant → wildcard → idle.
+no-restart; action resolution variant → wildcard → idle; frame events fire once
+on entry and again each loop, and on a one-shot strike frame regardless of dt.
+The engine adds the end-to-end pin: no bullet on the click, exactly one when the
+attack's FIRE frame is entered.

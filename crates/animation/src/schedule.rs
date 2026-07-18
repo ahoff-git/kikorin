@@ -117,6 +117,7 @@ mod tests {
             cancelable: false,
             hitbox: None,
             hurtbox: None,
+            event: None,
         }
     }
 

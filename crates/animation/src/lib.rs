@@ -47,6 +47,13 @@ pub struct FrameSpec {
     pub cancelable: bool,
     pub hitbox: Option<HitBox>,
     pub hurtbox: Option<HitBox>,
+    /// A frame-synced event marker. When playback *enters* this frame,
+    /// `AnimationInstance::advance` reports this id once — the "call this
+    /// function after this frame" hook. The consumer (the engine) maps the id
+    /// to an action (e.g. spawn a projectile), so effects stay locked to the
+    /// frame regardless of how the animation is stretched or cut. Meaningless
+    /// to this crate; a dropped (skipped) frame never fires it.
+    pub event: Option<u16>,
 }
 
 impl FrameSpec {
@@ -60,6 +67,7 @@ impl FrameSpec {
             cancelable: false,
             hitbox: None,
             hurtbox: None,
+            event: None,
         }
     }
 }

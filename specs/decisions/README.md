@@ -30,6 +30,8 @@ Lightweight architecture decision record (ADR) log for kikorin.
 - [0013: Incorporeal (can_phase) — collision groups + phase edges](./0013-incorporeal-phase-capability.md)
 - [0014: Paper-doll sprites via a renderer-agnostic resolved-pose contract](./0014-paperdoll-resolved-pose-contract.md)
 - [0015: Animation is Rust-simulated; TypeScript is a thin renderer](./0015-animation-simulation-in-rust.md)
+- [0016: Queue branch frames and collider-cube hit/hurtboxes](./0016-animation-branch-frames-and-collider-boxes.md)
+- [0017: Frame-synced animation events (callbacks)](./0017-frame-synced-animation-events.md)
 
 ## Open Questions
 

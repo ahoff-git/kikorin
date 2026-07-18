@@ -13,6 +13,9 @@ pub struct AnimationInstance {
     pending: Option<(usize, Option<f32>)>,
     /// One-shot reached its end (holding the last frame, awaiting a transition).
     finished: bool,
+    /// Frame shown at the end of the previous advance — a change signals a
+    /// newly-entered frame, which is when a frame event fires (once).
+    last_frame: Option<usize>,
 }
 
 impl AnimationInstance {
@@ -23,6 +26,7 @@ impl AnimationInstance {
             elapsed_ms: 0.0,
             pending: None,
             finished: false,
+            last_frame: None,
         };
         me.start(set, family, target_ms);
         me
@@ -52,6 +56,8 @@ impl AnimationInstance {
         self.elapsed_ms = 0.0;
         self.finished = false;
         self.pending = None;
+        // Frame 0 of the new family is entered fresh — let its event fire.
+        self.last_frame = None;
     }
 
     fn can_interrupt_now(&self, set: &AnimationSet) -> bool {
@@ -90,7 +96,10 @@ impl AnimationInstance {
         self.start(set, family, target_ms);
     }
 
-    pub fn advance(&mut self, set: &AnimationSet, dt_ms: f32) {
+    /// Advance the clock by `dt_ms`. Returns the event id of a frame *entered*
+    /// this call (once, when it becomes the shown frame), else None — the
+    /// frame-synced "call this function after this frame" hook (ADR 0017).
+    pub fn advance(&mut self, set: &AnimationSet, dt_ms: f32) -> Option<u16> {
         if dt_ms > 0.0 {
             self.elapsed_ms += dt_ms;
         }
@@ -104,7 +113,7 @@ impl AnimationInstance {
                 if self.current_frame() >= bf {
                     let (fam, target) = self.pending.take().unwrap();
                     self.start(set, fam, target);
-                    return;
+                    return self.entered_event(set);
                 }
             }
         }
@@ -113,7 +122,7 @@ impl AnimationInstance {
             if !looping {
                 self.reach_end(set);
             }
-            return;
+            return self.entered_event(set);
         }
 
         if self.elapsed_ms >= total {
@@ -123,6 +132,23 @@ impl AnimationInstance {
                 self.reach_end(set);
             }
         }
+        self.entered_event(set)
+    }
+
+    /// The event of the current frame, but only if it just became the shown
+    /// frame since the previous advance (so it fires once on entry, not every
+    /// tick the frame is held, and again each loop when the frame recurs).
+    fn entered_event(&mut self, set: &AnimationSet) -> Option<u16> {
+        let cur = self.current_frame();
+        let entered = self.last_frame != Some(cur);
+        self.last_frame = Some(cur);
+        if !entered {
+            return None;
+        }
+        set.families
+            .get(self.family)
+            .and_then(|f| f.frames.get(cur))
+            .and_then(|frame| frame.event)
     }
 
     fn reach_end(&mut self, set: &AnimationSet) {
@@ -246,6 +272,32 @@ mod tests {
         i.advance(&s, 120.0); // now in frame 2 (cancel window)
         i.request(&s, 1, None);
         assert_eq!(i.family(), 1);
+    }
+
+    #[test]
+    fn frame_event_fires_once_on_entry_and_again_each_loop() {
+        let mut s = set();
+        // walk (family 1, looping, 4×100ms): mark frame 2 with event 7.
+        s.families[1].frames[2].event = Some(7);
+        let mut i = AnimationInstance::new(&s, 1, None);
+        assert_eq!(i.advance(&s, 50.0), None); // frame 0, no event
+        assert_eq!(i.advance(&s, 100.0), None); // frame 1
+        assert_eq!(i.advance(&s, 100.0), Some(7)); // entered frame 2 → fires
+        assert_eq!(i.advance(&s, 20.0), None); // still frame 2 → no refire
+        assert_eq!(i.advance(&s, 100.0), None); // frame 3
+        i.advance(&s, 100.0); // wrap to frame 0
+        assert_eq!(i.advance(&s, 200.0), Some(7)); // frame 2 again next loop
+    }
+
+    #[test]
+    fn frame_event_fires_on_a_one_shot_strike_frame_regardless_of_dt() {
+        let mut s = set();
+        // attack (family 2, one-shot, 3×100ms): strike event 9 on frame 1.
+        s.families[2].frames[1].event = Some(9);
+        let mut i = AnimationInstance::new(&s, 2, None);
+        // One big step that lands inside frame 1 still reports the strike once.
+        assert_eq!(i.advance(&s, 120.0), Some(9));
+        assert_eq!(i.advance(&s, 50.0), None);
     }
 
     #[test]
