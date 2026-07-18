@@ -43,16 +43,25 @@ const FAMILIES_SPEC: FamilySpec[] = [
   { name: "idle", loop: true, frames: [{ ms: 450 }, { ms: 450 }] },
   { name: "walk", loop: true, frames: [{ ms: 110 }, { ms: 110 }, { ms: 110 }, { ms: 110 }] },
   {
-    // Fast run-and-gun shot: you can move and turn while firing, just not jump
-    // mid-shot (a small taste of the move-mask — ADR 0018). Retriggerable so
-    // rapid clicks re-fire. The strike frame (2) carries FIRE (event 1) so the
-    // bullet spawns exactly on the gun-fire frame (ADR 0017).
+    // Run-and-gun shot: raise the gun fast, FIRE the instant it's out (frame 2,
+    // event 1 — the gun-fire frame, ADR 0017), HOLD it extended for a few
+    // moments, then lower it back down the same path (frames 5–6 mirror 1–0, so
+    // it "plays backwards" home — the drawer's raiseHoldLower is symmetric). You
+    // can move + turn while firing, just not jump mid-shot (move-mask, ADR 0018).
     name: "attack",
     loop: false,
     interrupt: "block",
     retriggerable: true,
     movement: { jump: false },
-    frames: [{ ms: 40 }, { ms: 45 }, { ms: 55, event: 1 }, { ms: 55 }],
+    frames: [
+      { ms: 40 }, // 0 rest
+      { ms: 45 }, // 1 raising
+      { ms: 90, event: 1 }, // 2 gun out → FIRE
+      { ms: 150 }, // 3 held out
+      { ms: 150 }, // 4 held out
+      { ms: 45 }, // 5 lowering (mirrors 1)
+      { ms: 40 }, // 6 rest (mirrors 0)
+    ],
   },
   // Quick flinch on non-lethal damage (ADR 0020) — short and blocking so it
   // reads before locomotion resumes.
@@ -107,6 +116,17 @@ function progress(frame: number, frames: number): number {
   return frames > 1 ? frame / (frames - 1) : 0;
 }
 
+/**
+ * Symmetric raise → hold → lower profile in [0,1]: ramps up over the first
+ * quarter, holds at 1 through the middle, ramps back down over the last quarter.
+ * The descent is the ascent mirrored, so the gun "plays backwards" on the way
+ * home. Used for the shooting pose (raise the gun, hold it out, lower it).
+ */
+function raiseHoldLower(frame: number, frames: number): number {
+  const p = progress(frame, frames);
+  return Math.max(0, Math.min(1, (1 - Math.abs(2 * p - 1)) / 0.5));
+}
+
 function drawBody(color: string, shade: string): CellDrawer {
   return (ctx, family, dir, frame, frames) => {
     const [fx, fy] = FACING[dir];
@@ -133,8 +153,9 @@ function drawBody(color: string, shade: string): CellDrawer {
     let recoil = 0;
     if (family === "walk") swing = walkSwing(frame, frames);
     else if (family === "idle") bob = frame % 2 === 0 ? 0 : 1;
-    else if (family === "attack") lunge = Math.sin(progress(frame, frames) * Math.PI) * 5;
     else if (family === "hurt") recoil = 3 * (1 - progress(frame, frames)); // quick knock-back that settles
+    // "attack" leaves the body still — the weapon raises/holds/lowers so the hat
+    // and head stay put (the sword layer carries the shooting motion).
 
     const cx = CELL_W / 2 + fx * (lunge - recoil);
     const topShift = bob + fy * (lunge - recoil) * 0.5;
@@ -172,15 +193,18 @@ function drawHat(color: string): CellDrawer {
   };
 }
 
+const WEAPON_REST = -Math.PI / 5; // stowed at the side
+const WEAPON_OUT = 1.4; // raised, extended forward to fire
+
 function drawSword(color: string): CellDrawer {
   return (ctx, family, _dir, frame, frames) => {
     if (family === "death") return; // dropped on death (collapsed body only)
     ctx.save();
     ctx.translate(CELL_W / 2, CELL_H / 2);
-    // Attack sweeps the blade through an arc (wind-up → strike → recover); other
-    // families rest it at the side. The swing is what makes the attack read.
-    const angle = family === "attack" ? -2.2 + progress(frame, frames) * 3.8 : -Math.PI / 5;
-    ctx.rotate(angle);
+    // Attack raises the gun out, holds it there, then lowers it back along the
+    // same path (raiseHoldLower is symmetric — the return is the raise reversed).
+    const t = family === "attack" ? raiseHoldLower(frame, frames) : 0;
+    ctx.rotate(WEAPON_REST + (WEAPON_OUT - WEAPON_REST) * t);
     ctx.fillStyle = color;
     ctx.fillRect(-2, -20, 4, 30);
     ctx.fillStyle = "#c9a227";
