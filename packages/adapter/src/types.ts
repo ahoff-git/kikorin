@@ -13,6 +13,15 @@ export interface SemanticPatch {
   health?: number;
   net_flags?: number;
   grounded?: boolean;
+  /**
+   * Resolved animation cell, present when the engine's animation state machine
+   * changed it this tick: which family (`anim_id`), frame, and 8-way direction
+   * to display. Rust owns animation; TS renders the cell and never recomputes
+   * it (ADR 0015). Absent unless animations are loaded (load_animations).
+   */
+  anim_id?: number;
+  anim_frame?: number;
+  anim_dir?: number;
 }
 
 export interface NetPatch {
@@ -225,6 +234,50 @@ export interface NavConfigInput {
   corner_drop_tolerance?: number;
 }
 
+/**
+ * Game-authored animation definitions loaded into the engine (load_animations).
+ * The *behavior* half of the paper-doll system — timings, transitions,
+ * interruptibility — kept in step with the TS art manifest by family order
+ * (family index = `anim_id` the engine emits). Art (sheets/layers) stays in
+ * `@kikorin/paperdoll`'s manifest. See ADR 0015 / 0016.
+ */
+export interface AnimFrameInput {
+  /** Natural display time for this frame (ms). */
+  optimal_ms: number;
+  /** Fitting clamps; default to optimal_ms (rigid frame). */
+  min_ms?: number;
+  max_ms?: number;
+  /** May be dropped when a target duration cuts the animation short. */
+  skippable?: boolean;
+  /** Opens an interrupt window even under a block/queue policy. */
+  cancelable?: boolean;
+}
+
+export interface AnimFamilyInput {
+  frames: AnimFrameInput[];
+  looping?: boolean;
+  /** Family index to flow to when a one-shot ends. */
+  next?: number;
+  /** Freeze the final frame (e.g. death) instead of transitioning. */
+  hold_last?: boolean;
+  /** How a new action interrupts this one; default "always". */
+  interrupt?: 'always' | 'block' | 'queue';
+  /** Under "queue", the frame at which a queued action takes over (else at end). */
+  branch_frame?: number;
+}
+
+/** Maps an engine action kind (+ optional variant) to a family index. */
+export interface AnimActionInput {
+  kind: number;
+  variant?: number;
+  family: number;
+}
+
+export interface AnimationDefsInput {
+  families: AnimFamilyInput[];
+  actions?: AnimActionInput[];
+}
+
 /** Minimal interface the WASM Engine must satisfy. */
 export interface EngineHandle {
   /** Advance the simulation by dt_ms. Returns a PatchBundle JS object directly. */
@@ -247,6 +300,8 @@ export interface EngineHandle {
   set_player_config(cfg: PlayerConfigInput): void;
   /** Override monster spawn/respawn tuning (partial; missing = engine defaults). */
   set_monster_config(cfg: MonsterConfigInput): void;
+  /** Load animation definitions (families/timings/transitions/action map). Absent = animation inert. */
+  load_animations(defs: AnimationDefsInput): void;
   /**
    * Register the player entity. The engine then runs its controller from
    * set_player_input, fires via player_fire, and aims the default monster goal

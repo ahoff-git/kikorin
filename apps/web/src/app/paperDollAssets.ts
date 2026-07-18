@@ -1,35 +1,40 @@
-// Procedural placeholder sprite set for the top-down game. This is *game data*,
-// not engine code — it lives here for the same reason KIKORIN_TOPDOWN_MAP does.
-// It exists so the paper-doll pipeline has something to render without shipping
-// real art: every sheet is drawn to an offscreen canvas at runtime and handed to
-// @kikorin/paperdoll as an in-memory source (baseUrl is never touched).
+// Procedural placeholder sprite set + matching animation definitions for the
+// top-down game. This is *game data*, not engine code (like KIKORIN_TOPDOWN_MAP).
+// It exists so the paper-doll pipeline has something to render and animate
+// without shipping real art, and doubles as the reference example for authoring
+// a real set: the art half (sheets, drawn here to offscreen canvases) feeds
+// @kikorin/paperdoll, and the behavior half (KIKORIN_ANIM_DEFS) is loaded into
+// the Rust engine, which owns the animation simulation (ADR 0015).
 //
-// The drawings are deliberately crude but readable: an obvious facing marker per
-// direction row, a leg-swing per walk frame, and a sword bar that overlaps the
-// torso so the per-direction layer ordering (in front facing the camera, behind
-// facing away) is visible at a glance. Swap this for real sheets under
-// public/sprites/ + a JSON manifest whenever art exists.
+// The two halves are kept in step by FAMILY_ORDER: the engine emits an anim_id
+// that indexes it, and the sprite maps that back to a family name to bake.
 
+import type { AnimationDefsInput } from "@kikorin/adapter";
 import type { SpriteManifest, SpriteSetDef } from "@kikorin/paperdoll";
 
 const CELL_W = 32;
 const CELL_H = 48;
 
+/** Family names in engine `anim_id` order — the bridge between Rust and the art. */
+export const FAMILY_ORDER = ["idle", "walk", "attack"] as const;
+
+/** Frame counts must match KIKORIN_ANIM_DEFS below (sheet columns = family frames). */
+const FAMILY_FRAMES: Record<string, number> = { idle: 2, walk: 4, attack: 5 };
+
 // Per-direction unit vector in cell pixel space (y-down). Row order is the
-// engine's Direction enum: S, SW, W, NW, N, NE, E, SE. The sheet is drawn with
-// flipY, so small y = screen-up = north.
+// engine's Direction enum: S, SW, W, NW, N, NE, E, SE. Sheets are flipY, so
+// small y = screen-up = north.
 const FACING: ReadonlyArray<readonly [number, number]> = [
-  [0, 1], // S
-  [-0.7, 0.7], // SW
-  [-1, 0], // W
-  [-0.7, -0.7], // NW
-  [0, -1], // N
-  [0.7, -0.7], // NE
-  [1, 0], // E
-  [0.7, 0.7], // SE
+  [0, 1], [-0.7, 0.7], [-1, 0], [-0.7, -0.7], [0, -1], [0.7, -0.7], [1, 0], [0.7, 0.7],
 ];
 
-type CellDrawer = (ctx: CanvasRenderingContext2D, dir: number, frame: number, frames: number) => void;
+type CellDrawer = (
+  ctx: CanvasRenderingContext2D,
+  family: string,
+  dir: number,
+  frame: number,
+  frames: number,
+) => void;
 
 interface ItemSpec {
   id: string;
@@ -37,46 +42,54 @@ interface ItemSpec {
   draw: CellDrawer;
 }
 
-function legOffset(frame: number, frames: number): number {
+function walkSwing(frame: number, frames: number): number {
   if (frames <= 1) return 0;
-  // −2, 0, +2, 0 … a simple stride bob.
   return [0, -2, 0, 2][frame % 4] ?? 0;
 }
 
+/** 0→1 progress through a one-shot family. */
+function progress(frame: number, frames: number): number {
+  return frames > 1 ? frame / (frames - 1) : 0;
+}
+
 function drawBody(color: string, shade: string): CellDrawer {
-  return (ctx, dir, frame, frames) => {
-    const cx = CELL_W / 2;
-    const swing = legOffset(frame, frames);
+  return (ctx, family, dir, frame, frames) => {
+    const [fx, fy] = FACING[dir];
+    let swing = 0;
+    let bob = 0;
+    let lunge = 0;
+    if (family === "walk") swing = walkSwing(frame, frames);
+    else if (family === "idle") bob = frame % 2 === 0 ? 0 : 1;
+    else if (family === "attack") lunge = Math.sin(progress(frame, frames) * Math.PI) * 5;
 
-    // Legs (swing in opposition for a walk read).
+    const cx = CELL_W / 2 + fx * lunge;
+    const topShift = bob + fy * lunge * 0.5;
+
+    // Legs (opposed swing while walking).
     ctx.fillStyle = shade;
-    ctx.fillRect(cx - 6, 34 + swing, 4, 12 - Math.abs(swing));
-    ctx.fillRect(cx + 2, 34 - swing, 4, 12 - Math.abs(swing));
+    ctx.fillRect(cx - 6, 34 + topShift + swing, 4, 12 - Math.abs(swing));
+    ctx.fillRect(cx + 2, 34 + topShift - swing, 4, 12 - Math.abs(swing));
 
-    // Torso.
+    // Torso + head.
     ctx.fillStyle = color;
-    ctx.fillRect(cx - 6, 18, 12, 16);
-
-    // Head.
+    ctx.fillRect(cx - 6, 18 + topShift, 12, 16);
     ctx.beginPath();
-    ctx.arc(cx, 12, 7, 0, Math.PI * 2);
+    ctx.arc(cx, 12 + topShift, 7, 0, Math.PI * 2);
     ctx.fill();
 
-    // Facing marker: a nose dot pushed toward the direction of travel.
-    const [fx, fy] = FACING[dir];
+    // Facing marker.
     ctx.fillStyle = shade;
     ctx.beginPath();
-    ctx.arc(cx + fx * 5, 12 + fy * 5, 2.2, 0, Math.PI * 2);
+    ctx.arc(cx + fx * 5, 12 + topShift + fy * 5, 2.2, 0, Math.PI * 2);
     ctx.fill();
   };
 }
 
 function drawHat(color: string): CellDrawer {
-  return (ctx, dir) => {
+  return (ctx, _family, dir) => {
     const cx = CELL_W / 2;
     const [fx, fy] = FACING[dir];
     ctx.fillStyle = color;
-    // A cap arc over the top of the head, nudged toward the facing side.
     ctx.beginPath();
     ctx.arc(cx + fx * 2, 9 + fy * 2, 8, Math.PI, Math.PI * 2);
     ctx.fill();
@@ -85,14 +98,15 @@ function drawHat(color: string): CellDrawer {
 }
 
 function drawSword(color: string): CellDrawer {
-  return (ctx) => {
-    // A bold bar across the torso — overlaps the body so the layer order (front
-    // vs behind) reads clearly. Direction-independent on purpose.
+  return (ctx, family, _dir, frame, frames) => {
     ctx.save();
     ctx.translate(CELL_W / 2, CELL_H / 2);
-    ctx.rotate(-Math.PI / 5);
+    // Attack sweeps the blade through an arc (wind-up → strike → recover); other
+    // families rest it at the side. The swing is what makes the attack read.
+    const angle = family === "attack" ? -2.2 + progress(frame, frames) * 3.8 : -Math.PI / 5;
+    ctx.rotate(angle);
     ctx.fillStyle = color;
-    ctx.fillRect(-2, -18, 4, 30);
+    ctx.fillRect(-2, -20, 4, 30);
     ctx.fillStyle = "#c9a227";
     ctx.fillRect(-4, 8, 8, 4); // hilt
     ctx.restore();
@@ -106,16 +120,11 @@ const ITEMS: ItemSpec[] = [
   { id: "sword", slot: "weapon", draw: drawSword("#dfe6ee") },
 ];
 
-const FAMILIES: Record<string, { frames: number; fps: number; loop: boolean }> = {
-  idle: { frames: 1, fps: 1, loop: true },
-  walk: { frames: 4, fps: 10, loop: true },
-};
-
 function sheetKey(itemId: string, family: string): string {
   return `${itemId}/${family}`;
 }
 
-function renderSheet(draw: CellDrawer, frames: number): HTMLCanvasElement {
+function renderSheet(draw: CellDrawer, family: string, frames: number): HTMLCanvasElement {
   const canvas = document.createElement("canvas");
   canvas.width = CELL_W * frames;
   canvas.height = CELL_H * 8; // 8 direction rows
@@ -125,7 +134,7 @@ function renderSheet(draw: CellDrawer, frames: number): HTMLCanvasElement {
     for (let frame = 0; frame < frames; frame += 1) {
       ctx.save();
       ctx.translate(frame * CELL_W, dir * CELL_H);
-      draw(ctx, dir, frame, frames);
+      draw(ctx, family, dir, frame, frames);
       ctx.restore();
     }
   }
@@ -134,8 +143,8 @@ function renderSheet(draw: CellDrawer, frames: number): HTMLCanvasElement {
 
 /**
  * Build the placeholder sprite set: a manifest plus in-memory canvas sheets for
- * every (item, family). Call once at game setup, then registerSpriteSet + await
- * loadSpriteSet with the result.
+ * every (item, family). Call once at game setup, then registerSpriteSet +
+ * loadSpriteSet with the result. The manifest's family list matches FAMILY_ORDER.
  */
 export function buildKikorinSpriteSet(): SpriteSetDef {
   const sources: Record<string, CanvasImageSource> = {};
@@ -143,25 +152,31 @@ export function buildKikorinSpriteSet(): SpriteSetDef {
 
   for (const item of ITEMS) {
     const sheets: Record<string, string> = {};
-    for (const [family, def] of Object.entries(FAMILIES)) {
+    for (const family of FAMILY_ORDER) {
+      const frames = FAMILY_FRAMES[family];
       const key = sheetKey(item.id, family);
-      sources[key] = renderSheet(item.draw, def.frames);
+      sources[key] = renderSheet(item.draw, family, frames);
       sheets[family] = key;
     }
     items[item.id] = { slot: item.slot, sheets };
+  }
+
+  const families: SpriteManifest["families"] = {};
+  for (const family of FAMILY_ORDER) {
+    families[family] = { frames: FAMILY_FRAMES[family], fps: 10, loop: family !== "attack" };
   }
 
   const manifest: SpriteManifest = {
     cell: [CELL_W, CELL_H],
     anchor: [0.5, 1.0],
     rows: 8,
-    families: FAMILIES,
-    actionMap: { "0": "idle", "1": "walk" },
+    families,
+    // actionMap/fallbacks are only used by the TS-derived fallback path; harmless here.
+    actionMap: { "0": "idle", "1": "walk", "2": "attack" },
     fallbacks: { "*": "idle" },
     layerOrder: {
       body: 0,
-      head: 2, // always over the body
-      // In front when facing toward the camera (south-ish), behind when facing away.
+      head: 2,
       weapon: [1, 1, 1, -1, -1, -1, 1, 1],
     },
     items,
@@ -169,6 +184,46 @@ export function buildKikorinSpriteSet(): SpriteSetDef {
 
   return { manifest, sources };
 }
+
+/**
+ * The behavior half loaded into the Rust engine (family index = anim_id =
+ * FAMILY_ORDER index). idle/walk loop; attack is a one-shot that BLOCKS (plays
+ * fully, ignoring movement) so the swing is always seen. Timings drive the
+ * playback clock and the stretch/cut fitting in Rust.
+ */
+export const KIKORIN_ANIM_DEFS: AnimationDefsInput = {
+  families: [
+    // 0: idle
+    { frames: [{ optimal_ms: 450 }, { optimal_ms: 450 }], looping: true },
+    // 1: walk
+    {
+      frames: [
+        { optimal_ms: 110 },
+        { optimal_ms: 110 },
+        { optimal_ms: 110 },
+        { optimal_ms: 110 },
+      ],
+      looping: true,
+    },
+    // 2: attack — one-shot, blocking; the strike frame is a little longer
+    {
+      frames: [
+        { optimal_ms: 60 },
+        { optimal_ms: 50 },
+        { optimal_ms: 60 },
+        { optimal_ms: 120 },
+        { optimal_ms: 140 },
+      ],
+      looping: false,
+      interrupt: "block",
+    },
+  ],
+  actions: [
+    { kind: 0, family: 0 },
+    { kind: 1, family: 1 },
+    { kind: 2, family: 2 },
+  ],
+};
 
 export const KIKORIN_SPRITE_SET_ID = "kikorin-placeholder";
 export const PLAYER_LOADOUT = { body: "body-hero", head: "hat-hero", weapon: "sword" };

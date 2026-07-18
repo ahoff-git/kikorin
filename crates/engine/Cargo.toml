@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 ecs = { path = "../ecs" }
 physics = { path = "../physics" }
 pathfinding = { path = "../pathfinding" }
+animation = { path = "../animation" }
 netcode = { path = "../netcode" }
 patch = { path = "../patch" }
 wasm-bindgen = "0.2"

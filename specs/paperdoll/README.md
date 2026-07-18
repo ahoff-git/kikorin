@@ -8,13 +8,14 @@
 > describes the intended full contract) isn't mistaken for all-shipped. See
 > ADR 0014.
 >
-> **Migrating (ADR 0015):** the animation *simulation* — the pose/timing/frame
-> resolvers, `setAction`, and auto-derived locomotion described below — is moving
-> into Rust (`crates/animation`, see [specs/animation](../animation/README.md)).
-> Once that lands, this package keeps the *art* side (manifest, bake cache,
-> `THREE.Sprite` renderer) and simply displays the frame/direction the engine
-> emits per tick. The resolver sections below describe the current committed TS
-> behavior until that refactor.
+> **Rust-driven now (ADR 0015, Phase 2):** the animation *simulation* lives in
+> `crates/animation` and runs in the engine ([specs/animation](../animation/README.md)).
+> This package now has two modes: pass `animFamilies` (index = engine `anim_id`)
+> and the sprite displays the cell fed via `setCell(animId, frame, dir)` from the
+> SemanticPatch anim fields — the top-down game uses this. Without `animFamilies`
+> it keeps the standalone TS-derived behavior (the resolver/clock sections below).
+> Either way the package owns only the *art* (manifest, bake cache, `THREE.Sprite`
+> renderer, `texture.offset` cell selection).
 
 ### Purpose
 Resolves what an animated character looks like *right now* — facing direction,
@@ -268,18 +269,22 @@ fallback; the three resolvers; the full-sheet compositor (sRGB `CanvasTexture`,
 `THREE.Sprite` (points at the camera in every mode — flat under top-down,
 upright under perspective; per-frame `update`, `texture.offset` cell selection
 with per-sprite source-sharing clones, loadout swap, `setAction`); in-memory
-*or* `baseUrl` sheet sources. Wired into the top-down game: player and monsters
-render as layered 8-way sprites (body + hat + sword; per-direction weapon
-ordering). 31 co-located unit tests pass; the rendering path was verified in a
-real browser (player facing E/N/W, sword layering flipping front/behind, correct
-colors).
+*or* `baseUrl` sheet sources; and the **Rust-driven `setCell` mode**
+(`animFamilies`) that displays the engine-emitted cell. Wired into the top-down
+game: player and monsters render as layered 8-way sprites (body + hat + sword;
+per-direction weapon ordering), **driven by the Rust animation state machine** —
+idle/walk from velocity, an attack one-shot on fire. 31 co-located unit tests
+pass; verified in a real browser (walk cycle, the attack swing arc advancing
+under Block, direction rows, per-direction sword layering, correct colors).
 
-**Not yet implemented / deferred**: the Rust `SemanticPatch` action fields (v1
-derives locomotion TS-side); billboard wiring into the 3D game (code path
+**Not yet implemented / deferred**: authoritative hit/hurtbox combat (Phase 3 —
+geometry carried, unconsumed); billboard wiring into the 3D game (code path
 exists, unused); the 2D side-scroller and 3D games still use box meshes;
 per-item sheet fallback (a layer with no sheet for the active family is skipped,
 not chain-resolved); manifest schema validation beyond crash-guards; networked
-remote-peer loadouts.
+remote-peer loadouts. Graphics are procedural placeholders (`paperDollAssets.ts`)
+that double as the authoring example — a real PNG sheet set + JSON manifest is a
+follow-up.
 
 ### Verification
 - Unit (`pnpm --filter @kikorin/paperdoll test`, 31 tests) — the pure logic:

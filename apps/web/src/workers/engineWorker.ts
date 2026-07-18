@@ -12,7 +12,7 @@
 // The wasm-bindgen bundler-target binary imports its JS bindings under the namespace
 // "./engine_bg.js", which matches the star-import we provide as the instantiation imports.
 
-import type { EngineHandle, PatchBundle, HitPatch, LifecyclePatch, RenderPatch, SemanticPatch, NetPatch, MetricsPatch, TerrainBlockInput, AiConfigInput, NavConfigInput, PlayerConfigInput, PlayerInputState, MonsterConfigInput, MonsterCapabilityInput } from '@kikorin/adapter';
+import type { EngineHandle, PatchBundle, HitPatch, LifecyclePatch, RenderPatch, SemanticPatch, NetPatch, MetricsPatch, TerrainBlockInput, AiConfigInput, NavConfigInput, PlayerConfigInput, PlayerInputState, MonsterConfigInput, MonsterCapabilityInput, AnimationDefsInput } from '@kikorin/adapter';
 import { EMPTY_METRICS } from '@kikorin/adapter';
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
@@ -66,6 +66,7 @@ type Req =
   | { type: 'set_nav_config';      cfg: NavConfigInput }
   | { type: 'set_player_config';   cfg: PlayerConfigInput }
   | { type: 'set_monster_config';  cfg: MonsterConfigInput }
+  | { type: 'load_animations';     defs: AnimationDefsInput }
   | { type: 'register_player';     eid: number }
   | { type: 'set_player_input';    input: PlayerInputState }
   | { type: 'player_fire' }
@@ -262,6 +263,9 @@ addEventListener('message', async (event: MessageEvent<Req>) => {
       break;
     case 'set_monster_config':
       engine.set_monster_config(msg.cfg);
+      break;
+    case 'load_animations':
+      engine.load_animations(msg.defs);
       break;
     case 'register_player':
       engine.register_player(msg.eid);

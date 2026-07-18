@@ -121,6 +121,17 @@ export class Engine {
         return ret;
     }
     /**
+     * Load the game's animation definitions: families (per-frame timing/flags,
+     * transitions, interruptibility, branch frame) plus the action→family map.
+     * This is the behavior half of the paper-doll system; the art (sheets,
+     * layers, cell size) stays in the TS manifest. Absent = animation inert
+     * (no cell emitted). See ADR 0015 / 0016.
+     * @param {any} defs
+     */
+    load_animations(defs) {
+        wasm.engine_load_animations(this.__wbg_ptr, defs);
+    }
+    /**
      * Load a map from a JS array of `{ x, y, z, hw, hh, hd, kind }` blocks: spawns a
      * static terrain entity per block, builds the navmesh from the resulting floor
      * geometry, and returns the same blocks with `eid` added for mesh creation on the
@@ -426,6 +437,12 @@ export function __wbg_String_8564e559799eccda(arg0, arg1) {
     getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
     getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
 }
+export function __wbg___wbindgen_bigint_get_as_i64_d968e41184ae354f(arg0, arg1) {
+    const v = arg1;
+    const ret = typeof(v) === 'bigint' ? v : undefined;
+    getDataViewMemory0().setBigInt64(arg0 + 8 * 1, isLikeNone(ret) ? BigInt(0) : ret, true);
+    getDataViewMemory0().setInt32(arg0 + 4 * 0, !isLikeNone(ret), true);
+}
 export function __wbg___wbindgen_boolean_get_fa956cfa2d1bd751(arg0) {
     const v = arg0;
     const ret = typeof(v) === 'boolean' ? v : undefined;
@@ -442,6 +459,10 @@ export function __wbg___wbindgen_in_aca499c5de7ff5e5(arg0, arg1) {
     const ret = arg0 in arg1;
     return ret;
 }
+export function __wbg___wbindgen_is_bigint_2f76dc55065b4273(arg0) {
+    const ret = typeof(arg0) === 'bigint';
+    return ret;
+}
 export function __wbg___wbindgen_is_function_1ff95bcc5517c252(arg0) {
     const ret = typeof(arg0) === 'function';
     return ret;
@@ -453,6 +474,10 @@ export function __wbg___wbindgen_is_object_a27215656b807791(arg0) {
 }
 export function __wbg___wbindgen_is_undefined_c05833b95a3cf397(arg0) {
     const ret = arg0 === undefined;
+    return ret;
+}
+export function __wbg___wbindgen_jsval_eq_e659fcf7b0e32763(arg0, arg1) {
+    const ret = arg0 === arg1;
     return ret;
 }
 export function __wbg___wbindgen_jsval_loose_eq_db4c3b15f63fc170(arg0, arg1) {

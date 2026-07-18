@@ -12,6 +12,7 @@ export const engine_destroy_entity: (a: number, b: number) => void;
 export const engine_dimension: (a: number) => [number, number];
 export const engine_find_path: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
 export const engine_get_metrics: (a: number) => any;
+export const engine_load_animations: (a: number, b: any) => void;
 export const engine_load_map: (a: number, b: any) => any;
 export const engine_net_ingest: (a: number, b: number, c: number, d: number, e: number) => void;
 export const engine_net_peer_connected: (a: number, b: number, c: number) => void;

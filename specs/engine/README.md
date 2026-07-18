@@ -15,6 +15,7 @@ This spec is the top-level entry point; each box below has its own spec for the 
 - **`physics`** — Rapier2D or Rapier3D step (a construction-time choice, see "Physics Dimension" below); derives bodies from ECS colliders, writes back positions + grounded.
 - **`pathfinding`** — stateless NavMesh A*; supplies monster waypoints.
 - **`netcode`** — per-peer delta tracking + WebRTC apply/flush.
+- **`animation`** — pure animation state machine; the engine owns per-entity instances + the loaded set and drives them each tick (see "Animation" below).
 - **`patch`** — packs the tick's dirty entities into the `PatchBundle`.
 - `packages/adapter` (TS) — mirror types + channels that consume the bundle; `packages/system-rendering` (TS) — applies render patches to Three.js.
 
@@ -27,11 +28,31 @@ This spec is the top-level entry point; each box below has its own spec for the 
 4. **Physics:** stamp latched jump impulses into world velocity, sync world → Rapier, step, sync back, reset consumed impulses to vy=0.
 5. **Bullets & combat:** integrate NET_BULLET trajectories, bounce off terrain, enforce TTL, detect monster overlaps. Overlap detection runs twice: once for locally-owned bullets against locally-owned monsters (the main integration loop), and once more for every **bullet mirror** (another peer's bullet) against this engine's own monsters — a monster's health is only ever mutated by its owner, so this second pass is what lets a bullet fired by one peer damage a monster owned by another, using the bullet's already-replicated position with no new wire message (see ADR 0007). The engine settles the consequences itself after both passes: spent bullets (hit, TTL, kill plane; a mirror hit destroys the local mirror, not the remote peer's real bullet) are destroyed; hit monsters take `PlayerConfig::bullet_damage` and at ≤ 0 health are destroyed and — per `MonsterConfig::respawn` — replaced at a random bearing on the respawn ring. Each death/spawn emits a `LifecyclePatch`; the `HitPatch` (exactly one per bullet death, `target_eid: None` for expiry) is a pure UI/FX event.
 5.5. **Heavy pathfinding slice:** one bounded slice of background work — flow-field builds, key-route table builds (one field per slice, resumable), Tier-4 discovery — sized adaptively from measured time toward a half-millisecond target. This is the "slow tiers compute while fast tiers serve" lane; monsters never block on it.
-6. Mark local entities HEALTH-dirty (grounded delivery); run the flag-driven replication cadence (`mark_replication_dirty`); flush outbound Spawn/Delta events + queued `Despawned` announcements, or a keepalive `Ping` when silent past `PING_INTERVAL_SECS` with peers connected.
+6. Mark local entities HEALTH-dirty (grounded delivery); run the flag-driven replication cadence (`mark_replication_dirty`); **advance animation** (see below); flush outbound Spawn/Delta events + queued `Despawned` announcements, or a keepalive `Ping` when silent past `PING_INTERVAL_SECS` with peers connected.
 7. Generate `PatchBundle` → clear dirty flags → advance tick.
 
 ### Metrics
 The engine owns all Rust-side timing and stamps it into `bundle.metrics` so consumers receive real values: `tick_ms` (whole tick), `ai_ms` (AI + separation + bullets + dirty marking), `physics_ms`, `pathfinding_ms` (A* share of `ai_ms`), `net_ms` (inbound apply + outbound flush), `patch_ms` (bundle generation). On WASM, timing uses `performance.now()` (µs resolution) — `Date.now()`'s 1 ms resolution is useless at ~4 ms sim steps. The JsValue conversion cannot time itself; the TS worker reports it as `boundary_ms` (observed call time − `tick_ms`).
+
+### Animation — Rust-owned state machine (ADR 0015 / 0016)
+Animation is simulation, so the engine owns it; TypeScript only displays the
+resolved cell. `load_animations(defs)` builds an `animation::AnimationSet` from
+game-authored data (families with per-frame timing/flags, transitions,
+interruptibility, branch frame, and an action→family map) — the behavior half of
+the paper-doll system, the sprite analog of `load_map`. The *art* (sheets,
+layers, cell size) stays in the TS `@kikorin/paperdoll` manifest; family index =
+`anim_id` keeps the two halves aligned. Absent set = animation inert.
+
+Per-entity `AnimationInstance`s live in `animation_states` (a map, like
+`monster_states`/goals; cleared in `destroy_entity`). Tick step 6's
+`drive_animation` iterates the player + monsters: derives locomotion (idle/walk
+from intended horizontal velocity, which the controller/AI set before physics),
+requests it (a Block/Queue one-shot like attack ignores it until done), advances
+the instance by the tick's dt, then writes the resolved `AnimCell`
+(family/frame/direction, direction quantized from the entity's yaw) into the ECS
+`anim` column and marks `ANIM` dirty only on change. `player_fire` requests the
+attack action on the player's instance. Hit/hurtbox geometry from the set is
+carried but not yet consumed — authoritative melee combat is Phase 3.
 
 ### NET Flags — the entity networking profile
 The `net_flags` bitmask (constants live in `crates/ecs`, mirrored in `@kikorin/adapter`) is the source of truth for how the engine simulates **and replicates** each entity. The dimensions compose — an entity's networking behavior is the combination, not one enum:

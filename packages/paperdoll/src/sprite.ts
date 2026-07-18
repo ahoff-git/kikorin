@@ -52,6 +52,13 @@ export interface CreateSpriteOptions {
   /** World-space height of the sprite; width follows the cell aspect ratio. */
   worldHeight: number;
   mode?: SpriteMode;
+  /**
+   * Rust-driven mode (ADR 0015): family names indexed by the engine's `anim_id`,
+   * matching the order passed to `load_animations`. When set, the sprite displays
+   * whatever cell `setCell` is fed each tick and ignores the TS-derived clock;
+   * omit it to keep the standalone TS-derived behavior (auto idle/walk).
+   */
+  animFamilies?: string[];
 }
 
 export interface PaperDollSprite {
@@ -59,8 +66,13 @@ export interface PaperDollSprite {
   readonly object: Object3D;
   /** Swap equipment — rebakes to a new look on the next update. */
   setLoadout(loadout: Loadout): void;
-  /** Assert a discrete action; pass null to resume auto-derived idle/walk. */
+  /** Assert a discrete action; pass null to resume auto-derived idle/walk (TS-derived mode only). */
   setAction(action: ActionInput | null): void;
+  /**
+   * Display the engine-resolved cell (Rust-driven mode). `animId` indexes
+   * `animFamilies`. Feed this from the animation fields on SemanticPatch.
+   */
+  setCell(animId: number, frame: number, dir: number): void;
   /** Advance the animation and pick the sheet cell. Call once per frame before rendering. */
   update(nowMs: number, camera?: Camera): void;
   dispose(): void;
@@ -86,6 +98,13 @@ export function createPaperDollSprite(opts: CreateSpriteOptions): PaperDollSprit
 
   let loadout = opts.loadout;
   let loadoutKeyStr = computeLoadoutKey(loadout);
+
+  const animFamilies = opts.animFamilies;
+  // In Rust-driven mode this holds the latest engine-emitted cell; seeded to the
+  // first family so the sprite shows something before the first setCell.
+  let rustCell: { family: string; frame: number; dir: number } | null = animFamilies
+    ? { family: animFamilies[0] ?? "idle", frame: 0, dir: 0 }
+    : null;
 
   let explicit: ActionInput | null = null;
   let curFamily = "";
@@ -136,21 +155,44 @@ export function createPaperDollSprite(opts: CreateSpriteOptions): PaperDollSprit
     builtFrames = sheet.frames;
   }
 
+  // Rebind the baked sheet on a look change, then point the UVs at (frame, dir).
+  // Row 0 (S) sits at the sheet's top; a CanvasTexture is flipY, so the top row
+  // lives at the high-v end — hence (rows-1-dir).
+  function applyCell(family: string, frame: number, dir: number): void {
+    const familyDef = manifest.families[family] ?? manifest.families["idle"];
+    const look = `${loadoutKeyStr}|${family}`;
+    if (look !== builtLook) {
+      bindLook(family, familyDef?.frames ?? 1);
+      builtLook = look;
+    }
+    const f = Math.max(0, Math.min(frame, builtFrames - 1));
+    material.map!.offset.set(f / builtFrames, (DIRECTION_COUNT - 1 - dir) / DIRECTION_COUNT);
+  }
+
+  function setCell(animId: number, frame: number, dir: number): void {
+    if (!animFamilies) return;
+    rustCell = { family: animFamilies[animId] ?? animFamilies[0] ?? "idle", frame, dir };
+  }
+
   function update(nowMs: number, camera?: Camera): void {
-    const yaw = sprite.rotation.y; // entity's "front", written by the render channel
+    // Rust-driven (ADR 0015): display exactly the cell the engine emitted.
+    if (rustCell) {
+      applyCell(rustCell.family, rustCell.frame, rustCell.dir);
+      return;
+    }
+
+    // TS-derived fallback (no animation set loaded): resolve family/frame here.
+    const yaw = sprite.rotation.y;
     const { kind, variant } = currentKind();
     let family = familyForAction(manifest, kind, variant);
-
     const seq = explicit?.seq;
     if (family !== curFamily || (explicit && seq !== curSeq)) {
       curFamily = family;
       curSeq = seq;
       clockOrigin = nowMs;
     }
-
     let familyDef = manifest.families[family];
     let { frame, done } = frameAt(familyDef, nowMs - clockOrigin);
-
     if (done && !familyDef.loop) {
       if (familyDef.holdLast) {
         // stay on the final frame
@@ -160,22 +202,10 @@ export function createPaperDollSprite(opts: CreateSpriteOptions): PaperDollSprit
         familyDef = manifest.families[family] ?? familyDef;
         ({ frame } = frameAt(familyDef, 0));
       } else {
-        explicit = null; // resume auto-derived locomotion next frame
+        explicit = null;
       }
     }
-
-    const look = `${loadoutKeyStr}|${curFamily}`;
-    if (look !== builtLook) {
-      bindLook(curFamily, familyDef.frames);
-      builtLook = look;
-    }
-
-    const dir = directionFor(yaw, camera);
-    // Row 0 (S) sits at the sheet's top; a CanvasTexture is flipY, so the top row
-    // lives at the high-v end — hence (rows-1-dir). This selects the art; the
-    // Sprite's camera-facing orientation is Three's own.
-    material.map!.offset.set(frame / builtFrames, (DIRECTION_COUNT - 1 - dir) / DIRECTION_COUNT);
-
+    applyCell(curFamily, frame, directionFor(yaw, camera));
     lastPos.copy(sprite.position);
   }
 
@@ -189,7 +219,7 @@ export function createPaperDollSprite(opts: CreateSpriteOptions): PaperDollSprit
     log(logLevels.warning, `paperdoll: set "${opts.setId}" has no "idle" family`, ["paperdoll"]);
   }
 
-  return { object: sprite, setLoadout, setAction, update, dispose };
+  return { object: sprite, setLoadout, setAction, setCell, update, dispose };
 }
 
 // Re-exported so a consumer can pre-warm/validate a set's manifest if it wants.

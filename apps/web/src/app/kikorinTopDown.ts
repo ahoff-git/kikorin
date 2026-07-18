@@ -1,6 +1,7 @@
 import {
   lifecycleChannel,
   netChannel,
+  hudChannel,
   NET_BULLET,
   NET_LOCAL,
   NET_MONSTER,
@@ -29,6 +30,8 @@ import {
 } from "@kikorin/paperdoll";
 import {
   buildKikorinSpriteSet,
+  KIKORIN_ANIM_DEFS,
+  FAMILY_ORDER,
   KIKORIN_SPRITE_SET_ID,
   PLAYER_LOADOUT,
   MONSTER_LOADOUT,
@@ -115,6 +118,10 @@ export async function setupGameTopDown(
   // keep their boxes/spheres (remote loadout sync is a later, networked step). ---
   registerSpriteSet(KIKORIN_SPRITE_SET_ID, buildKikorinSpriteSet());
   await loadSpriteSet(KIKORIN_SPRITE_SET_ID);
+  // Behavior half: the engine owns the animation simulation and drives the
+  // displayed cell each tick (ADR 0015). Family index = anim_id = FAMILY_ORDER.
+  engine.load_animations(KIKORIN_ANIM_DEFS);
+  const spriteFamilies = [...FAMILY_ORDER];
   const spritesByEid = new Map<number, PaperDollSprite>();
   const PERSON_WORLD_HEIGHT = PERSON_HALF_H * 2;
 
@@ -171,6 +178,7 @@ export async function setupGameTopDown(
             setId: KIKORIN_SPRITE_SET_ID,
             loadout: isMonster ? MONSTER_LOADOUT : PLAYER_LOADOUT,
             worldHeight: PERSON_WORLD_HEIGHT,
+            animFamilies: spriteFamilies,
           });
           upsertObjectByEid(l.entity, () => sprite.object);
           spritesByEid.set(l.entity, sprite);
@@ -198,6 +206,15 @@ export async function setupGameTopDown(
       } else if (p.kind === "despawned") {
         removeObjectByEid(p.entity, { dispose: true });
       }
+    }
+  });
+
+  // --- Animation cells: the engine decides family/frame/direction; the sprite
+  // just displays what each SemanticPatch carries (ADR 0015). ---
+  const unsubHud = hudChannel.subscribe(() => {
+    for (const s of hudChannel.getSnapshot()) {
+      if (s.anim_id === undefined) continue;
+      spritesByEid.get(s.entity)?.setCell(s.anim_id, s.anim_frame ?? 0, s.anim_dir ?? 0);
     }
   });
 
@@ -262,6 +279,7 @@ export async function setupGameTopDown(
     stopSuppressingContextMenu();
     unsubLifecycle();
     unsubNet();
+    unsubHud();
     for (const sprite of spritesByEid.values()) sprite.dispose();
     spritesByEid.clear();
   }

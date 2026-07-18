@@ -17,6 +17,10 @@ export type {
   PlayerInputState,
   PlayerConfigInput,
   MonsterConfigInput,
+  AnimFrameInput,
+  AnimFamilyInput,
+  AnimActionInput,
+  AnimationDefsInput,
 } from './types';
 
 export { Channel } from './channel';

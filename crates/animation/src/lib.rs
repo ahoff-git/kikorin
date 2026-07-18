@@ -20,15 +20,18 @@ pub use schedule::{schedule_frames, FrameSlot, Schedule};
 
 use std::collections::HashMap;
 
-/// An axis-aligned box offset from the entity origin, in cell/world units. Its
-/// meaning (hit vs. hurt) is by field on `FrameSpec`; combat consumption is the
-/// engine's job (a later phase) — this crate only carries the geometry.
+/// An axis-aligned box, same convention as `ecs::ColliderConfig` /
+/// `spawn_box_entity` (a center offset from the entity origin + half-extents) so
+/// combat can reuse the engine's existing cube machinery. Its meaning (hit vs.
+/// hurt) is by field on `FrameSpec`; combat consumption is the engine's job (a
+/// later phase) — this crate only carries the geometry. Richer per-box behavior
+/// (damage, knockback, tags) hangs off that consumption, not this shape. See
+/// ADR 0016.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HitBox {
-    pub dx: f32,
-    pub dy: f32,
-    pub w: f32,
-    pub h: f32,
+    /// Box center relative to the entity origin, pre-direction-rotation.
+    pub offset: [f32; 3],
+    pub half_extents: [f32; 3],
 }
 
 /// One frame of a family. `optimal_ms` is the natural display time; `min_ms`/
@@ -75,6 +78,8 @@ pub enum Interrupt {
 
 /// One named animation. `next` flows to another family when a one-shot ends;
 /// `hold_last` freezes the final frame (death) instead of transitioning.
+/// `branch_frame` is the split point at which a queued action takes over under
+/// an `Interrupt::Queue` policy (None = wait until the family ends). See ADR 0016.
 #[derive(Clone, Debug)]
 pub struct Family {
     pub frames: Vec<FrameSpec>,
@@ -82,6 +87,7 @@ pub struct Family {
     pub next: Option<usize>,
     pub hold_last: bool,
     pub interrupt: Interrupt,
+    pub branch_frame: Option<usize>,
 }
 
 const WILDCARD: u16 = u16::MAX;
@@ -140,6 +146,7 @@ mod tests {
                 next: None,
                 hold_last: false,
                 interrupt: Interrupt::Always,
+                branch_frame: None,
             });
         }
         s.map_action(0, None, 0); // idle

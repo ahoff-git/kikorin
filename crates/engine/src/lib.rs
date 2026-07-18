@@ -690,6 +690,12 @@ pub struct Engine {
     // Per-monster capability override (set_monster_capability); absent =
     // derive from the current AiConfig (see capability_for).
     monster_capabilities: HashMap<u32, MonsterCapability>,
+    // Animation: one game-loaded definition set (load_animations) plus a
+    // per-entity playback instance. None set = animation inert (no cell emitted).
+    // The state machine lives in `crates/animation`; the engine owns the
+    // instances and drives them each tick (ADR 0015).
+    animation_set: Option<animation::AnimationSet>,
+    animation_states: HashMap<u32, animation::AnimationInstance>,
     // Age counter (in ticks) for each NET_BULLET entity — used for TTL enforcement.
     bullet_ages: HashMap<u32, u32>,
     // Jump impulses latched by set_entity_velocity (non-zero vy) awaiting the next
@@ -722,6 +728,105 @@ pub struct Engine {
     scratch_positions: Vec<[f32; 3]>,
     scratch_snapshots: Vec<(u32, [f32; 3])>,
     scratch_mirror_bullets: Vec<(u32, [f32; 3])>,
+}
+
+// Engine action kinds fed to the animation state machine (kind → family via the
+// loaded AnimationSet's action map). Locomotion is derived each tick; attack is
+// triggered by player_fire. hurt/death arrive with the Phase 3 combat work.
+const ANIM_KIND_IDLE: u16 = 0;
+const ANIM_KIND_WALK: u16 = 1;
+const ANIM_KIND_ATTACK: u16 = 2;
+
+// Squared horizontal speed above which an animated entity reads as "walking".
+const ANIM_WALK_EPS_SQ: f32 = 0.05;
+
+// --- load_animations boundary DTO: game-authored animation definitions ---
+// The art (sheets/layers) stays in the TS manifest; this is the timing/behavior
+// half loaded into the engine (the sprite analog of load_map). See ADR 0015.
+#[derive(serde::Deserialize)]
+struct JsAnimFrame {
+    optimal_ms: f32,
+    #[serde(default)]
+    min_ms: Option<f32>,
+    #[serde(default)]
+    max_ms: Option<f32>,
+    #[serde(default)]
+    skippable: bool,
+    #[serde(default)]
+    cancelable: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct JsAnimFamily {
+    frames: Vec<JsAnimFrame>,
+    #[serde(default)]
+    looping: bool,
+    #[serde(default)]
+    next: Option<usize>,
+    #[serde(default)]
+    hold_last: bool,
+    #[serde(default = "default_interrupt")]
+    interrupt: String,
+    #[serde(default)]
+    branch_frame: Option<usize>,
+}
+
+fn default_interrupt() -> String {
+    "always".to_string()
+}
+
+#[derive(serde::Deserialize)]
+struct JsAnimAction {
+    kind: u16,
+    #[serde(default)]
+    variant: Option<u16>,
+    family: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct JsAnimationSet {
+    families: Vec<JsAnimFamily>,
+    #[serde(default)]
+    actions: Vec<JsAnimAction>,
+}
+
+fn build_animation_set(dto: JsAnimationSet) -> animation::AnimationSet {
+    let mut set = animation::AnimationSet::new();
+    for fam in dto.families {
+        let frames = fam
+            .frames
+            .into_iter()
+            .map(|f| {
+                let optimal = f.optimal_ms.max(0.0);
+                animation::FrameSpec {
+                    optimal_ms: optimal,
+                    min_ms: f.min_ms.unwrap_or(optimal).clamp(0.0, optimal),
+                    max_ms: f.max_ms.unwrap_or(optimal).max(optimal),
+                    skippable: f.skippable,
+                    cancelable: f.cancelable,
+                    hitbox: None,
+                    hurtbox: None,
+                }
+            })
+            .collect();
+        let interrupt = match fam.interrupt.to_ascii_lowercase().as_str() {
+            "block" => animation::Interrupt::Block,
+            "queue" => animation::Interrupt::Queue,
+            _ => animation::Interrupt::Always,
+        };
+        set.push_family(animation::Family {
+            frames,
+            looping: fam.looping,
+            next: fam.next,
+            hold_last: fam.hold_last,
+            interrupt,
+            branch_frame: fam.branch_frame,
+        });
+    }
+    for a in dto.actions {
+        set.map_action(a.kind, a.variant, a.family);
+    }
+    set
 }
 
 #[wasm_bindgen]
@@ -775,6 +880,8 @@ impl Engine {
             pending_despawns: Vec::new(),
             monster_states: HashMap::new(),
             monster_capabilities: HashMap::new(),
+            animation_set: None,
+            animation_states: HashMap::new(),
             bullet_ages: HashMap::new(),
             pending_jumps: HashMap::new(),
             goal_x: 0.0,
@@ -887,6 +994,18 @@ impl Engine {
         }
     }
 
+    /// Load the game's animation definitions: families (per-frame timing/flags,
+    /// transitions, interruptibility, branch frame) plus the action→family map.
+    /// This is the behavior half of the paper-doll system; the art (sheets,
+    /// layers, cell size) stays in the TS manifest. Absent = animation inert
+    /// (no cell emitted). See ADR 0015 / 0016.
+    pub fn load_animations(&mut self, defs: JsValue) {
+        match serde_wasm_bindgen::from_value::<JsAnimationSet>(defs) {
+            Ok(dto) => self.animation_set = Some(build_animation_set(dto)),
+            Err(e) => log::warn!("load_animations: invalid definitions ignored: {e}"),
+        }
+    }
+
     /// Register the player entity. From then on the engine runs its controller
     /// (facing, movement, jump budget) from set_player_input, fires its bullets
     /// via player_fire, and aims the default monster goal at it every tick.
@@ -939,6 +1058,9 @@ impl Engine {
             cos_y * cos_p * cfg.bullet_speed,
             NET_REPLICATED | NET_PREDICTABLE,
         );
+        // Rust owns animation: firing requests the attack action on the player's
+        // instance; its family's interrupt policy decides how it plays out.
+        self.request_entity_action(eid, ANIM_KIND_ATTACK, None, None);
     }
 
     /// Spawn `count` monsters on a ring around the origin (placement/template
@@ -978,8 +1100,76 @@ impl Engine {
         serde_wasm_bindgen::to_value(&JsPatch::from(bundle)).unwrap_or(JsValue::NULL)
     }
 
+    /// Ensure an entity has an animation instance and request an action on it.
+    /// No-op if no animation set is loaded. Split-borrows `animation_set`
+    /// (immutable) and `animation_states` (mutable) — disjoint fields.
+    fn request_entity_action(&mut self, eid: u32, kind: u16, variant: Option<u16>, target_ms: Option<f32>) {
+        let Some(set) = self.animation_set.as_ref() else {
+            return;
+        };
+        let family = set.family_for_action(kind, variant);
+        self.animation_states
+            .entry(eid)
+            .or_insert_with(|| animation::AnimationInstance::new(set, family, target_ms))
+            .request(set, family, target_ms);
+    }
+
+    /// Advance every animated entity's instance, derive locomotion, and write the
+    /// resolved cell (family/frame/direction) into the world for patch emission.
+    /// Rust is the source of truth for animation; TS only displays the cell.
+    fn drive_animation(&mut self, dt_ms: f32) {
+        if self.animation_set.is_none() {
+            return;
+        }
+        let mut ids: Vec<u32> = Vec::with_capacity(self.monster_states.len() + 1);
+        if let Some(p) = self.player.as_ref() {
+            ids.push(p.eid);
+        }
+        ids.extend(self.monster_states.keys().copied());
+        for eid in ids {
+            self.animate_entity(eid, dt_ms);
+        }
+    }
+
+    fn animate_entity(&mut self, eid: u32, dt_ms: f32) {
+        // Locomotion from intended horizontal velocity (set by controller/AI
+        // before physics; physics doesn't overwrite it). A one-shot like attack
+        // is Block/Queue, so this request is ignored until it ends.
+        let moving = self
+            .world
+            .velocity(eid)
+            .map(|v| v[0] * v[0] + v[2] * v[2] > ANIM_WALK_EPS_SQ)
+            .unwrap_or(false);
+        self.request_entity_action(eid, if moving { ANIM_KIND_WALK } else { ANIM_KIND_IDLE }, None, None);
+
+        let (frame, family) = {
+            let Some(set) = self.animation_set.as_ref() else {
+                return;
+            };
+            let Some(inst) = self.animation_states.get_mut(&eid) else {
+                return;
+            };
+            inst.advance(set, dt_ms);
+            (inst.current_frame(), inst.family())
+        };
+        let dir = self
+            .world
+            .rotation(eid)
+            .map(|r| animation::direction_from_yaw(r[0]))
+            .unwrap_or(0);
+        let cell = ecs::AnimCell {
+            anim_id: family as u16,
+            frame: frame as u16,
+            dir,
+        };
+        if self.world.anim_cell(eid) != Some(cell) {
+            self.world.set_anim_cell(eid, cell);
+            self.world.mark_dirty(eid, DirtyFlags::ANIM);
+        }
+    }
+
     /// One full simulation tick: net in → AI → separation → physics → bullets →
-    /// net out → PatchBundle. Native-callable (no wasm types).
+    /// animation → net out → PatchBundle. Native-callable (no wasm types).
     fn tick_core(&mut self, dt_secs: f32) -> PatchBundle {
         log::debug!("tick {} — dt_secs={:.4}", self.world.tick_count(), dt_secs);
         self.sim_time += dt_secs;
@@ -1053,6 +1243,10 @@ impl Engine {
             self.world.mark_dirty(id, DirtyFlags::HEALTH);
         }
         self.mark_replication_dirty();
+        // Animation: advance each animated entity's state machine and emit the
+        // resolved cell. Runs after movement/physics so locomotion reads the
+        // tick's velocity and facing. Counted as AI time.
+        self.drive_animation(dt_secs * 1000.0);
         ai_ms += bullet_timer.elapsed_ms();
 
         // 3.5. One bounded slice of background pathfinding work (flow-field
@@ -1756,6 +1950,7 @@ impl Engine {
         self.local_entities.retain(|&e| e != id);
         self.monster_states.remove(&id);
         self.monster_capabilities.remove(&id);
+        self.animation_states.remove(&id);
         self.bullet_ages.remove(&id);
         self.non_walkable_terrain.remove(&id);
         self.pending_jumps.remove(&id);
@@ -3221,6 +3416,9 @@ struct JsSemantic {
     health: Option<i32>,
     net_flags: Option<u8>,
     grounded: Option<bool>,
+    anim_id: Option<u16>,
+    anim_frame: Option<u16>,
+    anim_dir: Option<u8>,
 }
 
 #[derive(Serialize)]
@@ -3272,6 +3470,9 @@ impl From<PatchBundle> for JsPatch {
                     health: s.health,
                     net_flags: s.net_flags,
                     grounded: s.grounded,
+                    anim_id: s.anim_id,
+                    anim_frame: s.anim_frame,
+                    anim_dir: s.anim_dir,
                 })
                 .collect(),
             net: b

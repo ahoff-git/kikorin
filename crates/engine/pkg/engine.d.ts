@@ -61,6 +61,14 @@ export class Engine {
      */
     get_metrics(): any;
     /**
+     * Load the game's animation definitions: families (per-frame timing/flags,
+     * transitions, interruptibility, branch frame) plus the action→family map.
+     * This is the behavior half of the paper-doll system; the art (sheets,
+     * layers, cell size) stays in the TS manifest. Absent = animation inert
+     * (no cell emitted). See ADR 0015 / 0016.
+     */
+    load_animations(defs: any): void;
+    /**
      * Load a map from a JS array of `{ x, y, z, hw, hh, hd, kind }` blocks: spawns a
      * static terrain entity per block, builds the navmesh from the resulting floor
      * geometry, and returns the same blocks with `eid` added for mesh creation on the

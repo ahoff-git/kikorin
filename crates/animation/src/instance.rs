@@ -97,6 +97,18 @@ impl AnimationInstance {
         let total = self.schedule.total_ms;
         let looping = set.families[self.family].looping;
 
+        // Branch: a queued action splits off at the family's branch frame instead
+        // of waiting for the end (ADR 0016). Only a Queue policy ever sets pending.
+        if self.pending.is_some() {
+            if let Some(bf) = set.families[self.family].branch_frame {
+                if self.current_frame() >= bf {
+                    let (fam, target) = self.pending.take().unwrap();
+                    self.start(set, fam, target);
+                    return;
+                }
+            }
+        }
+
         if total <= 0.0 {
             if !looping {
                 self.reach_end(set);
@@ -143,6 +155,7 @@ mod tests {
             next: None,
             hold_last: false,
             interrupt,
+            branch_frame: None,
         }
     }
 
@@ -205,6 +218,19 @@ mod tests {
         i.request(&s, 1, None); // walk queued
         assert_eq!(i.family(), 3);
         i.advance(&s, 200.0); // hurt ends → queued walk starts
+        assert_eq!(i.family(), 1);
+    }
+
+    #[test]
+    fn queue_branch_frame_splits_early() {
+        let mut s = set();
+        // Give the Queue family (3) a branch at frame 1 — 3 frames now.
+        s.families[3] = fam(3, false, Interrupt::Queue);
+        s.families[3].branch_frame = Some(1);
+        let mut i = AnimationInstance::new(&s, 3, None);
+        i.request(&s, 1, None); // walk queued at frame 0
+        assert_eq!(i.family(), 3);
+        i.advance(&s, 120.0); // now in frame 1 (>= branch) → split to walk early
         assert_eq!(i.family(), 1);
     }
 

@@ -29,9 +29,11 @@ pub const NET_PUBLIC_MASK: u8 = NET_BULLET | NET_MONSTER | NET_PREDICTABLE;
 bitflags! {
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct DirtyFlags: u8 {
-        const TRANSFORM = 0b0001;
-        const HEALTH    = 0b0100;
-        const NET       = 0b1000;
+        const TRANSFORM = 0b0_0001;
+        const HEALTH    = 0b0_0100;
+        const NET       = 0b0_1000;
+        /// The resolved animation cell (family/frame/direction) changed.
+        const ANIM      = 0b1_0000;
     }
 }
 
@@ -42,6 +44,16 @@ pub struct ColliderConfig {
     pub half_width: f32,
     pub half_height: f32,
     pub half_depth: f32,
+}
+
+/// The current animation cell an entity displays. Engine-written from the
+/// `animation` state machine and read by patch generation; the engine owns the
+/// state machine, this column carries only its per-tick numeric output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AnimCell {
+    pub anim_id: u16,
+    pub frame: u16,
+    pub dir: u8,
 }
 
 /// Below this, per-column Vec reallocations during early growth cost more than
@@ -68,6 +80,7 @@ pub struct World {
     net_flags: Vec<Option<u8>>,
     collider: Vec<Option<ColliderConfig>>,
     grounded: Vec<Option<bool>>,
+    anim: Vec<Option<AnimCell>>,
     is_floor: Vec<bool>,
 
     // dirty-flag tracking; cleared after patch generation each tick
@@ -91,6 +104,7 @@ impl World {
             net_flags: vec![None; cap],
             collider: vec![None; cap],
             grounded: vec![None; cap],
+            anim: vec![None; cap],
             is_floor: vec![false; cap],
             dirty: vec![DirtyFlags::empty(); cap],
             dirty_list: Vec::new(),
@@ -110,6 +124,7 @@ impl World {
             self.net_flags.resize(new_cap, None);
             self.collider.resize(new_cap, None);
             self.grounded.resize(new_cap, None);
+            self.anim.resize(new_cap, None);
             self.is_floor.resize(new_cap, false);
             self.dirty.resize(new_cap, DirtyFlags::empty());
         }
@@ -139,6 +154,7 @@ impl World {
         self.net_flags[i] = None;
         self.collider[i] = None;
         self.grounded[i] = None;
+        self.anim[i] = None;
         self.is_floor[i] = false;
         self.dirty[i] = DirtyFlags::empty();
         // A destroyed-while-dirty entity must also leave dirty_list: a recycled ID
@@ -221,6 +237,15 @@ impl World {
     pub fn set_grounded(&mut self, id: EntityId, grounded: bool) {
         self.grow_to(id);
         self.grounded[id as usize] = Some(grounded);
+    }
+
+    // --- animation cell (engine-written render output; see AnimCell) ---
+    pub fn anim_cell(&self, id: EntityId) -> Option<AnimCell> {
+        self.anim.get(id as usize).copied().flatten()
+    }
+    pub fn set_anim_cell(&mut self, id: EntityId, cell: AnimCell) {
+        self.grow_to(id);
+        self.anim[id as usize] = Some(cell);
     }
 
     // --- floor ---

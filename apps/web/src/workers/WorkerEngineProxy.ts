@@ -4,7 +4,7 @@
 // remain synchronous from the caller's perspective.
 // The worker drives its own simulation loop — there is no tick() method here.
 
-import type { AiConfigInput, JsTerrainBlock, JsWaypoint, MonsterCapabilityInput, MonsterConfigInput, NavConfigInput, PatchBundle, PlayerConfigInput, PlayerInputState, TerrainBlockInput } from '@kikorin/adapter';
+import type { AiConfigInput, AnimationDefsInput, JsTerrainBlock, JsWaypoint, MonsterCapabilityInput, MonsterConfigInput, NavConfigInput, PatchBundle, PlayerConfigInput, PlayerInputState, TerrainBlockInput } from '@kikorin/adapter';
 
 type NetOutItem = { peer: string | null; data: Uint8Array };
 
@@ -148,6 +148,11 @@ export class WorkerEngineProxy {
   /** Override monster spawn/respawn tuning. Fire-and-forget. */
   set_monster_config(cfg: MonsterConfigInput): void {
     this.worker.postMessage({ type: 'set_monster_config', cfg });
+  }
+
+  /** Load animation definitions (timings/transitions/interruptibility/action map). Fire-and-forget. */
+  load_animations(defs: AnimationDefsInput): void {
+    this.worker.postMessage({ type: 'load_animations', defs });
   }
 
   /** Hand the entity to the engine's player controller. Fire-and-forget. */

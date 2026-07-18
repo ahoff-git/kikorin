@@ -88,6 +88,12 @@ pub struct SemanticPatch {
     pub health: Option<i32>,
     pub net_flags: Option<u8>,
     pub grounded: Option<bool>,
+    /// Resolved animation cell (present when the ANIM dirty flag is set): which
+    /// family/frame/direction the engine's animation state machine picked this
+    /// tick. TS displays it; it never recomputes animation. See ADR 0015.
+    pub anim_id: Option<u16>,
+    pub anim_frame: Option<u16>,
+    pub anim_dir: Option<u8>,
 }
 
 /// Per-tick timing in milliseconds, always emitted — consumers may ignore.
@@ -140,8 +146,13 @@ impl PatchGenerator {
                 }
             }
 
-            let has_semantic = flags.intersects(DirtyFlags::HEALTH | DirtyFlags::NET);
+            let has_semantic = flags.intersects(DirtyFlags::HEALTH | DirtyFlags::NET | DirtyFlags::ANIM);
             if has_semantic {
+                let anim = if flags.contains(DirtyFlags::ANIM) {
+                    world.anim_cell(id)
+                } else {
+                    None
+                };
                 semantic.push(SemanticPatch {
                     entity: id,
                     health: if flags.contains(DirtyFlags::HEALTH) {
@@ -155,6 +166,9 @@ impl PatchGenerator {
                         None
                     },
                     grounded: world.is_grounded(id),
+                    anim_id: anim.map(|a| a.anim_id),
+                    anim_frame: anim.map(|a| a.frame),
+                    anim_dir: anim.map(|a| a.dir),
                 });
             }
         }
@@ -204,6 +218,9 @@ mod tests {
                 health: Some(100),
                 net_flags: Some(0b0011),
                 grounded: Some(true),
+                anim_id: Some(1),
+                anim_frame: Some(2),
+                anim_dir: Some(3),
             }],
             net: vec![],
             hits: vec![HitPatch {
@@ -230,6 +247,9 @@ mod tests {
         assert!((decoded.render[0].x - 1.0).abs() < 1e-6);
         assert_eq!(decoded.semantic[0].health, Some(100));
         assert_eq!(decoded.semantic[0].grounded, Some(true));
+        assert_eq!(decoded.semantic[0].anim_id, Some(1));
+        assert_eq!(decoded.semantic[0].anim_frame, Some(2));
+        assert_eq!(decoded.semantic[0].anim_dir, Some(3));
         assert_eq!(decoded.hits.len(), 1);
         assert_eq!(decoded.hits[0].bullet_eid, 5);
         assert_eq!(decoded.hits[0].target_eid, Some(3));

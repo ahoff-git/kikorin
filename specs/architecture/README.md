@@ -10,7 +10,7 @@ A modular, data-driven Rust game engine compiled to WASM that lives inside a Nex
 
 | Side | Owns |
 |---|---|
-| **Rust (`crates/`)** | Canonical ECS state, dirty tracking, system execution, Rapier physics, NavMesh A* pathfinding, peer delta protocol, monster AI / bullets, the player controller (movement/facing/jump from raw input), combat (fire, damage, death, respawn), monster population, entity lifecycle, per-tick `PatchBundle` generation |
+| **Rust (`crates/`)** | Canonical ECS state, dirty tracking, system execution, Rapier physics, NavMesh A* pathfinding, peer delta protocol, monster AI / bullets, the player controller (movement/facing/jump from raw input), combat (fire, damage, death, respawn), the animation state machine (family/frame/timing/interruptibility, resolved cell per entity — ADR 0015), monster population, entity lifecycle, per-tick `PatchBundle` generation |
 | **TypeScript (`packages/`, `apps/web`)** | Raw input capture (key/mouse state → `set_player_input`), Three.js rendering (meshes follow lifecycle/render patches), camera, React HUD, WASM loading + worker hosting, adapter channel fan-out, **peer transport** (PeerJS on the main thread over the free public broker — workers have no RTCPeerConnection; bytes shuttle through the engine's `net_*` bridge), **game data** (map layout, tuning) |
 
 TypeScript never writes engine state directly — all mutations go through the WASM API (spawn/destroy/velocity/input methods). The `PatchBundle` is the only per-tick data that crosses the boundary; there are no per-entity getter calls in the hot path.

@@ -236,6 +236,7 @@ dependencies = [
 name = "engine"
 version = "0.1.0"
 dependencies = [
+ "animation",
  "bincode",
  "console_error_panic_hook",
  "console_log",

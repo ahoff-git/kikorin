@@ -1,9 +1,13 @@
 # crates/animation — Animation State Machine
 
-> **Status: Phase 1 (pure core) implemented.** The crate exists, compiles, and is
-> cargo-tested in isolation. It is **not yet wired into `engine`** — that
-> integration (per-entity instances, `load_animations`, boundary emission) and
-> authoritative hit/hurtbox combat are later phases. See [ADR 0015](../decisions/0015-animation-simulation-in-rust.md).
+> **Status: Phase 2 — integrated into the engine.** The pure state machine
+> (this crate) is wired into `crates/engine`: the engine holds a per-entity
+> `AnimationInstance` map, `load_animations` builds the set from game data, the
+> tick advances each instance and emits the resolved cell on `SemanticPatch`,
+> and the top-down game renders it (idle/walk derived from velocity, attack from
+> `player_fire`). Still pending (Phase 3): authoritative hit/hurtbox combat
+> (geometry is carried but unused). See [ADR 0015](../decisions/0015-animation-simulation-in-rust.md)
+> and [ADR 0016](../decisions/0016-animation-branch-frames-and-collider-boxes.md).
 
 ## Purpose
 Owns the animation *simulation*: given a set of animation families and a stream
@@ -61,8 +65,10 @@ instances and feeds this crate; TypeScript only renders the resolved cell.
 - A dropped (skipped) frame produces no slot; kept frames are contiguous.
 
 ## Dependencies
-None (no internal crates, no external crates). Assembled by `engine` in a later
-phase.
+None (no internal crates, no external crates). Assembled by `engine`, which owns
+the per-entity instances, the loaded `AnimationSet`, and the per-tick drive that
+writes cells to the ECS `anim` column for patch emission (see the engine spec's
+animation section).
 
 ## Verification
 `cargo test -p animation` — direction quantization across the ring incl. wrap and
