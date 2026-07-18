@@ -1,11 +1,13 @@
 # ADR 0014: Paper-doll sprites via a renderer-agnostic resolved-pose contract
 
 ## Status
-Accepted — v1 implemented (`packages/paperdoll`) and wired into the top-down
-sample game. The resolved-pose contract, resolvers, baked cache, and flat-sprite
-renderer are shipped; the Rust action-field half of the contract is deferred (v1
-derives locomotion TS-side) and billboard mode is coded but unwired. See
-[specs/paperdoll](../paperdoll/README.md) → Implementation Status.
+Accepted, partially superseded. v1 shipped (`packages/paperdoll`) wired into the
+top-down game: resolved-pose contract, `THREE.Sprite` renderer, full-sheet sRGB
+bake, `texture.offset` selection — all still current. The **resolver-ownership**
+half (pose/timing/frame resolution and action state in TypeScript) is superseded
+by [ADR 0015](./0015-animation-simulation-in-rust.md), which moves animation
+simulation into Rust (`crates/animation`); the TS resolvers are replaced by
+Rust-driven cells in that ADR's Phase 2. See [specs/paperdoll](../paperdoll/README.md).
 
 ## Context
 The one remaining TODO item: "a way to manage 8-way paper-doll (layered sprite)

@@ -3,6 +3,7 @@ members = [
     "crates/ecs",
     "crates/physics",
     "crates/pathfinding",
+    "crates/animation",
     "crates/netcode",
     "crates/patch",
     "crates/engine",

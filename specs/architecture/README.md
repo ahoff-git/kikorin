@@ -30,11 +30,12 @@ Dependency rule: a crate may depend on `ecs` (the shared substrate) and external
 ```
 Layer 2:  engine            (orchestrator; the only multi-crate importer)
 Layer 1:  physics  netcode  patch     (each depends on ecs only)
-Layer 0:  ecs  pathfinding            (no internal deps)
+Layer 0:  ecs  pathfinding  animation (no internal deps)
 ```
 
 Consequences that keep the "rip one out" promise:
 - `pathfinding` is fully standalone (no ecs/physics knowledge).
+- `animation` is fully standalone (no ecs/engine/render knowledge) — a pure state machine the engine feeds; per-entity instances live in the engine's own map, not an ecs column. See [ADR 0015](../decisions/0015-animation-simulation-in-rust.md).
 - `netcode` needs only `ecs` — no physics, pathfinding, or game loop comes along.
 - `patch` owns the boundary payload schema (including the boundary `NetPatch`); `engine` maps netcode's wire-level patches into it, so the two crates stay independent.
 

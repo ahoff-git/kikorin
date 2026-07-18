@@ -29,6 +29,7 @@ Lightweight architecture decision record (ADR) log for kikorin.
 - [0012: Frontier-only discovery with a detour-ratio filter; flying reactive avoidance](./0012-discovery-pacing-and-flying-avoidance.md)
 - [0013: Incorporeal (can_phase) — collision groups + phase edges](./0013-incorporeal-phase-capability.md)
 - [0014: Paper-doll sprites via a renderer-agnostic resolved-pose contract](./0014-paperdoll-resolved-pose-contract.md)
+- [0015: Animation is Rust-simulated; TypeScript is a thin renderer](./0015-animation-simulation-in-rust.md)
 
 ## Open Questions
 

@@ -12,6 +12,7 @@ Lightweight wiki-style specs for the kikorin project. Start here and branch out 
 - [ECS world](./ecs/README.md)
 - [Physics world (Rapier2D/Rapier3D)](./physics/README.md)
 - [Pathfinding (NavMesh A*)](./pathfinding/README.md)
+- [Animation (state machine)](./animation/README.md)
 - [Netcode delta tracker & peer session](./netcode/README.md)
 - [Patch bundle generation](./patch/README.md)
 

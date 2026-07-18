@@ -1,0 +1,8 @@
+[package]
+name = "animation"
+version = "0.1.0"
+edition = "2021"
+
+# Pure state machine — no internal deps (like `pathfinding`). The engine owns
+# per-entity instances and feeds this crate; it never touches the ECS World.
+[dependencies]

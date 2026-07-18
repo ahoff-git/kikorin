@@ -7,6 +7,14 @@
 > that section for what is *not* yet real, so the rest of this spec (which
 > describes the intended full contract) isn't mistaken for all-shipped. See
 > ADR 0014.
+>
+> **Migrating (ADR 0015):** the animation *simulation* — the pose/timing/frame
+> resolvers, `setAction`, and auto-derived locomotion described below — is moving
+> into Rust (`crates/animation`, see [specs/animation](../animation/README.md)).
+> Once that lands, this package keeps the *art* side (manifest, bake cache,
+> `THREE.Sprite` renderer) and simply displays the frame/direction the engine
+> emits per tick. The resolver sections below describe the current committed TS
+> behavior until that refactor.
 
 ### Purpose
 Resolves what an animated character looks like *right now* — facing direction,
