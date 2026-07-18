@@ -355,10 +355,12 @@ Read before shipping on this — the things a user *will* trip on:
   pathological equipment matrix; accepted, ref-counting is a future option.
 - **`sidescroll` uses a fixed side-profile row (East)** and derives its flip from
   horizontal movement; the row isn't configurable yet.
-- **Animation frames faster than the ~16 ms flush are dropped for display** (the
-  worker merges semantic patches latest-wins). Frame *events* are dispatched in
-  Rust and are never dropped, so gameplay stays correct even if the drawn frame
-  skips.
+- **Sub-flush frame changes coalesce to the latest** (the worker merges semantic
+  patches latest-wins at ~16 ms ≈ render rate). This is correct — the scene can't
+  render >60 fps — and the *current* cell always reaches TS (it rides every
+  semantic patch, see the patch spec; a bug where no-change ticks clobbered it
+  and froze the sprite is fixed). Frame *events* are dispatched in Rust and are
+  never dropped, so gameplay stays correct regardless.
 - **No TS-side (presentational) frame callbacks yet** — only engine gameplay
   events. Surfacing events across the boundary as a queued slice (like `hits`) is
   the natural follow-up for sound/FX hooks.

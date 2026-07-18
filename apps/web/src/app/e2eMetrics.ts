@@ -39,6 +39,8 @@ export type E2EState = {
   frameCount: number;
   patchCount: number;
   latestRenderByEntity: Record<string, RenderPatch>;
+  /** Latest animation cell per entity — lets tests assert frames advance. */
+  latestAnimByEntity: Record<string, { anim_id: number; anim_frame: number; anim_dir: number }>;
   metrics: E2EMetricSample[];
   teleports: E2ETeleportMark[];
   marks: Record<string, number>;
@@ -66,6 +68,7 @@ function createState(): E2EState {
     frameCount: 0,
     patchCount: 0,
     latestRenderByEntity: {},
+    latestAnimByEntity: {},
     metrics: [],
     teleports: [],
     marks: {},
@@ -135,6 +138,14 @@ export function recordE2EPatch(bundle: PatchBundle): void {
   state.patchCount += 1;
   for (const render of bundle.render) {
     state.latestRenderByEntity[String(render.entity)] = render;
+  }
+  for (const s of bundle.semantic) {
+    if (s.anim_id === undefined) continue;
+    state.latestAnimByEntity[String(s.entity)] = {
+      anim_id: s.anim_id,
+      anim_frame: s.anim_frame ?? 0,
+      anim_dir: s.anim_dir ?? 0,
+    };
   }
 
   state.metrics.push({

@@ -148,11 +148,14 @@ impl PatchGenerator {
 
             let has_semantic = flags.intersects(DirtyFlags::HEALTH | DirtyFlags::NET | DirtyFlags::ANIM);
             if has_semantic {
-                let anim = if flags.contains(DirtyFlags::ANIM) {
-                    world.anim_cell(id)
-                } else {
-                    None
-                };
+                // Emit the CURRENT cell on every semantic patch, not only when
+                // ANIM was the dirtied flag. Local entities emit a semantic patch
+                // every tick (HEALTH is re-dirtied for grounded delivery); if anim
+                // were None on the no-change ticks, the worker's latest-wins merge
+                // (serde None → `undefined`) would clobber the cell from the tick
+                // it changed, and the sprite would freeze on a frame. Same reason
+                // `grounded` below is unconditional.
+                let anim = world.anim_cell(id);
                 semantic.push(SemanticPatch {
                     entity: id,
                     health: if flags.contains(DirtyFlags::HEALTH) {
@@ -286,5 +289,26 @@ mod tests {
         assert!(bundle.render.is_empty());
         assert_eq!(bundle.semantic.len(), 1);
         assert_eq!(bundle.semantic[0].health, Some(75));
+    }
+
+    #[test]
+    fn semantic_patch_carries_current_anim_cell_even_when_only_health_is_dirty() {
+        // Regression: the animation cell must ride EVERY semantic patch (not only
+        // when ANIM is the dirtied flag), or the worker's latest-wins merge drops
+        // frame updates and the sprite freezes. Local entities re-dirty HEALTH
+        // each tick, so this is the common path.
+        let mut world = World::new(8);
+        let e = world.create_entity();
+        world.set_anim_cell(e, ecs::AnimCell { anim_id: 1, frame: 3, dir: 6 });
+        world.set_health(e, 50);
+        world.mark_dirty(e, DirtyFlags::HEALTH); // NOT ANIM
+
+        let gen = PatchGenerator::new();
+        let bundle = gen.generate(&world, vec![], vec![], vec![], MetricsPatch::default());
+
+        assert_eq!(bundle.semantic.len(), 1);
+        assert_eq!(bundle.semantic[0].anim_id, Some(1));
+        assert_eq!(bundle.semantic[0].anim_frame, Some(3));
+        assert_eq!(bundle.semantic[0].anim_dir, Some(6));
     }
 }
