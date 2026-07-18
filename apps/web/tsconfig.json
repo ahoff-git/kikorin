@@ -7,6 +7,7 @@
     "paths": {
       "@kikorin/adapter": ["../../packages/adapter/src/index.ts"],
       "@kikorin/events": ["../../packages/events/src/index.ts"],
+      "@kikorin/paperdoll": ["../../packages/paperdoll/src/index.ts"],
       "@kikorin/react": ["../../packages/react/src/index.ts"],
       "@kikorin/system-rendering": ["../../packages/system-rendering/src/index.ts"],
       "@kikorin/util": ["../../packages/util/src/index.ts"]

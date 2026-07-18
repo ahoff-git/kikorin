@@ -22,6 +22,7 @@
     "@kikorin/engine-source": "workspace:*",
     "@kikorin/engine-wasm": "workspace:*",
     "@kikorin/events": "workspace:*",
+    "@kikorin/paperdoll": "workspace:*",
     "@kikorin/react": "workspace:*",
     "@kikorin/system-rendering": "workspace:*",
     "@kikorin/util": "workspace:*",

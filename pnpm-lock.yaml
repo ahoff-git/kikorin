@@ -47,6 +47,9 @@ importers:
       '@kikorin/events':
         specifier: workspace:*
         version: link:../../packages/events
+      '@kikorin/paperdoll':
+        specifier: workspace:*
+        version: link:../../packages/paperdoll
       '@kikorin/react':
         specifier: workspace:*
         version: link:../../packages/react
@@ -125,6 +128,28 @@ importers:
       '@types/node':
         specifier: ^20
         version: 20.19.33
+      typescript:
+        specifier: ^5
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.0
+        version: 3.2.6(@types/node@20.19.33)(jsdom@26.1.0)
+
+  packages/paperdoll:
+    dependencies:
+      '@kikorin/util':
+        specifier: workspace:*
+        version: link:../util
+      three:
+        specifier: ^0.182.0
+        version: 0.182.0
+    devDependencies:
+      '@types/node':
+        specifier: ^20
+        version: 20.19.33
+      '@types/three':
+        specifier: ^0.182.0
+        version: 0.182.0
       typescript:
         specifier: ^5
         version: 5.9.3

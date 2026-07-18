@@ -28,6 +28,7 @@ Lightweight architecture decision record (ADR) log for kikorin.
 - [0011: Layered pathfinding — tiered planners, shared flow fields, baked key routes, and Tier-4 discovery](./0011-layered-pathfinding.md)
 - [0012: Frontier-only discovery with a detour-ratio filter; flying reactive avoidance](./0012-discovery-pacing-and-flying-avoidance.md)
 - [0013: Incorporeal (can_phase) — collision groups + phase edges](./0013-incorporeal-phase-capability.md)
+- [0014: Paper-doll sprites via a renderer-agnostic resolved-pose contract](./0014-paperdoll-resolved-pose-contract.md)
 
 ## Open Questions
 

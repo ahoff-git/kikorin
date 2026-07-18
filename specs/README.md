@@ -19,6 +19,7 @@ Lightweight wiki-style specs for the kikorin project. Start here and branch out 
 
 - [Adapter — boundary types, constants & channel fan-out](./adapter/README.md)
 - [System-rendering — Three.js render bridge](./system-rendering/README.md)
+- [Paper-doll — 8-way layered sprite animation](./paperdoll/README.md) — resolver pipeline + baked-strip cache; v1 wired into the top-down game (see ADR 0014).
 - [Util — logging contract](./util/README.md)
 
 ## App-level modules (apps/web)

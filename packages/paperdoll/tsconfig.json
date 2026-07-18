@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "noEmit": true,
+    "paths": {
+      "@kikorin/util": ["../util/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*"]
+}

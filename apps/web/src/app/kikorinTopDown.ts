@@ -21,6 +21,18 @@ import { recordE2EEntitySpawn } from "./e2eMetrics";
 import { makeEdgedBox, makePersonMesh } from "./meshFactories";
 import { createHeldKeysTracker, suppressContextMenu } from "./inputHelpers";
 import type { OwnershipCallbacks } from "./useNetworking";
+import {
+  registerSpriteSet,
+  loadSpriteSet,
+  createPaperDollSprite,
+  type PaperDollSprite,
+} from "@kikorin/paperdoll";
+import {
+  buildKikorinSpriteSet,
+  KIKORIN_SPRITE_SET_ID,
+  PLAYER_LOADOUT,
+  MONSTER_LOADOUT,
+} from "./paperDollAssets";
 
 // This file is UI + IO only, mirroring kikorin.ts's split for the 3D game —
 // and reuses that game's Rust pipeline entirely unmodified (player
@@ -72,13 +84,6 @@ function makeProjectileMesh(): Object3D {
   return new Mesh(PROJ_GEO, PROJ_MAT);
 }
 
-/** Mesh for an engine-owned local entity, styled by its net-flag profile. */
-function makeLocalMesh(flags: number): Object3D {
-  if (flags & NET_BULLET) return makeProjectileMesh();
-  if (flags & NET_MONSTER) return makePersonMeshFor(0xcc4444, 0xff8800);
-  return makePersonMeshFor(0x4488cc, 0xffe082); // the player
-}
-
 /** Mesh for a remote peer's mirror, styled by its public profile. */
 function makeRemoteMesh(flags: number): Object3D {
   if (flags & NET_BULLET) return makeProjectileMesh();
@@ -103,6 +108,15 @@ export async function setupGameTopDown(
   // Once: a straight-down lookAt is degenerate against the default up vector
   // (both parallel to the view direction) — see setCameraUp's doc comment.
   setCameraUp(0, 0, -1);
+
+  // --- Paper-doll sprites: register the procedural placeholder sprite set and
+  // load its (in-memory) sheets before any entity mesh gets created. The player
+  // and monsters render as 8-way layered sprites; bullets and remote mirrors
+  // keep their boxes/spheres (remote loadout sync is a later, networked step). ---
+  registerSpriteSet(KIKORIN_SPRITE_SET_ID, buildKikorinSpriteSet());
+  await loadSpriteSet(KIKORIN_SPRITE_SET_ID);
+  const spritesByEid = new Map<number, PaperDollSprite>();
+  const PERSON_WORLD_HEIGHT = PERSON_HALF_H * 2;
 
   // --- Terrain: load_map spawns every block and builds the navmesh in one
   // call, same as the 3D game — the maze being flat is what makes the
@@ -145,11 +159,32 @@ export async function setupGameTopDown(
   const unsubLifecycle = lifecycleChannel.subscribe(() => {
     for (const l of lifecycleChannel.getSnapshot()) {
       if (l.kind === "spawned") {
-        upsertObjectByEid(l.entity, () => makeLocalMesh(l.flags));
-        if (l.flags & NET_MONSTER) recordE2EEntitySpawn("monster", l.entity);
-        else if (l.flags & NET_BULLET) recordE2EEntitySpawn("bullet", l.entity);
+        if (l.flags & NET_BULLET) {
+          upsertObjectByEid(l.entity, () => makeProjectileMesh());
+          recordE2EEntitySpawn("bullet", l.entity);
+        } else {
+          // Everything else engine-owned here is a person: the player or a
+          // monster. Both render as layered paper-doll sprites, differing only
+          // by loadout (and the monster's red body).
+          const isMonster = (l.flags & NET_MONSTER) !== 0;
+          const sprite = createPaperDollSprite({
+            setId: KIKORIN_SPRITE_SET_ID,
+            loadout: isMonster ? MONSTER_LOADOUT : PLAYER_LOADOUT,
+            worldHeight: PERSON_WORLD_HEIGHT,
+          });
+          upsertObjectByEid(l.entity, () => sprite.object);
+          spritesByEid.set(l.entity, sprite);
+          if (isMonster) recordE2EEntitySpawn("monster", l.entity);
+        }
       } else {
-        removeObjectByEid(l.entity, { dispose: true });
+        const sprite = spritesByEid.get(l.entity);
+        if (sprite) {
+          spritesByEid.delete(l.entity);
+          removeObjectByEid(l.entity); // detach; the sprite owns its disposal
+          sprite.dispose();
+        } else {
+          removeObjectByEid(l.entity, { dispose: true });
+        }
       }
     }
   });
@@ -205,6 +240,12 @@ export async function setupGameTopDown(
       setCameraPosition(obj.position.x, TOPDOWN_CAM_HEIGHT, obj.position.z);
       lookCameraAt(obj.position.x, 0, obj.position.z);
     });
+
+    // Advance every paper-doll sprite: pick its direction row from the yaw the
+    // render channel wrote onto each Group, its idle/walk family from how far it
+    // moved, and orient its quad flat to the overhead camera.
+    const now = performance.now();
+    for (const sprite of spritesByEid.values()) sprite.update(now);
   }
 
   function spawnMonsters(count: number): void {
@@ -221,6 +262,8 @@ export async function setupGameTopDown(
     stopSuppressingContextMenu();
     unsubLifecycle();
     unsubNet();
+    for (const sprite of spritesByEid.values()) sprite.dispose();
+    spritesByEid.clear();
   }
 
   return { playerEid, ownedEids, onRemoteEntityHit, spawnMonsters, onFrame, cleanup };
