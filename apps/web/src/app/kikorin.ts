@@ -15,6 +15,7 @@ import {
   removeObjectByEid,
   setCameraPosition,
   lookCameraAt,
+  getActiveCamera,
 } from "@kikorin/system-rendering";
 import {
   Mesh,
@@ -29,6 +30,8 @@ import { makeEdgedBox, makePersonMesh } from "./meshFactories";
 import { createHeldKeysTracker, suppressContextMenu } from "./inputHelpers";
 import type { OwnershipCallbacks } from "./useNetworking";
 import { createMonsterTemplates, pickMonsterTemplate } from "./monsterTemplates";
+import { createSpriteDirector } from "./paperDollDirector";
+import { PLAYER_LOADOUT, MONSTER_LOADOUT } from "./paperDollAssets";
 
 // This file is UI + IO only: it captures raw input, forwards it to the Rust
 // engine (which owns all movement/combat/spawn rules), and renders what the
@@ -100,16 +103,6 @@ function makeProjectileMesh(): Object3D {
   return mesh;
 }
 
-/**
- * Mesh for an engine-owned local entity, styled by its net-flag profile.
- * NET_MONSTER isn't handled here — the lifecycle handler below styles
- * monsters per their randomly-assigned template instead.
- */
-function makeLocalMesh(flags: number): Object3D {
-  if (flags & NET_BULLET) return makeProjectileMesh();
-  return makePersonMeshFor(0x4488cc, 0xffe082); // the player
-}
-
 /** Mesh for a remote peer's mirror, styled by its public profile. */
 function makeRemoteMesh(flags: number): Object3D {
   if (flags & NET_BULLET) return makeProjectileMesh();
@@ -168,24 +161,35 @@ export async function setupGame(
   // Monster eids (for crosshair aim assist) — maintained from lifecycle events.
   const monsterEids: number[] = [];
 
-  // --- Meshes follow the engine's lifecycle events ---
+  // Paper-doll sprites in billboard mode (perspective camera → Doom-style,
+  // camera-relative facing). The engine drives family/frame; the camera picks
+  // the shown direction row each frame.
+  const PERSON_WORLD_HEIGHT = PERSON_HALF_H * 2;
+  const director = await createSpriteDirector(engine, {
+    mode: "billboard",
+    getCamera: getActiveCamera,
+  });
+
+  // --- Sprites/meshes follow the engine's lifecycle events ---
   const unsubLifecycle = lifecycleChannel.subscribe(() => {
     for (const l of lifecycleChannel.getSnapshot()) {
       if (l.kind === "spawned") {
         if (l.flags & NET_MONSTER) {
-          // Pick a type before creating the mesh so its color matches what
-          // set_monster_capability just gave it — also covers respawns,
-          // which emit this same "spawned" event with a fresh entity id.
+          // Pick a type before creating the sprite so its capability matches —
+          // also covers respawns, which emit this same "spawned" event.
           const template = pickMonsterTemplate(MONSTER_TEMPLATES);
           engine.set_monster_capability(l.entity, template.capability);
-          upsertObjectByEid(l.entity, () => makePersonMeshFor(template.bodyColor, template.frontColor));
+          director.add(l.entity, MONSTER_LOADOUT, PERSON_WORLD_HEIGHT);
           monsterEids.push(l.entity);
           recordE2EEntitySpawn("monster", l.entity);
+        } else if (l.flags & NET_BULLET) {
+          upsertObjectByEid(l.entity, () => makeProjectileMesh());
+          recordE2EEntitySpawn("bullet", l.entity);
         } else {
-          upsertObjectByEid(l.entity, () => makeLocalMesh(l.flags));
-          if (l.flags & NET_BULLET) recordE2EEntitySpawn("bullet", l.entity);
+          director.add(l.entity, PLAYER_LOADOUT, PERSON_WORLD_HEIGHT); // the player
         }
       } else {
+        director.remove(l.entity); // no-op for non-sprites (bullets)
         removeObjectByEid(l.entity, { dispose: true });
         const idx = monsterEids.indexOf(l.entity);
         if (idx >= 0) monsterEids.splice(idx, 1);
@@ -380,6 +384,9 @@ export async function setupGame(
       setCameraPosition(px + followX * t, py + followY * t, pz + followZ * t);
       lookCameraAt(px, py + CAM_LOOK_HEIGHT_OFFSET, pz);
     });
+
+    // After the camera has moved this frame, so billboard facing is current.
+    director.update(now);
   }
 
   function spawnMonsters(count: number): void {
@@ -397,6 +404,7 @@ export async function setupGame(
     if (canvas && document.pointerLockElement === canvas) document.exitPointerLock();
     unsubLifecycle();
     unsubNet();
+    director.dispose();
   }
 
   return { playerEid, ownedEids, onRemoteEntityHit, spawnMonsters, onFrame, onCameraDrag, onCameraReset, cleanup };

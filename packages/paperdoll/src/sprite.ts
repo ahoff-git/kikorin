@@ -40,11 +40,18 @@ export interface ActionInput {
 }
 
 /**
- * Only affects the direction-row math and anchor, not orientation — a Sprite
- * always points at the camera either way. "flat" (top-down) reads the row from
- * the entity yaw; "billboard" (3d) reads it relative to the camera azimuth.
+ * Selects how facing maps to the sheet — orientation is always Three's billboard
+ * (the Sprite points at the camera). "flat" (top-down): row = entity yaw.
+ * "billboard" (3d perspective): row = yaw relative to the camera azimuth.
+ * "sidescroll" (2d side view): a fixed side-profile row, mirrored left/right by
+ * horizontal movement (a side-scroller has no yaw — facing is a flip).
  */
-export type SpriteMode = "flat" | "billboard";
+export type SpriteMode = "flat" | "billboard" | "sidescroll";
+
+// The side-profile row shown in sidescroll mode (East faces screen-right; a
+// negative scale.x mirrors it to face left).
+const SIDESCROLL_ROW = 6;
+const SIDESCROLL_MOVE_EPS = 1e-4;
 
 export interface CreateSpriteOptions {
   setId: string;
@@ -86,10 +93,11 @@ export function createPaperDollSprite(opts: CreateSpriteOptions): PaperDollSprit
   const [cellW, cellH] = manifest.cell;
   const aspect = cellW / cellH;
   const mode: SpriteMode = opts.mode ?? "flat";
+  const w = opts.worldHeight * aspect;
 
   const material = new SpriteMaterial({ transparent: true, alphaTest: 0.5 });
   const sprite = new Sprite(material);
-  sprite.scale.set(opts.worldHeight * aspect, opts.worldHeight, 1);
+  sprite.scale.set(w, opts.worldHeight, 1);
   // .center is (0,0)=bottom-left. Flat top-down reads best centered on the
   // entity; an upright billboard reads best pinned at the feet (manifest anchor,
   // whose y is measured from the top — hence 1 - anchorY).
@@ -98,6 +106,10 @@ export function createPaperDollSprite(opts: CreateSpriteOptions): PaperDollSprit
 
   let loadout = opts.loadout;
   let loadoutKeyStr = computeLoadoutKey(loadout);
+
+  // sidescroll flip state: face the way we're moving; hold facing when still.
+  let sideFacing = 1;
+  let lastSideX = NaN;
 
   const animFamilies = opts.animFamilies;
   // In Rust-driven mode this holds the latest engine-emitted cell; seeded to the
@@ -175,9 +187,28 @@ export function createPaperDollSprite(opts: CreateSpriteOptions): PaperDollSprit
   }
 
   function update(nowMs: number, camera?: Camera): void {
-    // Rust-driven (ADR 0015): display exactly the cell the engine emitted.
+    // Rust-driven (ADR 0015): use the engine's family + frame. Direction: flat
+    // (fixed-camera) modes use the row Rust resolved; billboard (3D) recomputes
+    // it camera-relative from the render yaw, since the viewing angle is a TS
+    // camera Rust can't know.
     if (rustCell) {
-      applyCell(rustCell.family, rustCell.frame, rustCell.dir);
+      let dir: number;
+      if (mode === "billboard" && camera) {
+        dir = directionFor(sprite.rotation.y, camera);
+      } else if (mode === "sidescroll") {
+        // Fixed side profile; mirror it by horizontal movement (2D has no yaw).
+        const x = sprite.position.x;
+        if (Number.isFinite(lastSideX)) {
+          if (x - lastSideX > SIDESCROLL_MOVE_EPS) sideFacing = 1;
+          else if (x - lastSideX < -SIDESCROLL_MOVE_EPS) sideFacing = -1;
+        }
+        lastSideX = x;
+        sprite.scale.x = sideFacing * w;
+        dir = SIDESCROLL_ROW;
+      } else {
+        dir = rustCell.dir;
+      }
+      applyCell(rustCell.family, rustCell.frame, dir);
       return;
     }
 

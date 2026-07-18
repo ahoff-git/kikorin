@@ -1,7 +1,6 @@
 import {
   lifecycleChannel,
   netChannel,
-  hudChannel,
   NET_BULLET,
   NET_LOCAL,
   NET_MONSTER,
@@ -22,20 +21,8 @@ import { recordE2EEntitySpawn } from "./e2eMetrics";
 import { makeEdgedBox, makePersonMesh } from "./meshFactories";
 import { createHeldKeysTracker, suppressContextMenu } from "./inputHelpers";
 import type { OwnershipCallbacks } from "./useNetworking";
-import {
-  registerSpriteSet,
-  loadSpriteSet,
-  createPaperDollSprite,
-  type PaperDollSprite,
-} from "@kikorin/paperdoll";
-import {
-  buildKikorinSpriteSet,
-  KIKORIN_ANIM_DEFS,
-  FAMILY_ORDER,
-  KIKORIN_SPRITE_SET_ID,
-  PLAYER_LOADOUT,
-  MONSTER_LOADOUT,
-} from "./paperDollAssets";
+import { createSpriteDirector } from "./paperDollDirector";
+import { PLAYER_LOADOUT, MONSTER_LOADOUT } from "./paperDollAssets";
 
 // This file is UI + IO only, mirroring kikorin.ts's split for the 3D game —
 // and reuses that game's Rust pipeline entirely unmodified (player
@@ -116,13 +103,8 @@ export async function setupGameTopDown(
   // load its (in-memory) sheets before any entity mesh gets created. The player
   // and monsters render as 8-way layered sprites; bullets and remote mirrors
   // keep their boxes/spheres (remote loadout sync is a later, networked step). ---
-  registerSpriteSet(KIKORIN_SPRITE_SET_ID, buildKikorinSpriteSet());
-  await loadSpriteSet(KIKORIN_SPRITE_SET_ID);
-  // Behavior half: the engine owns the animation simulation and drives the
-  // displayed cell each tick (ADR 0015). Family index = anim_id = FAMILY_ORDER.
-  engine.load_animations(KIKORIN_ANIM_DEFS);
-  const spriteFamilies = [...FAMILY_ORDER];
-  const spritesByEid = new Map<number, PaperDollSprite>();
+  // Paper-doll sprites in flat (top-down) mode — the engine drives the cells.
+  const director = await createSpriteDirector(engine, { mode: "flat" });
   const PERSON_WORLD_HEIGHT = PERSON_HALF_H * 2;
 
   // --- Terrain: load_map spawns every block and builds the navmesh in one
@@ -174,25 +156,12 @@ export async function setupGameTopDown(
           // monster. Both render as layered paper-doll sprites, differing only
           // by loadout (and the monster's red body).
           const isMonster = (l.flags & NET_MONSTER) !== 0;
-          const sprite = createPaperDollSprite({
-            setId: KIKORIN_SPRITE_SET_ID,
-            loadout: isMonster ? MONSTER_LOADOUT : PLAYER_LOADOUT,
-            worldHeight: PERSON_WORLD_HEIGHT,
-            animFamilies: spriteFamilies,
-          });
-          upsertObjectByEid(l.entity, () => sprite.object);
-          spritesByEid.set(l.entity, sprite);
+          director.add(l.entity, isMonster ? MONSTER_LOADOUT : PLAYER_LOADOUT, PERSON_WORLD_HEIGHT);
           if (isMonster) recordE2EEntitySpawn("monster", l.entity);
         }
       } else {
-        const sprite = spritesByEid.get(l.entity);
-        if (sprite) {
-          spritesByEid.delete(l.entity);
-          removeObjectByEid(l.entity); // detach; the sprite owns its disposal
-          sprite.dispose();
-        } else {
-          removeObjectByEid(l.entity, { dispose: true });
-        }
+        director.remove(l.entity); // no-op for non-sprites (bullets)
+        removeObjectByEid(l.entity, { dispose: true });
       }
     }
   });
@@ -206,15 +175,6 @@ export async function setupGameTopDown(
       } else if (p.kind === "despawned") {
         removeObjectByEid(p.entity, { dispose: true });
       }
-    }
-  });
-
-  // --- Animation cells: the engine decides family/frame/direction; the sprite
-  // just displays what each SemanticPatch carries (ADR 0015). ---
-  const unsubHud = hudChannel.subscribe(() => {
-    for (const s of hudChannel.getSnapshot()) {
-      if (s.anim_id === undefined) continue;
-      spritesByEid.get(s.entity)?.setCell(s.anim_id, s.anim_frame ?? 0, s.anim_dir ?? 0);
     }
   });
 
@@ -258,11 +218,7 @@ export async function setupGameTopDown(
       lookCameraAt(obj.position.x, 0, obj.position.z);
     });
 
-    // Advance every paper-doll sprite: pick its direction row from the yaw the
-    // render channel wrote onto each Group, its idle/walk family from how far it
-    // moved, and orient its quad flat to the overhead camera.
-    const now = performance.now();
-    for (const sprite of spritesByEid.values()) sprite.update(now);
+    director.update(performance.now());
   }
 
   function spawnMonsters(count: number): void {
@@ -279,9 +235,7 @@ export async function setupGameTopDown(
     stopSuppressingContextMenu();
     unsubLifecycle();
     unsubNet();
-    unsubHud();
-    for (const sprite of spritesByEid.values()) sprite.dispose();
-    spritesByEid.clear();
+    director.dispose();
   }
 
   return { playerEid, ownedEids, onRemoteEntityHit, spawnMonsters, onFrame, cleanup };

@@ -191,21 +191,26 @@ Every entity renders as one `THREE.Sprite`. A Sprite always points at the
 camera — Three's built-in billboard — which *is* the "lie flat" behavior: under
 the top-down straight-down camera the sprite lies flat on the ground facing up,
 and under a perspective camera the same primitive stands upright facing the
-viewer (Doom-style). One object covers both modes with no orientation code, and
+viewer (Doom-style). One object covers every mode with no orientation code, and
 it ignores the yaw the render channel writes onto the object each tick, so the
 sprite rides the existing pipeline rather than fighting it. The game registers
 the Sprite via `upsertObjectByEid` like any `Object3D`; the render channel
 positions it (and writes a rotation the Sprite ignores for facing). The package
-**reads** that yaw only to pick the direction row — the entity's "front".
+**reads** facing only to pick the direction row. The `mode` selects only that
+row math + anchor — all three sample games are wired (via the shared
+`paperDollDirector` in `apps/web`):
 
-- **`mode: "flat"`** (top-down / ortho — *wired to the top-down game*): row =
-  quantized entity yaw; `.center` is `(0.5, 0.5)` so the sprite sits on the
-  entity. All 8 rows are exercised because a top-down player moves every
-  direction.
-- **`mode: "billboard"`** (3d perspective — *implemented, not yet wired to a
-  game*): row = quantized (entity yaw − camera-to-entity azimuth) so orbiting an
-  entity walks all 8 rows; `.center` uses the manifest `anchor` (feet). Pass a
-  `camera` to `update`; no sample drives it yet.
+- **`mode: "flat"`** (top-down / ortho): row = quantized entity yaw; `.center`
+  is `(0.5, 0.5)` so the sprite sits on the entity. All 8 rows exercised.
+- **`mode: "billboard"`** (3d perspective): row = quantized (entity yaw −
+  camera-to-entity azimuth) so orbiting an entity walks all 8 rows; `.center`
+  uses the manifest `anchor` (feet). The game passes the active `camera` to
+  `update` (Rust's `anim_dir` is world-facing and can't know the TS camera, so
+  billboard recomputes direction here from the render yaw).
+- **`mode: "sidescroll"`** (2d side view): a fixed side-profile row, mirrored
+  left/right by the sprite's own horizontal movement (a side-scroller has no
+  yaw — facing is a flip via `scale.x`). Family/frame still come from the
+  engine; direction is not Rust-driven here (2D entities carry no yaw).
 
 Mode only changes the direction-row math and the anchor — orientation is Three's
 billboard either way. The package exposes a per-frame `update(nowMs, camera?)`
@@ -277,14 +282,20 @@ idle/walk from velocity, an attack one-shot on fire. 31 co-located unit tests
 pass; verified in a real browser (walk cycle, the attack swing arc advancing
 under Block, direction rows, per-direction sword layering, correct colors).
 
+**All three sample games now render sprites** through a shared
+`apps/web/src/app/paperDollDirector.ts`: top-down (flat), 3D (billboard), 2D
+side-scroller (sidescroll). Bullets stay spheres; remote-peer mirrors stay boxes
+(loadout sync deferred).
+
 **Not yet implemented / deferred**: authoritative hit/hurtbox combat (Phase 3 —
-geometry carried, unconsumed); billboard wiring into the 3D game (code path
-exists, unused); the 2D side-scroller and 3D games still use box meshes;
-per-item sheet fallback (a layer with no sheet for the active family is skipped,
-not chain-resolved); manifest schema validation beyond crash-guards; networked
-remote-peer loadouts. Graphics are procedural placeholders (`paperDollAssets.ts`)
-that double as the authoring example — a real PNG sheet set + JSON manifest is a
-follow-up.
+geometry carried, unconsumed); the 2D player's attack animation (its `fire()`
+spawns a bullet directly rather than via `player_fire`, so no attack action is
+requested — idle/walk only there); monster types render identically (all use the
+red loadout — the per-template color distinction the boxes had is lost);
+per-item sheet fallback; manifest schema validation beyond crash-guards;
+networked remote-peer loadouts. Graphics are procedural placeholders
+(`paperDollAssets.ts`) that double as the authoring example — a real PNG sheet
+set + JSON manifest is a follow-up.
 
 ### Verification
 - Unit (`pnpm --filter @kikorin/paperdoll test`, 31 tests) — the pure logic:

@@ -27,6 +27,8 @@ import { makeEdgedBox, makePersonMesh } from "./meshFactories";
 import { createHeldKeysTracker, suppressContextMenu } from "./inputHelpers";
 import type { OwnershipCallbacks } from "./useNetworking";
 import { createMonsterTemplates, pickMonsterTemplate } from "./monsterTemplates";
+import { createSpriteDirector } from "./paperDollDirector";
+import { PLAYER_LOADOUT, MONSTER_LOADOUT } from "./paperDollAssets";
 
 // This file is UI + IO only, mirroring kikorin.ts's split for the 3D game —
 // it does NOT use the engine's player controller (register_player only
@@ -138,11 +140,15 @@ export async function setupGame2D(
   // natural follow-up, not done here.
   engine.set_monster_config({ respawn: false });
 
+  // Paper-doll sprites in sidescroll mode: a side profile flipped by movement
+  // (2D has no yaw). The engine drives family/frame (idle/walk) from velocity.
+  const director = await createSpriteDirector(engine, { mode: "sidescroll" });
+
   // --- Player ---
   const playerEid = await engine.spawn_box_entity(
     0, 3, 0, PLAYER_HALF_W, PLAYER_HALF_H, PLAYER_HALF_D, PLAYER_HEALTH, NET_LOCAL | NET_REPLICATED,
   );
-  upsertObjectByEid(playerEid, () => makePersonMeshFor(0x4488cc, 0xffe082));
+  director.add(playerEid, PLAYER_LOADOUT, PLAYER_HALF_H * 2);
   // Registers the player for closest_player_position's benefit only —
   // tick_player_controller is a no-op for a 2D engine (see module doc
   // above), so this never fights the manual set_entity_velocity calls below.
@@ -161,6 +167,7 @@ export async function setupGame2D(
           upsertObjectByEid(l.entity, () => makeProjectileMesh());
         }
       } else {
+        director.remove(l.entity); // no-op for non-sprites (bullets)
         removeObjectByEid(l.entity, { dispose: true });
       }
     }
@@ -206,7 +213,7 @@ export async function setupGame2D(
       );
       const template = pickMonsterTemplate(MONSTER_TEMPLATES);
       engine.set_monster_capability(eid, template.capability);
-      upsertObjectByEid(eid, () => makePersonMeshFor(template.bodyColor, template.frontColor));
+      director.add(eid, MONSTER_LOADOUT, MONSTER_HALF * 2);
     }
   }
 
@@ -260,16 +267,14 @@ export async function setupGame2D(
     engine.set_entity_velocity(playerEid, vx, jumpEdge ? JUMP_IMPULSE_VY : 0, 0);
 
     applyToObjectByEid(playerEid, (obj) => {
-      // Mirror facing onto the sprite so it's visually obvious which way the
-      // player is aiming (no separate rotation channel needed for this).
-      obj.scale.x = facing;
       setCameraPosition(obj.position.x, obj.position.y + CAM_Y_OFFSET, CAM_Z);
       lookCameraAt(obj.position.x, obj.position.y + CAM_Y_OFFSET, 0);
     });
 
-    // Monster movement, pathfinding, and bullet-vs-monster hit detection all
-    // run in Rust now (tick_monster_ai / tick_bullets) — nothing to drive
-    // here per frame.
+    // The sidescroll sprite flips itself from horizontal movement; the engine
+    // drives its idle/walk animation. Monster movement/pathfinding/hit-detection
+    // all run in Rust (tick_monster_ai / tick_bullets).
+    director.update(performance.now());
   }
 
   function onRemoteEntityHit(_eid: number) {}
@@ -283,6 +288,7 @@ export async function setupGame2D(
     unsubLifecycle();
     unsubNet();
     unsubHud();
+    director.dispose();
   }
 
   return { playerEid, ownedEids, onRemoteEntityHit, spawnMonsters, onFrame, cleanup };
