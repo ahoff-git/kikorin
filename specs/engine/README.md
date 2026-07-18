@@ -73,6 +73,15 @@ validate` (via `build_animation_set`) and, on a malformed def, logs a warning an
 leaves animation inert rather than panicking; a successful load clears existing
 instances (their family indices refer to the old set).
 
+**Death & hurt (ADR 0020).** Lethal damage enters a `dying` state instead of
+destroying immediately: the entity is pulled out of monster AI, separation, and
+the bullet-target snapshot at once, plays its death family (if the set has a
+non-looping DEATH family; otherwise instant destroy), and `finish_death` despawns
+it — and respawns monsters per config — when the animation finishes. Non-lethal
+damage requests a HURT flinch. Action kinds: idle=0, walk=1, attack=2, hurt=3,
+death=4. `Family.retriggerable` lets a re-requested playing family restart (combo);
+default off so per-tick locomotion requests never reset it.
+
 ### NET Flags — the entity networking profile
 The `net_flags` bitmask (constants live in `crates/ecs`, mirrored in `@kikorin/adapter`) is the source of truth for how the engine simulates **and replicates** each entity. The dimensions compose — an entity's networking behavior is the combination, not one enum:
 

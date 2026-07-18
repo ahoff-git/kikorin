@@ -270,6 +270,8 @@ export interface AnimFamilyInput {
   interrupt?: 'always' | 'block' | 'queue';
   /** Under "queue", the frame at which a queued action takes over (else at end). */
   branch_frame?: number;
+  /** Re-requesting this family while it plays restarts it (combo); default false. */
+  retriggerable?: boolean;
   /**
    * Player movement permitted while this family plays (ADR 0018). Each field
    * defaults to allowed, so a family lists only what it forbids — e.g. an attack

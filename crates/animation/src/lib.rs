@@ -142,6 +142,12 @@ pub struct Family {
     pub branch_frame: Option<usize>,
     /// Player movement permitted while this family plays (ADR 0018).
     pub move_mask: MoveMask,
+    /// If true, re-`request`ing this family while it's already playing restarts
+    /// it from frame 0 (a combo/re-swing); if false (default), a re-request of
+    /// the playing family is ignored, so it can't be reset every tick. Only
+    /// discrete actions should set this — never locomotion, which is requested
+    /// each tick and would restart constantly. See ADR 0018 / the spec.
+    pub retriggerable: bool,
 }
 
 const WILDCARD: u16 = u16::MAX;
@@ -230,6 +236,7 @@ mod tests {
                 interrupt: Interrupt::Always,
                 branch_frame: None,
                 move_mask: MoveMask::ALL,
+                retriggerable: false,
             });
         }
         s.map_action(0, None, 0); // idle
@@ -252,6 +259,7 @@ mod tests {
             interrupt: Interrupt::Always,
             branch_frame: None,
             move_mask: MoveMask::ALL,
+            retriggerable: false,
         }
     }
 

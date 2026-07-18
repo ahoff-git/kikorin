@@ -696,6 +696,9 @@ pub struct Engine {
     // instances and drives them each tick (ADR 0015).
     animation_set: Option<animation::AnimationSet>,
     animation_states: HashMap<u32, animation::AnimationInstance>,
+    // Entities playing a death animation before despawn (ADR 0020): excluded from
+    // AI, separation, and bullet targeting until the animation finishes.
+    dying: std::collections::HashSet<u32>,
     // Age counter (in ticks) for each NET_BULLET entity — used for TTL enforcement.
     bullet_ages: HashMap<u32, u32>,
     // Jump impulses latched by set_entity_velocity (non-zero vy) awaiting the next
@@ -736,6 +739,8 @@ pub struct Engine {
 const ANIM_KIND_IDLE: u16 = 0;
 const ANIM_KIND_WALK: u16 = 1;
 const ANIM_KIND_ATTACK: u16 = 2;
+const ANIM_KIND_HURT: u16 = 3;
+const ANIM_KIND_DEATH: u16 = 4;
 
 // Squared horizontal speed above which an animated entity reads as "walking".
 const ANIM_WALK_EPS_SQ: f32 = 0.05;
@@ -778,6 +783,9 @@ struct JsAnimFamily {
     /// Movement permitted while this family plays; absent = everything (ADR 0018).
     #[serde(default)]
     movement: Option<JsMoveMask>,
+    /// Re-requesting this family while it plays restarts it (combo). Default false.
+    #[serde(default)]
+    retriggerable: bool,
 }
 
 fn default_interrupt() -> String {
@@ -862,6 +870,7 @@ fn build_animation_set(dto: JsAnimationSet) -> Option<animation::AnimationSet> {
             interrupt,
             branch_frame: fam.branch_frame,
             move_mask,
+            retriggerable: fam.retriggerable,
         });
     }
     for a in dto.actions {
@@ -929,6 +938,7 @@ impl Engine {
             monster_capabilities: HashMap::new(),
             animation_set: None,
             animation_states: HashMap::new(),
+            dying: std::collections::HashSet::new(),
             bullet_ages: HashMap::new(),
             pending_jumps: HashMap::new(),
             goal_x: 0.0,
@@ -1195,18 +1205,35 @@ impl Engine {
         for eid in ids {
             self.animate_entity(eid, dt_ms);
         }
+
+        // Despawn entities whose death animation has finished (ADR 0020).
+        if !self.dying.is_empty() {
+            let finished: Vec<u32> = self
+                .dying
+                .iter()
+                .copied()
+                .filter(|id| self.animation_states.get(id).is_none_or(|i| i.finished()))
+                .collect();
+            for id in finished {
+                self.finish_death(id);
+            }
+        }
     }
 
     fn animate_entity(&mut self, eid: u32, dt_ms: f32) {
-        // Locomotion from intended horizontal velocity (set by controller/AI
-        // before physics; physics doesn't overwrite it). A one-shot like attack
-        // is Block/Queue, so this request is ignored until it ends.
-        let moving = self
-            .world
-            .velocity(eid)
-            .map(|v| v[0] * v[0] + v[2] * v[2] > ANIM_WALK_EPS_SQ)
-            .unwrap_or(false);
-        self.request_entity_action(eid, if moving { ANIM_KIND_WALK } else { ANIM_KIND_IDLE }, None, None);
+        // A dying entity holds its death animation (already requested) — don't
+        // derive locomotion for it (ADR 0020). Otherwise pick idle/walk from
+        // intended horizontal velocity (set by controller/AI before physics). A
+        // one-shot like attack is Block/Queue, so this request is ignored until
+        // it ends.
+        if !self.dying.contains(&eid) {
+            let moving = self
+                .world
+                .velocity(eid)
+                .map(|v| v[0] * v[0] + v[2] * v[2] > ANIM_WALK_EPS_SQ)
+                .unwrap_or(false);
+            self.request_entity_action(eid, if moving { ANIM_KIND_WALK } else { ANIM_KIND_IDLE }, None, None);
+        }
 
         let (frame, family, event) = {
             let Some(set) = self.animation_set.as_ref() else {
@@ -2030,6 +2057,7 @@ impl Engine {
         self.monster_states.remove(&id);
         self.monster_capabilities.remove(&id);
         self.animation_states.remove(&id);
+        self.dying.remove(&id);
         self.bullet_ages.remove(&id);
         self.non_walkable_terrain.remove(&id);
         self.pending_jumps.remove(&id);
@@ -2742,6 +2770,10 @@ impl Engine {
             let mut path_requested_this_tick = false;
 
             for &mid in monster_ids.iter() {
+                // A dying monster stops chasing/steering (ADR 0020).
+                if this.dying.contains(&mid) {
+                    continue;
+                }
                 let [mx, my, mz] = match this.world.position(mid) {
                     Some(p) => p,
                     None => continue,
@@ -3141,6 +3173,10 @@ impl Engine {
             let r_sq = ai.separation_radius * ai.separation_radius;
 
             for (i, &mid) in monster_ids.iter().enumerate() {
+                // Dying monsters don't push or get pushed (ADR 0020).
+                if this.dying.contains(&mid) {
+                    continue;
+                }
                 let vel = match this.world.velocity(mid) {
                     Some(v) => v,
                     None => continue,
@@ -3232,6 +3268,8 @@ impl Engine {
                         this.world
                             .net_flags(id)
                             .is_some_and(|f| f & NET_MONSTER != 0)
+                            // Dying monsters stop being bullet targets (ADR 0020).
+                            && !this.dying.contains(&id)
                     })
                     .filter_map(|id| Some((id, this.world.position(id)?))),
             );
@@ -3398,6 +3436,10 @@ impl Engine {
             self.destroy_entity(id);
         }
         for mid in damaged_monsters {
+            // A monster already playing its death animation ignores further hits.
+            if self.dying.contains(&mid) {
+                continue;
+            }
             // Already destroyed this tick (two bullets, one monster) → skip.
             let Some(hp) = self.world.health(mid) else {
                 continue;
@@ -3406,14 +3448,42 @@ impl Engine {
             self.world.set_health(mid, hp);
             self.world.mark_dirty(mid, DirtyFlags::HEALTH);
             if hp <= 0 {
-                self.destroy_entity(mid);
-                if self.monster_cfg.respawn {
-                    self.respawn_monster();
-                }
+                self.begin_death(mid);
+            } else {
+                // Non-lethal: a quick flinch (a no-op if there's no hurt family).
+                self.request_entity_action(mid, ANIM_KIND_HURT, None, None);
             }
         }
 
         hits
+    }
+
+    /// Lethal damage: play a death animation and despawn when it finishes
+    /// (ADR 0020). A dying entity is pulled out of AI, separation, and bullet
+    /// targeting immediately (below), so it stops acting the instant it dies. If
+    /// there's no real (non-looping) death animation to play, destroy at once.
+    fn begin_death(&mut self, id: u32) {
+        let has_death_anim = self.animation_set.as_ref().is_some_and(|set| {
+            let fam = set.family_for_action(ANIM_KIND_DEATH, None);
+            set.families.get(fam).is_some_and(|f| !f.looping)
+        });
+        if has_death_anim {
+            self.dying.insert(id);
+            self.world.set_velocity(id, [0.0, 0.0, 0.0]);
+            self.request_entity_action(id, ANIM_KIND_DEATH, None, None);
+        } else {
+            self.finish_death(id);
+        }
+    }
+
+    /// Despawn a dead entity; monsters respawn per MonsterConfig.
+    fn finish_death(&mut self, id: u32) {
+        let was_monster = self.world.net_flags(id).is_some_and(|f| f & NET_MONSTER != 0);
+        self.dying.remove(&id);
+        self.destroy_entity(id);
+        if was_monster && self.monster_cfg.respawn {
+            self.respawn_monster();
+        }
     }
 }
 
@@ -3927,31 +3997,42 @@ mod tests {
 
     // A 3-frame attack (fixed 100 ms each) whose FIRE event sits on frame 1, plus
     // a trivial idle. Drives the "bullet spawns on the strike frame" contract.
-    fn fire_on_frame1_anim_set() -> animation::AnimationSet {
-        let mut set = animation::AnimationSet::new();
-        let idle = set.push_family(animation::Family {
-            frames: vec![animation::FrameSpec::fixed(100.0)],
-            looping: true,
+    fn test_family(frames: Vec<animation::FrameSpec>, looping: bool, interrupt: animation::Interrupt) -> animation::Family {
+        animation::Family {
+            frames,
+            looping,
             next: None,
             hold_last: false,
-            interrupt: animation::Interrupt::Always,
+            interrupt,
             branch_frame: None,
             move_mask: animation::MoveMask::ALL,
-        });
+            retriggerable: false,
+        }
+    }
+
+    fn fire_on_frame1_anim_set() -> animation::AnimationSet {
+        let mut set = animation::AnimationSet::new();
+        let idle = set.push_family(test_family(vec![animation::FrameSpec::fixed(100.0)], true, animation::Interrupt::Always));
         let mut strike = animation::FrameSpec::fixed(100.0);
         strike.event = Some(ANIM_EVENT_FIRE);
-        let attack = set.push_family(animation::Family {
-            frames: vec![animation::FrameSpec::fixed(100.0), strike, animation::FrameSpec::fixed(100.0)],
-            looping: false,
-            next: None,
-            hold_last: false,
-            interrupt: animation::Interrupt::Block,
-            branch_frame: None,
-            // Rooted while attacking — exercises the move-mask gate (ADR 0018).
-            move_mask: animation::MoveMask::ROOTED,
-        });
+        let mut attack_fam = test_family(
+            vec![animation::FrameSpec::fixed(100.0), strike, animation::FrameSpec::fixed(100.0)],
+            false,
+            animation::Interrupt::Block,
+        );
+        attack_fam.move_mask = animation::MoveMask::ROOTED; // exercises the move-mask gate (ADR 0018)
+        let attack = set.push_family(attack_fam);
+        // A one-shot death family (hold_last) → the dying flow can complete (ADR 0020).
+        let mut death_fam = test_family(
+            vec![animation::FrameSpec::fixed(100.0), animation::FrameSpec::fixed(100.0)],
+            false,
+            animation::Interrupt::Block,
+        );
+        death_fam.hold_last = true;
+        let death = set.push_family(death_fam);
         set.map_action(ANIM_KIND_IDLE, None, idle);
         set.map_action(ANIM_KIND_ATTACK, None, attack);
+        set.map_action(ANIM_KIND_DEATH, None, death);
         set
     }
 
@@ -4005,6 +4086,38 @@ mod tests {
     }
 
     #[test]
+    fn lethal_hit_plays_death_then_despawns_and_stops_being_a_target() {
+        let mut engine = engine_with_flat_floor();
+        engine.animation_set = Some(fire_on_frame1_anim_set()); // death = 2×100ms hold_last
+        engine.monster_cfg.respawn = false;
+        // A 1-HP monster so a single hit is lethal, plus a player to own bullets.
+        let player = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        engine.register_player(player);
+        let monster = engine.spawn_box_entity(0.0, 0.9, 2.0, 0.4, 0.9, 0.4, 1, NET_LOCAL | NET_MONSTER);
+
+        // Kill it via the damage path (skip ballistics; drive the settlement directly).
+        engine.world.set_health(monster, -1);
+        engine.begin_death(monster);
+        assert!(engine.dying.contains(&monster), "lethal hit starts the dying state");
+        assert!(engine.world.position(monster).is_some(), "not destroyed yet — death plays first");
+
+        // While dying it's excluded from the bullet-target snapshot.
+        let targets: Vec<u32> = engine
+            .world
+            .entities()
+            .filter(|&id| engine.world.net_flags(id).is_some_and(|f| f & NET_MONSTER != 0) && !engine.dying.contains(&id))
+            .collect();
+        assert!(!targets.contains(&monster), "dying monster is not a bullet target");
+
+        // Death anim is 2×100ms; advance past it → despawned.
+        for _ in 0..60 {
+            engine.tick_core(0.004);
+        }
+        assert!(engine.world.position(monster).is_none(), "despawns when the death animation finishes");
+        assert!(!engine.dying.contains(&monster));
+    }
+
+    #[test]
     fn malformed_animation_set_is_rejected_not_installed() {
         // An action pointing at a non-existent family must not install (and must
         // not panic) — animation just stays inert. Built via the DTO so it
@@ -4025,6 +4138,7 @@ mod tests {
                 interrupt: "always".to_string(),
                 branch_frame: None,
                 movement: None,
+                retriggerable: false,
             }],
             actions: vec![JsAnimAction { kind: 0, variant: None, family: 9 }],
         };

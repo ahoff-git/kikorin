@@ -66,6 +66,10 @@ instances and feeds this crate; TypeScript only renders the resolved cell.
   `turn`/`jump`/`crouch`, default all-true) — the movement permitted while the
   family plays. The crate only stores it; the engine's player controller reads
   the current family's mask and gates input.
+- **Retrigger** (ADR 0018): `Family.retriggerable` (default false). Re-requesting
+  the *playing* family restarts it from frame 0 only if set — a combo/re-swing;
+  otherwise a re-request is ignored so a family requested every tick (locomotion)
+  isn't reset constantly.
 - **Validation** (ADR 0019): `AnimationSet::validate()` — ≥1 family, every family
   ≥1 frame, every action maps to an existing family. The engine rejects an
   invalid set at load and stays inert rather than panicking. `family_for_action`
@@ -94,9 +98,9 @@ Known sharp edges (behavior, not bugs) — consumers should author around these:
 - **`hold_last` families should be `Block`.** A queued action overrides
   `hold_last` at end (pending wins over "freeze forever"); a death animation that
   must never transition should also block interruption.
-- **Re-requesting a playing one-shot is ignored** (`request` no-restart). There
-  is no combo/retrigger in the drive path; `restart` exists but the engine
-  doesn't call it. Rapid attacks under `Block` collapse to one.
+- **Re-requesting a playing family only restarts it if `retriggerable`** (ADR
+  0018); otherwise it's ignored. So rapid attacks under `Block` collapse to one
+  unless the attack family opts into retrigger (a deliberate combo choice).
 - **Malformed sets degrade, not crash** (ADR 0019): an empty set, a 0-frame
   family, or an out-of-range action id makes the engine keep animation inert with
   a warning — never a panic.

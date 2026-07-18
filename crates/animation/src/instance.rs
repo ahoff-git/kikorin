@@ -84,6 +84,11 @@ impl AnimationInstance {
     /// playing is a no-op (it won't restart) unless that family has finished.
     pub fn request(&mut self, set: &AnimationSet, family: usize, target_ms: Option<f32>) {
         if family == self.family && !self.finished {
+            // Re-requesting the playing family: restart only if it opts in
+            // (combo/re-swing), else ignore so it isn't reset every tick.
+            if set.families.get(family).is_some_and(|f| f.retriggerable) {
+                self.start(set, family, target_ms);
+            }
             return;
         }
         if self.can_interrupt_now(set) {
@@ -187,6 +192,7 @@ mod tests {
             interrupt,
             branch_frame: None,
             move_mask: crate::MoveMask::ALL,
+            retriggerable: false,
         }
     }
 
@@ -312,5 +318,17 @@ mod tests {
         i.advance(&s, 150.0);
         i.request(&s, 1, None); // same family, still playing → no reset
         assert_eq!(i.current_frame(), 1);
+    }
+
+    #[test]
+    fn retriggerable_family_restarts_on_re_request() {
+        let mut s = set();
+        // Make attack (family 2, one-shot) retriggerable.
+        s.families[2].retriggerable = true;
+        let mut i = AnimationInstance::new(&s, 2, None);
+        i.advance(&s, 150.0);
+        assert_eq!(i.current_frame(), 1);
+        i.request(&s, 2, None); // re-request the playing family → restart
+        assert_eq!(i.current_frame(), 0, "retriggerable family resets to frame 0");
     }
 }

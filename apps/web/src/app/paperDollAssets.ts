@@ -26,23 +26,46 @@ interface FamilySpec {
   name: string;
   loop: boolean;
   interrupt?: "always" | "block" | "queue";
+  /** Freeze the final frame instead of ending (death). */
+  holdLast?: boolean;
+  /** Re-requesting while playing restarts it (combo/rapid re-fire). */
+  retriggerable?: boolean;
   /** Movement allowed while this plays; omit a field = allowed (ADR 0018). */
   movement?: AnimFamilyInput["movement"];
   /** Per-frame optimal ms + optional frame-event id (ADR 0017). */
   frames: { ms: number; event?: number }[];
 }
 
+// Family order = engine anim_id = engine action kind (idle=0, walk=1, attack=2,
+// hurt=3, death=4). Adding a family here must keep that alignment with the
+// engine's ANIM_KIND_* constants.
 const FAMILIES_SPEC: FamilySpec[] = [
   { name: "idle", loop: true, frames: [{ ms: 450 }, { ms: 450 }] },
   { name: "walk", loop: true, frames: [{ ms: 110 }, { ms: 110 }, { ms: 110 }, { ms: 110 }] },
   {
-    // One-shot, blocking; roots the player but lets them turn to aim. The strike
-    // frame (3) carries FIRE (event 1) so the engine spawns the bullet then.
+    // Fast run-and-gun shot: you can move and turn while firing, just not jump
+    // mid-shot (a small taste of the move-mask — ADR 0018). Retriggerable so
+    // rapid clicks re-fire. The strike frame (2) carries FIRE (event 1) so the
+    // bullet spawns exactly on the gun-fire frame (ADR 0017).
     name: "attack",
     loop: false,
     interrupt: "block",
-    movement: { forward: false, strafe: false, jump: false },
-    frames: [{ ms: 60 }, { ms: 50 }, { ms: 60 }, { ms: 120, event: 1 }, { ms: 140 }],
+    retriggerable: true,
+    movement: { jump: false },
+    frames: [{ ms: 40 }, { ms: 45 }, { ms: 55, event: 1 }, { ms: 55 }],
+  },
+  // Quick flinch on non-lethal damage (ADR 0020) — short and blocking so it
+  // reads before locomotion resumes.
+  { name: "hurt", loop: false, interrupt: "block", frames: [{ ms: 80 }, { ms: 80 }] },
+  // Death: one-shot that holds its final (collapsed) frame; the engine despawns
+  // the entity when it finishes (ADR 0020).
+  {
+    name: "death",
+    loop: false,
+    interrupt: "block",
+    holdLast: true,
+    movement: { forward: false, strafe: false, turn: false, jump: false },
+    frames: [{ ms: 120 }, { ms: 260 }],
   },
 ];
 
@@ -87,15 +110,34 @@ function progress(frame: number, frames: number): number {
 function drawBody(color: string, shade: string): CellDrawer {
   return (ctx, family, dir, frame, frames) => {
     const [fx, fy] = FACING[dir];
+
+    if (family === "death") {
+      // Collapse: sink + squash over the frames, holding the prone last frame.
+      const t = progress(frame, frames);
+      const cx = CELL_W / 2;
+      const yTop = 20 + t * 18;
+      const h = 16 * (1 - t) + 4;
+      ctx.fillStyle = shade;
+      ctx.fillRect(cx - 8, yTop + h, 16, 4); // prone slab
+      ctx.fillStyle = color;
+      ctx.fillRect(cx - 6, yTop, 12, h); // squashed torso
+      ctx.beginPath();
+      ctx.arc(cx + t * 8, yTop - 2 + t * 6, 6 - t * 2, 0, Math.PI * 2); // head slumps aside
+      ctx.fill();
+      return;
+    }
+
     let swing = 0;
     let bob = 0;
     let lunge = 0;
+    let recoil = 0;
     if (family === "walk") swing = walkSwing(frame, frames);
     else if (family === "idle") bob = frame % 2 === 0 ? 0 : 1;
     else if (family === "attack") lunge = Math.sin(progress(frame, frames) * Math.PI) * 5;
+    else if (family === "hurt") recoil = 3 * (1 - progress(frame, frames)); // quick knock-back that settles
 
-    const cx = CELL_W / 2 + fx * lunge;
-    const topShift = bob + fy * lunge * 0.5;
+    const cx = CELL_W / 2 + fx * (lunge - recoil);
+    const topShift = bob + fy * (lunge - recoil) * 0.5;
 
     // Legs (opposed swing while walking).
     ctx.fillStyle = shade;
@@ -118,7 +160,8 @@ function drawBody(color: string, shade: string): CellDrawer {
 }
 
 function drawHat(color: string): CellDrawer {
-  return (ctx, _family, dir) => {
+  return (ctx, family, dir) => {
+    if (family === "death") return; // the collapsed body stands in for death
     const cx = CELL_W / 2;
     const [fx, fy] = FACING[dir];
     ctx.fillStyle = color;
@@ -131,6 +174,7 @@ function drawHat(color: string): CellDrawer {
 
 function drawSword(color: string): CellDrawer {
   return (ctx, family, _dir, frame, frames) => {
+    if (family === "death") return; // dropped on death (collapsed body only)
     ctx.save();
     ctx.translate(CELL_W / 2, CELL_H / 2);
     // Attack sweeps the blade through an arc (wind-up → strike → recover); other
@@ -232,6 +276,8 @@ export const KIKORIN_ANIM_DEFS: AnimationDefsInput = {
     })),
     looping: f.loop,
     ...(f.interrupt ? { interrupt: f.interrupt } : {}),
+    ...(f.holdLast ? { hold_last: true } : {}),
+    ...(f.retriggerable ? { retriggerable: true } : {}),
     ...(f.movement ? { movement: f.movement } : {}),
   })),
   // Action kinds map 1:1 to family indices here (idle/walk/attack).

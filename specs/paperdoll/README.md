@@ -322,29 +322,37 @@ pattern — see ADR 0019 for why (the index-alignment footgun).
 - **Add an attack variant** (`attack.thrust` vs `attack.slash`): a second family
   + an `actionMap` entry keyed by `kind.variant`; the engine picks it via
   `action_variant` (once combat drives variants).
+- **Death** (ADR 0020): add a `hold_last` death family mapped to `ANIM_KIND_DEATH`.
+  Lethal damage plays it and despawns the entity when it finishes — it also stops
+  eating bullets / steering the instant it dies. No death family = instant destroy.
+- **Hurt / flinch**: add a short blocking family mapped to `ANIM_KIND_HURT`;
+  non-lethal damage requests it.
+- **Combo / rapid re-swing**: set `retriggerable: true` on the family so clicking
+  again restarts it (ADR 0018).
 
 ### Limitations, gotchas & open questions
 Read before shipping on this — the things a user *will* trip on:
 
-- **Family alignment is by index, unchecked across the boundary** (ADR 0019).
-  Rust `anim_id` ↔ TS family name ↔ frame counts must agree by order; the package
-  can't verify it. Single-source them (as the sample does). A frame-count
-  mismatch clamps to the last frame (no garbage), but a *name/order* mismatch
-  shows the wrong animation silently.
-- **Death isn't a death animation.** Entities are destroyed on death, so a
-  `hold_last` death family never plays — showing death needs a "dying" state that
-  delays destroy (not built).
-- **Monsters only animate locomotion.** Attack/hurt/death for monsters need
-  engine combat hooks (Phase 3); the def can carry them but nothing requests them.
+- **Family alignment is by index, unchecked across the boundary** (ADR 0019 —
+  which now explains it in full). Rust `anim_id` ↔ TS family name ↔ frame counts
+  must agree by order; the package can't verify it. Single-source them (as the
+  sample does). A frame-count mismatch clamps to the last frame (no garbage), but
+  a *name/order* mismatch shows the wrong animation silently.
+- **Death is animated for combat-killed entities** (ADR 0020) — monsters play a
+  death animation then despawn. The *player* would use the same path, but nothing
+  damages the player in the sample games yet.
+- **Monsters play locomotion + death + hurt, but not attack** — nothing makes a
+  monster attack (they only chase); the def can carry a monster attack but no
+  engine hook requests it. Monster hurt rarely shows because monsters usually die
+  in one hit (tuning, not a bug).
 - **2D player has no attack animation** — its `fire()` calls `spawn_bullet`
   directly, bypassing the `player_fire` → attack path.
 - **Monsters all look the same** (red loadout); per-template visual variety isn't
   mapped to loadouts yet.
 - **Remote peers render as boxes** — networked loadout sync is deferred.
-- **Bake cache is a bounded LRU (64 looks).** More than 64 distinct
-  `(loadout, family)` combinations live at once would evict a texture a sprite is
-  still using (its clones share the Source) → that sprite renders wrong. Fine at
-  current counts; needs ref-counting for large equipment matrices.
+- **Bake cache never evicts; it doubles when full** (ADR 0020) — chosen over
+  evicting a texture a live sprite still shares. Can grow unbounded in a
+  pathological equipment matrix; accepted, ref-counting is a future option.
 - **`sidescroll` uses a fixed side-profile row (East)** and derives its flip from
   horizontal movement; the row isn't configurable yet.
 - **Animation frames faster than the ~16 ms flush are dropped for display** (the

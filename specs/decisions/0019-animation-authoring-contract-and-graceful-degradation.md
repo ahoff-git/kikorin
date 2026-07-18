@@ -32,11 +32,30 @@ Result: a typo in an animation def produces a console warning and un-animated
 (but fully playable) entities — not a crash.
 
 ### Family alignment is by index convention, single-sourced by the consumer
-The family set's **order is the contract**: family index = the engine's
-`anim_id` = the TS manifest's family list = `FAMILY_ORDER` (the id→name bridge) =
-the per-family frame counts on both sides. These must agree, and the paperdoll
-package **cannot verify it** — the Rust defs and the TS art live on opposite
-sides of the WASM boundary. Getting it wrong is the classic paper-doll footgun.
+
+**What "family alignment" means.** A character's animations (idle, walk, attack,
+hurt, death, …) are its *families*. That set is described in **two places on
+opposite sides of the WASM boundary**:
+- **Rust** (`load_animations`) holds the *behavior*: timing, transitions,
+  interrupt policy, frame events, move mask — as an **ordered list**. The engine
+  refers to a family only by its **index** in that list and ships that index to
+  TS each tick as `anim_id` on the SemanticPatch.
+- **TypeScript** (`@kikorin/paperdoll` manifest) holds the *art*: the sheets per
+  family, keyed by **name** ("idle", "attack", …), plus a frame count per family.
+
+Nothing carries a family *name* across the boundary — only the numeric index. So
+the sprite maps `anim_id` → name via a shared ordered array (`FAMILY_ORDER`).
+**"Alignment" is the requirement that index N means the same family on both
+sides** (same name, same frame count). Concretely, if Rust's list is
+`[idle, walk, attack]` and it emits `anim_id = 2` (attack), the sprite must have
+`FAMILY_ORDER[2] === "attack"` and an "attack" sheet with the same frame count.
+
+**Why it's a footgun.** These are three-or-four separate declarations (Rust list
+order, `FAMILY_ORDER`, the manifest's families, frame counts). If someone adds a
+family to the Rust list but not to `FAMILY_ORDER`, or reorders one, index 2 now
+means different things on each side — the sprite silently plays the *wrong*
+animation. The paperdoll package **cannot catch this**: it never sees the Rust
+list, only the `anim_id` numbers coming across.
 
 Mitigations we commit to:
 - The sample game derives **all** of it — `FAMILY_ORDER`, the manifest families,

@@ -34,6 +34,7 @@ Lightweight architecture decision record (ADR) log for kikorin.
 - [0017: Frame-synced animation events (callbacks)](./0017-frame-synced-animation-events.md)
 - [0018: Per-animation movement gating (move mask)](./0018-per-animation-movement-gating.md)
 - [0019: Animation authoring contract & graceful degradation](./0019-animation-authoring-contract-and-graceful-degradation.md)
+- [0020: Death animation flow (the dying state), hurt, and a non-evicting bake cache](./0020-death-animation-flow-and-cache-growth.md)
 
 ## Open Questions
 

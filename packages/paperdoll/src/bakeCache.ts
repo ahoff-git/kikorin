@@ -11,10 +11,15 @@
 import { CanvasTexture, NearestFilter, SRGBColorSpace, type Texture } from "three";
 import { DIRECTION_COUNT, type Direction } from "./direction";
 import { getSpriteSet } from "./manifest";
+import { log, logLevels } from "@kikorin/util";
 import { getSheetImage } from "./images";
 import { sheetRowForDirection, type DrawPass } from "./resolvers";
 
-const MAX_ENTRIES = 64;
+// Soft cap that *doubles* when hit rather than evicting (ADR 0020). Per-sprite
+// clones share a cached texture's Source, so evicting one out from under a live
+// sprite would break it; growing avoids that entirely. At realistic look counts
+// this never trips.
+let cacheCap = 64;
 
 interface CacheEntry {
   texture: CanvasTexture;
@@ -57,7 +62,10 @@ export function getSheet(
 
   const entry = bake(setId, frames, rowPasses);
   cache.set(key, entry);
-  if (cache.size > MAX_ENTRIES) evictOldest();
+  if (cache.size > cacheCap) {
+    cacheCap *= 2;
+    log(logLevels.debug, `paperdoll: bake cache grew to ${cacheCap} looks`, ["paperdoll"]);
+  }
   return { texture: entry.texture, frames: entry.frames, rows: DIRECTION_COUNT };
 }
 
@@ -97,17 +105,6 @@ function bake(setId: string, frames: number, rowPasses: (dir: Direction) => Draw
   texture.generateMipmaps = false;
   texture.needsUpdate = true;
   return { texture, frames: count };
-}
-
-function evictOldest(): void {
-  const oldest = cache.keys().next().value;
-  if (oldest === undefined) return;
-  // Per-sprite clones share this texture's Source, so this frees the shared GPU
-  // upload. Safe only because a distinct look count above MAX_ENTRIES with all
-  // looks simultaneously on screen doesn't occur at these entity counts; the LRU
-  // is a leak backstop, not a hot path.
-  cache.get(oldest)?.texture.dispose();
-  cache.delete(oldest);
 }
 
 function makeCanvas(w: number, h: number): HTMLCanvasElement | OffscreenCanvas {
