@@ -62,6 +62,17 @@ loaded (the bullet spawns on the FIRE frame); with no set it fires immediately
 geometry from the set is carried but not yet consumed — authoritative melee
 combat is Phase 3.
 
+**Movement gating (ADR 0018).** Each family carries a `MoveMask`; the player
+controller reads the current family's mask (`player_move_mask`, fully permissive
+by default) and zeroes disallowed input, so an animation can root the player,
+allow turn-only aiming, forbid jumping, etc. Locomotion never restricts; only
+committed actions (the sample attack) do.
+
+**Graceful degradation (ADR 0019).** `load_animations` runs `AnimationSet::
+validate` (via `build_animation_set`) and, on a malformed def, logs a warning and
+leaves animation inert rather than panicking; a successful load clears existing
+instances (their family indices refer to the old set).
+
 ### NET Flags — the entity networking profile
 The `net_flags` bitmask (constants live in `crates/ecs`, mirrored in `@kikorin/adapter`) is the source of truth for how the engine simulates **and replicates** each entity. The dimensions compose — an entity's networking behavior is the combination, not one enum:
 

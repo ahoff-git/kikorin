@@ -72,6 +72,50 @@ impl FrameSpec {
     }
 }
 
+/// What player movement a family permits while it plays (ADR 0018). The engine's
+/// player controller zeroes any disallowed input, so an animation can root the
+/// character, allow turning-to-aim only, forbid jumping, etc. Default is fully
+/// permissive (locomotion families never restrict); only committed actions
+/// (attacks, etc.) tighten it. `crouch` is reserved — the sample controller has
+/// no crouch input yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MoveMask {
+    /// Forward/back planar movement.
+    pub forward: bool,
+    /// Left/right strafe.
+    pub strafe: bool,
+    /// Facing change (turn axis or camera yaw override).
+    pub turn: bool,
+    pub jump: bool,
+    /// Reserved — no controller input consumes it yet.
+    pub crouch: bool,
+}
+
+impl Default for MoveMask {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+impl MoveMask {
+    /// Everything permitted (the default; what locomotion uses).
+    pub const ALL: MoveMask = MoveMask {
+        forward: true,
+        strafe: true,
+        turn: true,
+        jump: true,
+        crouch: true,
+    };
+    /// Nothing permitted — the character is planted for the whole animation.
+    pub const ROOTED: MoveMask = MoveMask {
+        forward: false,
+        strafe: false,
+        turn: false,
+        jump: false,
+        crouch: false,
+    };
+}
+
 /// How a playing family reacts to a new action request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Interrupt {
@@ -96,6 +140,8 @@ pub struct Family {
     pub hold_last: bool,
     pub interrupt: Interrupt,
     pub branch_frame: Option<usize>,
+    /// Player movement permitted while this family plays (ADR 0018).
+    pub move_mask: MoveMask,
 }
 
 const WILDCARD: u16 = u16::MAX;
@@ -126,17 +172,45 @@ impl AnimationSet {
     }
 
     /// Resolve an action to a family index: exact `(kind, variant)` first, then
-    /// the kind's wildcard, then family 0 (idle).
+    /// the kind's wildcard, then family 0 (idle). Clamped to a valid index so a
+    /// bad action map can't index out of range (see `validate`).
     pub fn family_for_action(&self, kind: u16, variant: Option<u16>) -> usize {
-        if let Some(v) = variant {
-            if let Some(&f) = self.action_map.get(&(kind, v)) {
-                return f;
+        let raw = if let Some(v) = variant {
+            self.action_map
+                .get(&(kind, v))
+                .or_else(|| self.action_map.get(&(kind, WILDCARD)))
+        } else {
+            self.action_map.get(&(kind, WILDCARD))
+        };
+        let idx = raw.copied().unwrap_or(0);
+        if idx < self.families.len() {
+            idx
+        } else {
+            0
+        }
+    }
+
+    /// Well-formed enough to drive without panicking: ≥1 family, every family
+    /// has ≥1 frame, every action maps to an existing family. The engine rejects
+    /// an invalid set at load and degrades gracefully (animation stays inert)
+    /// rather than panicking mid-tick (ADR 0019). Returns the first problem.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.families.is_empty() {
+            return Err("animation set has no families".to_string());
+        }
+        for (i, fam) in self.families.iter().enumerate() {
+            if fam.frames.is_empty() {
+                return Err(format!("family {i} has no frames"));
             }
         }
-        if let Some(&f) = self.action_map.get(&(kind, WILDCARD)) {
-            return f;
+        for (&(kind, variant), &fam) in &self.action_map {
+            if fam >= self.families.len() {
+                return Err(format!(
+                    "action (kind={kind}, variant={variant}) maps to non-existent family {fam}"
+                ));
+            }
         }
-        0
+        Ok(())
     }
 }
 
@@ -155,6 +229,7 @@ mod tests {
                 hold_last: false,
                 interrupt: Interrupt::Always,
                 branch_frame: None,
+                move_mask: MoveMask::ALL,
             });
         }
         s.map_action(0, None, 0); // idle
@@ -166,5 +241,47 @@ mod tests {
         assert_eq!(s.family_for_action(2, Some(0)), 2); // exact variant
         assert_eq!(s.family_for_action(2, Some(9)), 3); // unknown variant → kind wildcard
         assert_eq!(s.family_for_action(7, None), 0); // unmapped → idle
+    }
+
+    fn one_frame_family() -> Family {
+        Family {
+            frames: vec![FrameSpec::fixed(100.0)],
+            looping: true,
+            next: None,
+            hold_last: false,
+            interrupt: Interrupt::Always,
+            branch_frame: None,
+            move_mask: MoveMask::ALL,
+        }
+    }
+
+    #[test]
+    fn validate_catches_malformed_sets() {
+        let mut empty = AnimationSet::new();
+        assert!(empty.validate().is_err()); // no families
+
+        let mut no_frames = AnimationSet::new();
+        no_frames.push_family(Family { frames: vec![], ..one_frame_family() });
+        assert!(no_frames.validate().is_err()); // family with no frames
+
+        let mut bad_action = AnimationSet::new();
+        bad_action.push_family(one_frame_family());
+        bad_action.map_action(0, None, 5); // family 5 doesn't exist
+        assert!(bad_action.validate().is_err());
+
+        let mut ok = AnimationSet::new();
+        ok.push_family(one_frame_family());
+        ok.map_action(0, None, 0);
+        assert!(ok.validate().is_ok());
+    }
+
+    #[test]
+    fn family_for_action_clamps_out_of_range_mapping() {
+        // Defense: even if a bad map slips past validate, resolution never
+        // returns an out-of-range index (which would panic on indexing).
+        let mut s = AnimationSet::new();
+        s.push_family(one_frame_family());
+        s.map_action(1, None, 9); // out of range
+        assert_eq!(s.family_for_action(1, None), 0);
     }
 }

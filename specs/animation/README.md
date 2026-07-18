@@ -62,6 +62,15 @@ instances and feeds this crate; TypeScript only renders the resolved cell.
   frame. Frame-synced, not time-synced: the effect rides frame entry regardless
   of how time-fitting stretched the schedule. The crate doesn't interpret ids;
   the engine maps them to gameplay actions.
+- **Move mask** (ADR 0018): `Family.move_mask: MoveMask` (`forward`/`strafe`/
+  `turn`/`jump`/`crouch`, default all-true) — the movement permitted while the
+  family plays. The crate only stores it; the engine's player controller reads
+  the current family's mask and gates input.
+- **Validation** (ADR 0019): `AnimationSet::validate()` — ≥1 family, every family
+  ≥1 frame, every action maps to an existing family. The engine rejects an
+  invalid set at load and stays inert rather than panicking. `family_for_action`
+  clamps out-of-range mappings, and `start` clamps stale indices — belt-and-
+  suspenders so bad data degrades instead of indexing out of bounds.
 
 ## Invariants
 - Family 0 is idle by convention and the terminal fallback of
@@ -69,6 +78,28 @@ instances and feeds this crate; TypeScript only renders the resolved cell.
 - `schedule_frames` never yields an empty timeline (falls back to frame 0 held
   at 0 ms).
 - A dropped (skipped) frame produces no slot; kept frames are contiguous.
+
+## Limitations & edge cases
+Known sharp edges (behavior, not bugs) — consumers should author around these:
+- **A frame shrunk to 0 ms never shows and never fires its event.** Time-fitting
+  can compress a `min_ms: 0` frame to a zero-length slot, which `current_frame`
+  skips. Put frame events on non-shrinkable frames.
+- **Sub-tick frames drop events.** `advance` reports only the *last* frame entered
+  in one call, so a frame both entered and left within a single tick's `dt`
+  (a frame shorter than the sim step, or a large `dt`) fires nothing. Keep event
+  frames ≥ the sim step (4 ms) after fitting.
+- **`Queue` is for one-shots.** A queued action behind a *looping* Queue family
+  with no `branch_frame` never starts (the family never ends). Give looping
+  families `Always`, or set a `branch_frame`.
+- **`hold_last` families should be `Block`.** A queued action overrides
+  `hold_last` at end (pending wins over "freeze forever"); a death animation that
+  must never transition should also block interruption.
+- **Re-requesting a playing one-shot is ignored** (`request` no-restart). There
+  is no combo/retrigger in the drive path; `restart` exists but the engine
+  doesn't call it. Rapid attacks under `Block` collapse to one.
+- **Malformed sets degrade, not crash** (ADR 0019): an empty set, a 0-frame
+  family, or an out-of-range action id makes the engine keep animation inert with
+  a warning — never a panic.
 
 ## Dependencies
 None (no internal crates, no external crates). Assembled by `engine`, which owns
@@ -82,6 +113,9 @@ the camera-relative variant; `schedule_frames` optimal / shrink / drop-skippable
 / stretch / stretch-capped; playback loop-wrap, one-shot hold+finish;
 interruptibility Always/Block/Queue and the per-frame cancel window; same-family
 no-restart; action resolution variant → wildcard → idle; frame events fire once
-on entry and again each loop, and on a one-shot strike frame regardless of dt.
-The engine adds the end-to-end pin: no bullet on the click, exactly one when the
-attack's FIRE frame is entered.
+on entry and again each loop, and on a one-shot strike frame regardless of dt;
+`validate` catches empty sets / frameless families / out-of-range actions, and
+`family_for_action` clamps a bad mapping. The engine adds the end-to-end pins: no
+bullet on the click and exactly one when the attack's FIRE frame is entered; a
+ROOTED move mask zeroes movement input during the attack; a malformed set is
+rejected, not installed.

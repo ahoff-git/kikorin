@@ -32,6 +32,8 @@ Lightweight architecture decision record (ADR) log for kikorin.
 - [0015: Animation is Rust-simulated; TypeScript is a thin renderer](./0015-animation-simulation-in-rust.md)
 - [0016: Queue branch frames and collider-cube hit/hurtboxes](./0016-animation-branch-frames-and-collider-boxes.md)
 - [0017: Frame-synced animation events (callbacks)](./0017-frame-synced-animation-events.md)
+- [0018: Per-animation movement gating (move mask)](./0018-per-animation-movement-gating.md)
+- [0019: Animation authoring contract & graceful degradation](./0019-animation-authoring-contract-and-graceful-degradation.md)
 
 ## Open Questions
 

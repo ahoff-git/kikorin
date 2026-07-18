@@ -297,6 +297,64 @@ networked remote-peer loadouts. Graphics are procedural placeholders
 (`paperDollAssets.ts`) that double as the authoring example — a real PNG sheet
 set + JSON manifest is a follow-up.
 
+### Cookbook — authoring without hating life
+The whole family set (art + behavior) is single-sourced from one `FAMILIES_SPEC`
+array in `apps/web/src/app/paperDollAssets.ts`; everything below flows from
+editing that (and, for new art, the item drawers). This is the recommended
+pattern — see ADR 0019 for why (the index-alignment footgun).
+
+- **Add an animation** (e.g. `hurt`): add one `FAMILIES_SPEC` entry (name, loop,
+  frames, optional `interrupt`/`movement`), add a `case "hurt"` to the item
+  drawers, and map an engine action kind to it. `FAMILY_ORDER`, the manifest
+  families, frame counts, and the `load_animations` payload all derive from it.
+- **Swap armor/weapons**: change the entity's loadout — `createPaperDollSprite({
+  loadout })` or `sprite.setLoadout(...)`. A new loadout mints a new bake key;
+  the old strips age out of the LRU. Equipment is just layer-slot → item id.
+- **Fire on a specific frame** (ADR 0017): put `event: <id>` on that frame in
+  `FAMILIES_SPEC`; the engine maps the id to an action (today id 1 = spawn the
+  player's bullet in `on_anim_event`). The effect stays locked to the frame no
+  matter how the animation is timed.
+- **Constrain movement during an animation** (ADR 0018): add `movement: {
+  forward: false, jump: false }` (etc.) to the family — omit a field to allow it.
+  The engine's player controller gates input while that family plays.
+- **Stretch/cut to a duration**: give frames `min_ms`/`max_ms` and mark filler
+  frames `skippable`; the engine can fit the family to a target time.
+- **Add an attack variant** (`attack.thrust` vs `attack.slash`): a second family
+  + an `actionMap` entry keyed by `kind.variant`; the engine picks it via
+  `action_variant` (once combat drives variants).
+
+### Limitations, gotchas & open questions
+Read before shipping on this — the things a user *will* trip on:
+
+- **Family alignment is by index, unchecked across the boundary** (ADR 0019).
+  Rust `anim_id` ↔ TS family name ↔ frame counts must agree by order; the package
+  can't verify it. Single-source them (as the sample does). A frame-count
+  mismatch clamps to the last frame (no garbage), but a *name/order* mismatch
+  shows the wrong animation silently.
+- **Death isn't a death animation.** Entities are destroyed on death, so a
+  `hold_last` death family never plays — showing death needs a "dying" state that
+  delays destroy (not built).
+- **Monsters only animate locomotion.** Attack/hurt/death for monsters need
+  engine combat hooks (Phase 3); the def can carry them but nothing requests them.
+- **2D player has no attack animation** — its `fire()` calls `spawn_bullet`
+  directly, bypassing the `player_fire` → attack path.
+- **Monsters all look the same** (red loadout); per-template visual variety isn't
+  mapped to loadouts yet.
+- **Remote peers render as boxes** — networked loadout sync is deferred.
+- **Bake cache is a bounded LRU (64 looks).** More than 64 distinct
+  `(loadout, family)` combinations live at once would evict a texture a sprite is
+  still using (its clones share the Source) → that sprite renders wrong. Fine at
+  current counts; needs ref-counting for large equipment matrices.
+- **`sidescroll` uses a fixed side-profile row (East)** and derives its flip from
+  horizontal movement; the row isn't configurable yet.
+- **Animation frames faster than the ~16 ms flush are dropped for display** (the
+  worker merges semantic patches latest-wins). Frame *events* are dispatched in
+  Rust and are never dropped, so gameplay stays correct even if the drawn frame
+  skips.
+- **No TS-side (presentational) frame callbacks yet** — only engine gameplay
+  events. Surfacing events across the boundary as a queued slice (like `hits`) is
+  the natural follow-up for sound/FX hooks.
+
 ### Verification
 - Unit (`pnpm --filter @kikorin/paperdoll test`, 31 tests) — the pure logic:
   yaw→direction quantization across the full ring incl. wrap and the

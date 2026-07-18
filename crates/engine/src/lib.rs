@@ -775,10 +775,33 @@ struct JsAnimFamily {
     interrupt: String,
     #[serde(default)]
     branch_frame: Option<usize>,
+    /// Movement permitted while this family plays; absent = everything (ADR 0018).
+    #[serde(default)]
+    movement: Option<JsMoveMask>,
 }
 
 fn default_interrupt() -> String {
     "always".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Per-family movement permission (ADR 0018). Every field defaults to `true`, so
+/// a family only lists what it *forbids* (e.g. `{ forward: false, jump: false }`).
+#[derive(serde::Deserialize)]
+struct JsMoveMask {
+    #[serde(default = "default_true")]
+    forward: bool,
+    #[serde(default = "default_true")]
+    strafe: bool,
+    #[serde(default = "default_true")]
+    turn: bool,
+    #[serde(default = "default_true")]
+    jump: bool,
+    #[serde(default = "default_true")]
+    crouch: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -796,7 +819,10 @@ struct JsAnimationSet {
     actions: Vec<JsAnimAction>,
 }
 
-fn build_animation_set(dto: JsAnimationSet) -> animation::AnimationSet {
+/// Build an AnimationSet from the game's DTO, or None if it's malformed (logged)
+/// — the engine then leaves animation inert rather than panicking mid-tick
+/// (ADR 0019).
+fn build_animation_set(dto: JsAnimationSet) -> Option<animation::AnimationSet> {
     let mut set = animation::AnimationSet::new();
     for fam in dto.families {
         let frames = fam
@@ -821,6 +847,13 @@ fn build_animation_set(dto: JsAnimationSet) -> animation::AnimationSet {
             "queue" => animation::Interrupt::Queue,
             _ => animation::Interrupt::Always,
         };
+        let move_mask = fam.movement.map_or(animation::MoveMask::ALL, |m| animation::MoveMask {
+            forward: m.forward,
+            strafe: m.strafe,
+            turn: m.turn,
+            jump: m.jump,
+            crouch: m.crouch,
+        });
         set.push_family(animation::Family {
             frames,
             looping: fam.looping,
@@ -828,12 +861,19 @@ fn build_animation_set(dto: JsAnimationSet) -> animation::AnimationSet {
             hold_last: fam.hold_last,
             interrupt,
             branch_frame: fam.branch_frame,
+            move_mask,
         });
     }
     for a in dto.actions {
         set.map_action(a.kind, a.variant, a.family);
     }
-    set
+    match set.validate() {
+        Ok(()) => Some(set),
+        Err(e) => {
+            log::warn!("load_animations: malformed animation set ignored ({e})");
+            None
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -1008,7 +1048,14 @@ impl Engine {
     /// (no cell emitted). See ADR 0015 / 0016.
     pub fn load_animations(&mut self, defs: JsValue) {
         match serde_wasm_bindgen::from_value::<JsAnimationSet>(defs) {
-            Ok(dto) => self.animation_set = Some(build_animation_set(dto)),
+            Ok(dto) => {
+                if let Some(set) = build_animation_set(dto) {
+                    self.animation_set = Some(set);
+                    // Existing instances hold family indices into the old set;
+                    // drop them so a reload can't leave a stale index behind.
+                    self.animation_states.clear();
+                }
+            }
             Err(e) => log::warn!("load_animations: invalid definitions ignored: {e}"),
         }
     }
@@ -2163,11 +2210,24 @@ impl Engine {
     /// Run the player controller: facing (turn axis or camera override), planar
     /// movement, and the double-jump budget — all from the latest raw input.
     /// Also aims the default monster goal at the player.
+    /// Movement the player's current animation family permits (ADR 0018).
+    /// Fully permissive when no animation set / no instance — so this only ever
+    /// tightens behavior once a restrictive family (e.g. attack) is playing.
+    fn player_move_mask(&self) -> animation::MoveMask {
+        let Some(set) = self.animation_set.as_ref() else {
+            return animation::MoveMask::ALL;
+        };
+        let Some(eid) = self.player.as_ref().map(|p| p.eid) else {
+            return animation::MoveMask::ALL;
+        };
+        self.animation_states
+            .get(&eid)
+            .and_then(|inst| set.families.get(inst.family()))
+            .map_or(animation::MoveMask::ALL, |fam| fam.move_mask)
+    }
+
     fn tick_player_controller(&mut self, dt_secs: f32) {
         let cfg = self.player_cfg;
-        let Some(p) = self.player.as_mut() else {
-            return;
-        };
         // 2D's player is TypeScript-driven (yaw/strafe don't exist in a
         // side-view game — see tick_monster_ai's matching gate and
         // specs/engine/README.md's Physics Dimension section for the full picture).
@@ -2177,12 +2237,19 @@ impl Engine {
         if self.physics.dimension() == Dimension::TwoD {
             return;
         }
+        // The current animation gates which inputs apply (rooted attack, etc.).
+        let mask = self.player_move_mask();
+        let Some(p) = self.player.as_mut() else {
+            return;
+        };
         let eid = p.eid;
 
-        if let Some(yaw) = p.input.yaw_override {
-            p.yaw = yaw;
-        } else {
-            p.yaw += p.input.turn * cfg.turn_speed * dt_secs;
+        if mask.turn {
+            if let Some(yaw) = p.input.yaw_override {
+                p.yaw = yaw;
+            } else {
+                p.yaw += p.input.turn * cfg.turn_speed * dt_secs;
+            }
         }
 
         // Standing on the ground refills the jump budget. (grounded is served
@@ -2191,8 +2258,11 @@ impl Engine {
         if self.world.is_grounded(eid).unwrap_or(false) {
             p.jumps_used = 0;
         }
-        let jump_edge = p.input.jump_held && !p.prev_jump_held;
-        p.prev_jump_held = p.input.jump_held;
+        // Edge-detect on the *gated* value, so a jump held through a no-jump
+        // animation fires the moment the animation frees it up.
+        let jump_held = mask.jump && p.input.jump_held;
+        let jump_edge = jump_held && !p.prev_jump_held;
+        p.prev_jump_held = jump_held;
         let vy = if jump_edge && p.jumps_used < cfg.max_jumps {
             p.jumps_used += 1;
             cfg.jump_speed
@@ -2200,9 +2270,11 @@ impl Engine {
             0.0
         };
 
+        let forward = if mask.forward { p.input.forward } else { 0.0 };
+        let strafe = if mask.strafe { p.input.strafe } else { 0.0 };
         let (sin_y, cos_y) = (p.yaw.sin(), p.yaw.cos());
-        let mut vx = p.input.forward * sin_y + p.input.strafe * cos_y;
-        let mut vz = p.input.forward * cos_y - p.input.strafe * sin_y;
+        let mut vx = forward * sin_y + strafe * cos_y;
+        let mut vz = forward * cos_y - strafe * sin_y;
         let len = (vx * vx + vz * vz).sqrt();
         if len > 1.0 {
             vx /= len;
@@ -3864,6 +3936,7 @@ mod tests {
             hold_last: false,
             interrupt: animation::Interrupt::Always,
             branch_frame: None,
+            move_mask: animation::MoveMask::ALL,
         });
         let mut strike = animation::FrameSpec::fixed(100.0);
         strike.event = Some(ANIM_EVENT_FIRE);
@@ -3874,6 +3947,8 @@ mod tests {
             hold_last: false,
             interrupt: animation::Interrupt::Block,
             branch_frame: None,
+            // Rooted while attacking — exercises the move-mask gate (ADR 0018).
+            move_mask: animation::MoveMask::ROOTED,
         });
         set.map_action(ANIM_KIND_IDLE, None, idle);
         set.map_action(ANIM_KIND_ATTACK, None, attack);
@@ -3903,6 +3978,57 @@ mod tests {
             engine.tick_core(0.004);
         }
         assert_eq!(bullet_count(&engine), 1, "the strike frame spawns the bullet");
+    }
+
+    #[test]
+    fn attack_move_mask_roots_the_player() {
+        let mut engine = engine_with_flat_floor();
+        engine.animation_set = Some(fire_on_frame1_anim_set()); // attack mask = ROOTED
+        let player = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        engine.register_player(player);
+        // Hold full-forward input.
+        engine.player.as_mut().unwrap().input.forward = 1.0;
+
+        // Idle (no restriction): forward input produces planar velocity.
+        engine.tick_core(0.004);
+        let idle_v = engine.world.velocity(player).unwrap();
+        assert!((idle_v[0] * idle_v[0] + idle_v[2] * idle_v[2]).sqrt() > 0.1, "moves while idle");
+
+        // Now attack (ROOTED): the same forward input is gated to zero.
+        engine.player_fire();
+        engine.tick_core(0.004);
+        let atk_v = engine.world.velocity(player).unwrap();
+        assert!(
+            (atk_v[0] * atk_v[0] + atk_v[2] * atk_v[2]).sqrt() < 0.01,
+            "rooted attack ignores movement input: {atk_v:?}",
+        );
+    }
+
+    #[test]
+    fn malformed_animation_set_is_rejected_not_installed() {
+        // An action pointing at a non-existent family must not install (and must
+        // not panic) — animation just stays inert. Built via the DTO so it
+        // exercises the same path load_animations uses.
+        let bad = JsAnimationSet {
+            families: vec![JsAnimFamily {
+                frames: vec![JsAnimFrame {
+                    optimal_ms: 100.0,
+                    min_ms: None,
+                    max_ms: None,
+                    skippable: false,
+                    cancelable: false,
+                    event: None,
+                }],
+                looping: true,
+                next: None,
+                hold_last: false,
+                interrupt: "always".to_string(),
+                branch_frame: None,
+                movement: None,
+            }],
+            actions: vec![JsAnimAction { kind: 0, variant: None, family: 9 }],
+        };
+        assert!(build_animation_set(bad).is_none(), "bad action mapping must be rejected");
     }
 
     #[test]

@@ -270,6 +270,20 @@ export interface AnimFamilyInput {
   interrupt?: 'always' | 'block' | 'queue';
   /** Under "queue", the frame at which a queued action takes over (else at end). */
   branch_frame?: number;
+  /**
+   * Player movement permitted while this family plays (ADR 0018). Each field
+   * defaults to allowed, so a family lists only what it forbids — e.g. an attack
+   * that roots you but lets you turn to aim: `{ forward: false, strafe: false,
+   * jump: false }`. The engine's player controller zeroes disallowed inputs.
+   * `crouch` is reserved (no controller input yet).
+   */
+  movement?: {
+    forward?: boolean;
+    strafe?: boolean;
+    turn?: boolean;
+    jump?: boolean;
+    crouch?: boolean;
+  };
 }
 
 /** Maps an engine action kind (+ optional variant) to a family index. */

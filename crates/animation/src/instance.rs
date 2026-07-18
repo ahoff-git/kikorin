@@ -51,6 +51,10 @@ impl AnimationInstance {
     }
 
     fn start(&mut self, set: &AnimationSet, family: usize, target_ms: Option<f32>) {
+        // Clamp to a valid index: a stale index (e.g. a `next` into a set that
+        // was reloaded smaller) must not panic on indexing. `validate` + the
+        // engine clearing instances on reload make this belt-and-suspenders.
+        let family = if family < set.families.len() { family } else { 0 };
         self.family = family;
         self.schedule = schedule_frames(&set.families[family].frames, target_ms);
         self.elapsed_ms = 0.0;
@@ -182,6 +186,7 @@ mod tests {
             hold_last: false,
             interrupt,
             branch_frame: None,
+            move_mask: crate::MoveMask::ALL,
         }
     }
 

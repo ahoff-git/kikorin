@@ -9,17 +9,49 @@
 // The two halves are kept in step by FAMILY_ORDER: the engine emits an anim_id
 // that indexes it, and the sprite maps that back to a family name to bake.
 
-import type { AnimationDefsInput } from "@kikorin/adapter";
+import type { AnimationDefsInput, AnimFamilyInput } from "@kikorin/adapter";
 import type { SpriteManifest, SpriteSetDef } from "@kikorin/paperdoll";
 
 const CELL_W = 32;
 const CELL_H = 48;
 
-/** Family names in engine `anim_id` order — the bridge between Rust and the art. */
-export const FAMILY_ORDER = ["idle", "walk", "attack"] as const;
+// SINGLE SOURCE OF TRUTH for the family set. Everything else — the engine anim
+// defs (load_animations), the art manifest's families, FAMILY_ORDER (the
+// anim_id↔name bridge), and per-family frame counts — is derived from this, so
+// they can't drift out of alignment (the classic paper-doll footgun; see ADR
+// 0019). Family order here IS the engine `anim_id` order and matches the engine
+// action kinds (idle=0, walk=1, attack=2). Add a family = one entry here + a
+// draw case in the item drawers below.
+interface FamilySpec {
+  name: string;
+  loop: boolean;
+  interrupt?: "always" | "block" | "queue";
+  /** Movement allowed while this plays; omit a field = allowed (ADR 0018). */
+  movement?: AnimFamilyInput["movement"];
+  /** Per-frame optimal ms + optional frame-event id (ADR 0017). */
+  frames: { ms: number; event?: number }[];
+}
 
-/** Frame counts must match KIKORIN_ANIM_DEFS below (sheet columns = family frames). */
-const FAMILY_FRAMES: Record<string, number> = { idle: 2, walk: 4, attack: 5 };
+const FAMILIES_SPEC: FamilySpec[] = [
+  { name: "idle", loop: true, frames: [{ ms: 450 }, { ms: 450 }] },
+  { name: "walk", loop: true, frames: [{ ms: 110 }, { ms: 110 }, { ms: 110 }, { ms: 110 }] },
+  {
+    // One-shot, blocking; roots the player but lets them turn to aim. The strike
+    // frame (3) carries FIRE (event 1) so the engine spawns the bullet then.
+    name: "attack",
+    loop: false,
+    interrupt: "block",
+    movement: { forward: false, strafe: false, jump: false },
+    frames: [{ ms: 60 }, { ms: 50 }, { ms: 60 }, { ms: 120, event: 1 }, { ms: 140 }],
+  },
+];
+
+/** Family names in engine `anim_id` order — derived, so it can't drift. */
+export const FAMILY_ORDER = FAMILIES_SPEC.map((f) => f.name);
+
+const FAMILY_FRAMES: Record<string, number> = Object.fromEntries(
+  FAMILIES_SPEC.map((f) => [f.name, f.frames.length]),
+);
 
 // Per-direction unit vector in cell pixel space (y-down). Row order is the
 // engine's Direction enum: S, SW, W, NW, N, NE, E, SE. Sheets are flipY, so
@@ -162,8 +194,8 @@ export function buildKikorinSpriteSet(): SpriteSetDef {
   }
 
   const families: SpriteManifest["families"] = {};
-  for (const family of FAMILY_ORDER) {
-    families[family] = { frames: FAMILY_FRAMES[family], fps: 10, loop: family !== "attack" };
+  for (const f of FAMILIES_SPEC) {
+    families[f.name] = { frames: f.frames.length, fps: 10, loop: f.loop };
   }
 
   const manifest: SpriteManifest = {
@@ -186,45 +218,24 @@ export function buildKikorinSpriteSet(): SpriteSetDef {
 }
 
 /**
- * The behavior half loaded into the Rust engine (family index = anim_id =
- * FAMILY_ORDER index). idle/walk loop; attack is a one-shot that BLOCKS (plays
- * fully, ignoring movement) so the swing is always seen. Timings drive the
- * playback clock and the stretch/cut fitting in Rust.
+ * The behavior half loaded into the Rust engine, derived from FAMILIES_SPEC so
+ * it always matches the art. Family index = anim_id = engine action kind
+ * (idle=0, walk=1, attack=2). Timings drive the playback clock and the
+ * stretch/cut fitting; the attack's FIRE event + block + move-mask are carried
+ * through (ADR 0017/0018).
  */
 export const KIKORIN_ANIM_DEFS: AnimationDefsInput = {
-  families: [
-    // 0: idle
-    { frames: [{ optimal_ms: 450 }, { optimal_ms: 450 }], looping: true },
-    // 1: walk
-    {
-      frames: [
-        { optimal_ms: 110 },
-        { optimal_ms: 110 },
-        { optimal_ms: 110 },
-        { optimal_ms: 110 },
-      ],
-      looping: true,
-    },
-    // 2: attack — one-shot, blocking; the strike frame (3) is a little longer
-    // and carries event 1 (FIRE): the engine spawns the player's bullet exactly
-    // when the swing connects, regardless of how the attack is timed (ADR 0017).
-    {
-      frames: [
-        { optimal_ms: 60 },
-        { optimal_ms: 50 },
-        { optimal_ms: 60 },
-        { optimal_ms: 120, event: 1 },
-        { optimal_ms: 140 },
-      ],
-      looping: false,
-      interrupt: "block",
-    },
-  ],
-  actions: [
-    { kind: 0, family: 0 },
-    { kind: 1, family: 1 },
-    { kind: 2, family: 2 },
-  ],
+  families: FAMILIES_SPEC.map((f) => ({
+    frames: f.frames.map((fr) => ({
+      optimal_ms: fr.ms,
+      ...(fr.event !== undefined ? { event: fr.event } : {}),
+    })),
+    looping: f.loop,
+    ...(f.interrupt ? { interrupt: f.interrupt } : {}),
+    ...(f.movement ? { movement: f.movement } : {}),
+  })),
+  // Action kinds map 1:1 to family indices here (idle/walk/attack).
+  actions: FAMILIES_SPEC.map((_, i) => ({ kind: i, family: i })),
 };
 
 export const KIKORIN_SPRITE_SET_ID = "kikorin-placeholder";
