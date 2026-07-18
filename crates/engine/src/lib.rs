@@ -2590,12 +2590,19 @@ impl Engine {
     /// it; else the JS-set engine-wide default, used only when no player
     /// exists yet to chase (e.g. before `register_player`, or tests that
     /// drive goals directly without spawning a player).
-    fn goal_for(&self, mid: u32, mx: f32, mz: f32) -> (f32, f32) {
+    /// Resolve a grounded monster's XZ goal and whether it's chasing a player.
+    /// Precedence: per-entity override → closest player (local or a remote
+    /// mirror) → JS-set fallback. The `chasing_player` flag (true only for the
+    /// closest-player case) tells the layered-pathfinding dispatcher to use the
+    /// shared flow-field strategy vs. a unique-goal route (see specs/engine).
+    fn goal_for(&self, mid: u32, mx: f32, mz: f32) -> (f32, f32, bool) {
         if let Some(g) = self.monster_states.get(&mid).and_then(|s| s.goal) {
-            return (g[0], g[1]);
+            return (g[0], g[1], false);
         }
-        self.closest_player_position(mx, mz)
-            .unwrap_or((self.goal_x, self.goal_z))
+        match self.closest_player_position(mx, mz) {
+            Some((px, pz)) => (px, pz, true),
+            None => (self.goal_x, self.goal_z, false),
+        }
     }
 
     /// Run monster AI for one tick. Orchestration only — the per-monster
@@ -2648,10 +2655,9 @@ impl Engine {
                 // zero_ecs_velocity_y_preserves_gravity_accumulation tests.
                 if capability.can_fly {
                     // Goal precedence mirrors goal_for, but duplicated rather
-                    // than shared — goal_for is grounded-only (X/Z), used by
-                    // well-tested code this shouldn't risk touching, and a
-                    // flying monster additionally needs a sensible altitude
-                    // when the goal has none of its own (hold current Y).
+                    // than shared: goal_for is grounded-only (X/Z), while a
+                    // flying monster additionally needs a sensible altitude when
+                    // the goal has none of its own (hold current Y).
                     let (goal_x, goal_y, goal_z) = if let Some(g) =
                         this.monster_states.get(&mid).and_then(|s| s.goal)
                     {
@@ -2721,17 +2727,10 @@ impl Engine {
                 // monster dimensions are caller-supplied, so read the collider.
                 let foot_y = my - this.world.collider(mid).map_or(0.0, |c| c.half_height);
 
-                // Goal + source: the dispatcher needs to know whether this is
-                // the shared player chase (flow-field strategy) or a unique
-                // goal (key-route/A* strategy) — see specs/engine.
-                let (goal_x, goal_z, chasing_player) =
-                    if let Some(g) = this.monster_states.get(&mid).and_then(|s| s.goal) {
-                        (g[0], g[1], false)
-                    } else if let Some((px, pz)) = this.closest_player_position(mx, mz) {
-                        (px, pz, true)
-                    } else {
-                        (this.goal_x, this.goal_z, false)
-                    };
+                // Goal + source: goal_for also reports whether this is the
+                // shared player chase (flow-field strategy) or a unique goal
+                // (key-route/A* strategy), which the dispatcher below needs.
+                let (goal_x, goal_z, chasing_player) = this.goal_for(mid, mx, mz);
                 let dx = goal_x - mx;
                 let dz = goal_z - mz;
                 let dist = (dx * dx + dz * dz).sqrt();
@@ -4896,7 +4895,7 @@ mod tests {
         engine.update_monster_goal(-10.0, 0.0); // default: -x
         engine.set_monster_goal(m, 10.0, 0.0); // override: +x
 
-        assert_eq!(engine.goal_for(m, 0.0, 0.0), (10.0, 0.0));
+        assert_eq!(engine.goal_for(m, 0.0, 0.0), (10.0, 0.0, false));
 
         // Enough ticks to clear the initial replan stagger and plan a path.
         for _ in 0..1_500 {
@@ -4918,7 +4917,7 @@ mod tests {
         assert!(engine.world.velocity(m).expect("velocity")[0] > 0.0);
 
         engine.clear_monster_goal(m);
-        assert_eq!(engine.goal_for(m, 0.0, 0.0), (-10.0, 0.0));
+        assert_eq!(engine.goal_for(m, 0.0, 0.0), (-10.0, 0.0, false));
         // The stale path (ending at +10) forces a replan toward the default
         // goal once the cooldown allows; the stationary monster's stuck escape
         // shortcuts that wait.
@@ -4937,14 +4936,14 @@ mod tests {
         let m = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_MONSTER);
 
         // Only the local player exists — it's the target even with no JS-set default goal.
-        assert_eq!(engine.goal_for(m, 0.0, 0.0), (-10.0, 0.0));
+        assert_eq!(engine.goal_for(m, 0.0, 0.0), (-10.0, 0.0, true));
 
         // A remote player's mirror appears closer than the local player.
         let mut out = Vec::new();
         engine.ingest_peer_payload("peer-a", &delta_payload(1, [5.0, 0.9, 0.0]), &mut out);
         assert_eq!(
             engine.goal_for(m, 0.0, 0.0),
-            (5.0, 0.0),
+            (5.0, 0.0, true),
             "must switch to the closer remote player",
         );
 
@@ -4952,7 +4951,7 @@ mod tests {
         engine.ingest_peer_payload("peer-a", &delta_payload(1, [50.0, 0.9, 0.0]), &mut out);
         assert_eq!(
             engine.goal_for(m, 0.0, 0.0),
-            (-10.0, 0.0),
+            (-10.0, 0.0, true),
             "must switch back once the local player is closer",
         );
     }
@@ -4967,7 +4966,7 @@ mod tests {
         engine.set_monster_goal(m, 30.0, 0.0);
         assert_eq!(
             engine.goal_for(m, 0.0, 0.0),
-            (30.0, 0.0),
+            (30.0, 0.0, false),
             "an explicit per-monster goal must win over the closest-player default",
         );
     }
@@ -4995,7 +4994,7 @@ mod tests {
         engine.update_monster_goal(20.0, 0.0);
         assert_eq!(
             engine.goal_for(m, 0.0, 0.0),
-            (20.0, 0.0),
+            (20.0, 0.0, false),
             "a remote monster mirror must never be treated as a player target",
         );
     }
