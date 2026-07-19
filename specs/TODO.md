@@ -33,3 +33,4 @@ in git and the linked ADRs.
 - There should be external Apis from this project to allow the user to specify target locations for monsters to move as part of game logic
 - Similarly there should be external Apis for the user to be able to specify map data. Object and wall locations topography that sort of thing
 - The user should also be able to specify controls like makes a character move or jump or shoot
+- animations should be able to be split and layered. i.e. the top half can shoot while the bottom half walks or runs
