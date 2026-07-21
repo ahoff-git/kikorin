@@ -4,6 +4,7 @@ export type {
   NetPatch,
   HitPatch,
   LifecyclePatch,
+  AnimEventPatch,
   MetricsPatch,
   PatchBundle,
   EngineHandle,
@@ -32,6 +33,7 @@ export {
   metricsChannel,
   hitsChannel,
   lifecycleChannel,
+  animEventsChannel,
   EMPTY_METRICS,
   METRIC_FIELDS,
 } from './channels';

@@ -14,6 +14,7 @@ import {
   metricsChannel,
   hitsChannel,
   lifecycleChannel,
+  animEventsChannel,
 } from "@kikorin/adapter";
 import type { PatchBundle } from "@kikorin/adapter";
 import { WorkerEngineProxy } from "../workers/WorkerEngineProxy";
@@ -95,6 +96,7 @@ export function useEngine(
         if (bundle.render.length > 0) renderChannel.emit(bundle.render);
         if (bundle.semantic.length > 0) hudChannel.emit(bundle.semantic);
         if (bundle.hits.length > 0) hitsChannel.emit(bundle.hits);
+        if (bundle.anim_events.length > 0) animEventsChannel.emit(bundle.anim_events);
         metricsChannel.emit(bundle.metrics);
         recordE2EPatch(bundle);
 

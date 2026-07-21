@@ -41,6 +41,8 @@ export type E2EState = {
   latestRenderByEntity: Record<string, RenderPatch>;
   /** Latest animation cell per entity — lets tests assert frames advance. */
   latestAnimByEntity: Record<string, { anim_id: number; anim_frame: number; anim_dir: number }>;
+  /** Frame-synced animation events received on the boundary (ADR 0017), capped. */
+  animEvents: { entity: number; event: number }[];
   metrics: E2EMetricSample[];
   teleports: E2ETeleportMark[];
   marks: Record<string, number>;
@@ -69,6 +71,7 @@ function createState(): E2EState {
     patchCount: 0,
     latestRenderByEntity: {},
     latestAnimByEntity: {},
+    animEvents: [],
     metrics: [],
     teleports: [],
     marks: {},
@@ -147,6 +150,8 @@ export function recordE2EPatch(bundle: PatchBundle): void {
       anim_dir: s.anim_dir ?? 0,
     };
   }
+  for (const ae of bundle.anim_events) state.animEvents.push(ae);
+  if (state.animEvents.length > 200) state.animEvents.splice(0, state.animEvents.length - 200);
 
   state.metrics.push({
     ...bundle.metrics,

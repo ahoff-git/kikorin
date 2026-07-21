@@ -11,25 +11,28 @@ in git and the linked ADRs.
   machine (timing/fitting, transitions, interruptibility, branch frames, frame
   events, move mask, retrigger, validation/graceful-degradation); frame-synced
   bullet spawn; per-animation movement gating; death (dying state → despawn) +
-  hurt. Remaining paper-doll work:
+  hurt; the **TS animation-event adapter** (`animEventsChannel` +
+  `onAnimationEvent`); **per-type monster colors**. Remaining paper-doll work:
   1. Ship a *real* sprite set (art) under `apps/web/public/sprites/` + a JSON
      manifest, replacing the procedural placeholder generator.
-  2. **TS animation-event adapter** — surface engine frame events across the
-     boundary (a queued bundle slice like `hits`, a channel, and a TS
-     `onAnimationEvent(id, cb)` registry) so *game logic in TS* can react to
-     animation frames (sound, FX, custom hooks). Engine gameplay events already
-     dispatch in Rust; this is the TS-facing half (see paperdoll spec's open
-     questions). Needed before any TS-side game logic keys off animations.
-  3. Distinguish monster types visually (per-template loadouts — all monsters
-     use the red loadout today).
-  4. Per-item sheet fallback (a layer with no sheet for the active family is
+  2. Per-item sheet fallback (a layer with no sheet for the active family is
      skipped, not chain-resolved) + a formal manifest schema/validation contract.
-  5. Monster attack animations (nothing requests a monster attack yet) and a
+  3. Monster attack animations (nothing requests a monster attack yet) and a
      player hurt/death path (nothing damages the player in the samples yet).
-  6. (Sample-game glue) deliver remote-peer loadouts over the wire for a
+  4. (Sample-game glue) deliver remote-peer loadouts over the wire for a
      networked sample; wire the 2D player's attack (it fires via `spawn_bullet`,
      bypassing `player_fire`).
 
-- There should be external Apis from this project to allow the user to specify target locations for monsters to move as part of game logic
-- Similarly there should be external Apis for the user to be able to specify map data. Object and wall locations topography that sort of thing
-- The user should also be able to specify controls like makes a character move or jump or shoot
+- External consumer APIs (the "others import kikorin and wire in game logic" premise):
+  - Monster target locations — **exists**: `set_monster_goal(id, gx, gz)` /
+    `update_monster_goal` / `clear_monster_goal`. (Could grow: patrol paths,
+    named targets, flee — only if a consumer needs it.)
+  - Map data (objects/walls/topography) — **exists**: `load_map(blocks)` (+
+    `spawn_floor_entity` / `set_terrain_walkable`). (Could grow: more block
+    kinds, dynamic obstacles.)
+  - Controls — **the real gap**: input bindings are hardcoded per game (each
+    game's `onFrame` maps keys → `set_player_input`). Needs a reusable
+    binding layer so a consumer declares its own key/button → action map.
+- Monsters should have agro radiuses and leashes 
+- Players should have health 
+- Monsters should deal damage

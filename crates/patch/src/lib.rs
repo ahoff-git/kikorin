@@ -10,7 +10,19 @@ pub struct PatchBundle {
     pub net: Vec<NetPatch>,
     pub hits: Vec<HitPatch>,
     pub lifecycle: Vec<LifecyclePatch>,
+    pub anim_events: Vec<AnimEventPatch>,
     pub metrics: MetricsPatch,
+}
+
+/// A frame-synced animation event that fired this tick (ADR 0017). The engine
+/// dispatches gameplay events itself; these are surfaced to TypeScript too so
+/// game logic there can react (sound, FX, custom hooks). Queued, never merged —
+/// events, not state.
+#[derive(Clone, Debug, Encode, Decode)]
+pub struct AnimEventPatch {
+    pub entity: EntityId,
+    /// Event id from the frame's `FrameSpec.event`; the consumer maps it.
+    pub event: u16,
 }
 
 /// Local-entity lifecycle event: the engine created or destroyed an entity
@@ -123,6 +135,7 @@ impl PatchGenerator {
         net: Vec<NetPatch>,
         hits: Vec<HitPatch>,
         lifecycle: Vec<LifecyclePatch>,
+        anim_events: Vec<AnimEventPatch>,
         metrics: MetricsPatch,
     ) -> PatchBundle {
         let mut render = Vec::new();
@@ -183,6 +196,7 @@ impl PatchGenerator {
             net,
             hits,
             lifecycle,
+            anim_events,
             metrics,
         }
     }
@@ -231,6 +245,7 @@ mod tests {
                 target_eid: Some(3),
             }],
             lifecycle: vec![LifecyclePatch { entity: 4, kind: LifecycleKind::Spawned, flags: 0x02 }],
+            anim_events: vec![AnimEventPatch { entity: 2, event: 1 }],
             metrics: MetricsPatch {
                 tick_ms: 16.0,
                 ai_ms: 2.0,
@@ -253,6 +268,8 @@ mod tests {
         assert_eq!(decoded.semantic[0].anim_id, Some(1));
         assert_eq!(decoded.semantic[0].anim_frame, Some(2));
         assert_eq!(decoded.semantic[0].anim_dir, Some(3));
+        assert_eq!(decoded.anim_events.len(), 1);
+        assert_eq!(decoded.anim_events[0].event, 1);
         assert_eq!(decoded.hits.len(), 1);
         assert_eq!(decoded.hits[0].bullet_eid, 5);
         assert_eq!(decoded.hits[0].target_eid, Some(3));
@@ -268,7 +285,7 @@ mod tests {
         world.mark_dirty(e, DirtyFlags::TRANSFORM);
 
         let gen = PatchGenerator::new();
-        let bundle = gen.generate(&world, vec![], vec![], vec![], MetricsPatch::default());
+        let bundle = gen.generate(&world, vec![], vec![], vec![], vec![], MetricsPatch::default());
 
         assert_eq!(bundle.render.len(), 1);
         assert!((bundle.render[0].x - 10.0).abs() < 1e-6);
@@ -284,7 +301,7 @@ mod tests {
         world.mark_dirty(e, DirtyFlags::HEALTH);
 
         let gen = PatchGenerator::new();
-        let bundle = gen.generate(&world, vec![], vec![], vec![], MetricsPatch::default());
+        let bundle = gen.generate(&world, vec![], vec![], vec![], vec![], MetricsPatch::default());
 
         assert!(bundle.render.is_empty());
         assert_eq!(bundle.semantic.len(), 1);
@@ -304,7 +321,7 @@ mod tests {
         world.mark_dirty(e, DirtyFlags::HEALTH); // NOT ANIM
 
         let gen = PatchGenerator::new();
-        let bundle = gen.generate(&world, vec![], vec![], vec![], MetricsPatch::default());
+        let bundle = gen.generate(&world, vec![], vec![], vec![], vec![], MetricsPatch::default());
 
         assert_eq!(bundle.semantic.len(), 1);
         assert_eq!(bundle.semantic[0].anim_id, Some(1));

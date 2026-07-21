@@ -24,8 +24,8 @@ const BULLET_BOUNCE_OFFSET: f32 = 0.02;
 
 use netcode::{DeltaTracker, WireEvent};
 use patch::{
-    HitPatch, LifecycleKind, LifecyclePatch, MetricsPatch, NetEventKind, NetPatch, PatchBundle,
-    PatchGenerator,
+    AnimEventPatch, HitPatch, LifecycleKind, LifecyclePatch, MetricsPatch, NetEventKind, NetPatch,
+    PatchBundle, PatchGenerator,
 };
 use pathfinding::{NavMesh, NavMeshConfig, PathRequest, Waypoint};
 use physics::{Dimension, PhysicsWorld};
@@ -719,6 +719,9 @@ pub struct Engine {
     player: Option<PlayerState>,
     // Local-entity lifecycle events queued for the next PatchBundle.
     pending_lifecycle: Vec<LifecyclePatch>,
+    // Frame-synced animation events fired this tick, surfaced to TS (ADR 0017);
+    // the engine also dispatches gameplay events itself in on_anim_event.
+    pending_anim_events: Vec<AnimEventPatch>,
     // LCG state for respawn scatter — deterministic, dependency-free.
     rng_state: u64,
     // Terrain entities whose top surface must not receive navmesh nodes (walls etc.).
@@ -949,6 +952,7 @@ impl Engine {
             monster_cfg: MonsterConfig::default(),
             player: None,
             pending_lifecycle: Vec::new(),
+            pending_anim_events: Vec::new(),
             rng_state: 0x9E37_79B9_7F4A_7C15,
             non_walkable_terrain: std::collections::HashSet::new(),
             scratch_ids: Vec::new(),
@@ -1259,10 +1263,11 @@ impl Engine {
             self.world.set_anim_cell(eid, cell);
             self.world.mark_dirty(eid, DirtyFlags::ANIM);
         }
-        // Frame-synced gameplay hook: a frame the animation just entered can
-        // trigger an engine action (ADR 0017).
+        // Frame-synced hook (ADR 0017): dispatch the gameplay action in Rust,
+        // and queue the event for TS so game logic there can react too.
         if let Some(ev) = event {
             self.on_anim_event(eid, ev);
+            self.pending_anim_events.push(AnimEventPatch { entity: eid, event: ev });
         }
     }
 
@@ -1376,11 +1381,13 @@ impl Engine {
         // consumers receive a real value; tick_ms is stamped by the wrapper.
         let patch_timer = Timer::new();
         let lifecycle = std::mem::take(&mut self.pending_lifecycle);
+        let anim_events = std::mem::take(&mut self.pending_anim_events);
         let mut bundle = self.patch_gen.generate(
             &self.world,
             net_patches,
             hits,
             lifecycle,
+            anim_events,
             MetricsPatch {
                 tick_ms: 0.0,
                 ai_ms,
@@ -3555,6 +3562,7 @@ struct JsPatch {
     net: Vec<JsNet>,
     hits: Vec<JsHit>,
     lifecycle: Vec<JsLifecycle>,
+    anim_events: Vec<JsAnimEvent>,
     metrics: JsMetrics,
 }
 
@@ -3563,6 +3571,12 @@ struct JsLifecycle {
     entity: u32,
     kind: &'static str,
     flags: u8,
+}
+
+#[derive(Serialize)]
+struct JsAnimEvent {
+    entity: u32,
+    event: u16,
 }
 
 fn js_lifecycle_kind(kind: LifecycleKind) -> &'static str {
@@ -3674,6 +3688,11 @@ impl From<PatchBundle> for JsPatch {
                     kind: js_lifecycle_kind(l.kind),
                     flags: l.flags,
                 })
+                .collect(),
+            anim_events: b
+                .anim_events
+                .into_iter()
+                .map(|a| JsAnimEvent { entity: a.entity, event: a.event })
                 .collect(),
             metrics: JsMetrics {
                 tick_ms: b.metrics.tick_ms,

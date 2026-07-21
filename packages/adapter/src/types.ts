@@ -81,6 +81,17 @@ export interface LifecyclePatch {
   flags: number;
 }
 
+/**
+ * A frame-synced animation event that fired this tick (ADR 0017). The engine
+ * dispatches gameplay events itself; these are surfaced here so TS game logic
+ * can react (sound, FX, custom hooks). Queued events, never merged.
+ */
+export interface AnimEventPatch {
+  entity: number;
+  /** Event id from the frame's `event` marker; the consumer maps it to an action. */
+  event: number;
+}
+
 export interface PatchBundle {
   tick: number;
   render: RenderPatch[];
@@ -88,6 +99,7 @@ export interface PatchBundle {
   net: NetPatch[];
   hits: HitPatch[];
   lifecycle: LifecyclePatch[];
+  anim_events: AnimEventPatch[];
   metrics: MetricsPatch;
 }
 

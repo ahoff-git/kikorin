@@ -12,7 +12,7 @@
 // The wasm-bindgen bundler-target binary imports its JS bindings under the namespace
 // "./engine_bg.js", which matches the star-import we provide as the instantiation imports.
 
-import type { EngineHandle, PatchBundle, HitPatch, LifecyclePatch, RenderPatch, SemanticPatch, NetPatch, MetricsPatch, TerrainBlockInput, AiConfigInput, NavConfigInput, PlayerConfigInput, PlayerInputState, MonsterConfigInput, MonsterCapabilityInput, AnimationDefsInput } from '@kikorin/adapter';
+import type { EngineHandle, PatchBundle, HitPatch, LifecyclePatch, AnimEventPatch, RenderPatch, SemanticPatch, NetPatch, MetricsPatch, TerrainBlockInput, AiConfigInput, NavConfigInput, PlayerConfigInput, PlayerInputState, MonsterConfigInput, MonsterCapabilityInput, AnimationDefsInput } from '@kikorin/adapter';
 import { EMPTY_METRICS } from '@kikorin/adapter';
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
@@ -91,6 +91,7 @@ const pendingSemantic = new Map<number, SemanticPatch>();
 const pendingNet: NetPatch[] = [];
 const pendingHits: HitPatch[] = [];
 const pendingLifecycle: LifecyclePatch[] = [];
+const pendingAnimEvents: AnimEventPatch[] = [];
 let latestMetrics: MetricsPatch = { ...EMPTY_METRICS };
 let latestTick = 0;
 let dirty = false;
@@ -108,6 +109,7 @@ function accumulateBundle(bundle: PatchBundle | null, tickCallMs: number): void 
   // normalize expiry events.
   for (const hp of bundle.hits) pendingHits.push({ ...hp, target_eid: hp.target_eid ?? null });
   for (const lp of bundle.lifecycle) pendingLifecycle.push(lp);
+  for (const ae of bundle.anim_events) pendingAnimEvents.push(ae);
   // boundary_ms: what the tick() call cost as observed from JS beyond the Rust-internal
   // tick_ms — i.e. the JsValue serialization + bindgen overhead of the WASM boundary.
   // Clamped at 0 to absorb timer-resolution jitter between the two clocks.
@@ -134,6 +136,7 @@ function flush(): void {
     net: pendingNet.splice(0),
     hits: pendingHits.splice(0),
     lifecycle: pendingLifecycle.splice(0),
+    anim_events: pendingAnimEvents.splice(0),
     metrics: latestMetrics,
   };
   pendingRender.clear();

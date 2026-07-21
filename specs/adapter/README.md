@@ -4,7 +4,7 @@
 Defines the TypeScript mirror types for the Rust `PatchBundle`, the shared boundary constants (the `NET_*` networking-profile bitmask — ownership/type/authority/predictability/urgency, mirroring `crates/ecs`; `EMPTY_METRICS`/`METRIC_FIELDS` as the single source for the metrics field list), and the five typed pub/sub channels that fan patch data out to Three.js, React UI, netcode, game logic, and metrics. Pure contract + routing — it drives no loop and interprets no data. Also mirrors the input contracts the game sends *into* the engine — the `*ConfigInput` tuning objects and `AnimationDefsInput` (families/timing/transitions for `load_animations`, the animation behavior half — see ADR 0015) — plus the `EngineHandle` method surface.
 
 ### Channels
-`renderChannel` (`RenderPatch[]`), `hudChannel` (`SemanticPatch[]`), `netChannel` (`NetPatch[]`), `hitsChannel` (`HitPatch[]`), `lifecycleChannel` (`LifecyclePatch[]` — the game creates/removes local-entity meshes from these), `metricsChannel` (`MetricsPatch`). A caller (`useEngine`) receives a `PatchBundle` from the worker and emits each slice onto its channel; consumers apply state on emit (push) or read snapshots. `netChannel` carries remote-entity lifecycle events (`kind`: spawned/updated/despawned/peer_left, `entity` = local mirror id) — the game creates/removes remote meshes from it and `useNetworking` maintains the live peer list. `metricsChannel` currently has no standing subscriber — the HUD's TPS/tick-cost numbers are computed in `useEngine`'s bundle handler; the channel remains for debug overlays.
+`renderChannel` (`RenderPatch[]`), `hudChannel` (`SemanticPatch[]`), `netChannel` (`NetPatch[]`), `hitsChannel` (`HitPatch[]`), `lifecycleChannel` (`LifecyclePatch[]` — the game creates/removes local-entity meshes from these), `animEventsChannel` (`AnimEventPatch[]` — frame-synced animation events for TS game logic, ADR 0017; queued, never merged), `metricsChannel` (`MetricsPatch`). A caller (`useEngine`) receives a `PatchBundle` from the worker and emits each slice onto its channel; consumers apply state on emit (push) or read snapshots. `netChannel` carries remote-entity lifecycle events (`kind`: spawned/updated/despawned/peer_left, `entity` = local mirror id) — the game creates/removes remote meshes from it and `useNetworking` maintains the live peer list. `metricsChannel` currently has no standing subscriber — the HUD's TPS/tick-cost numbers are computed in `useEngine`'s bundle handler; the channel remains for debug overlays.
 
 ### PatchBundle Type
 ```typescript
@@ -14,6 +14,7 @@ interface PatchBundle {
   semantic: SemanticPatch[]; // health, net_flags, grounded, + anim cell (anim_id/anim_frame/anim_dir)
   net: NetPatch[];           // peer events, queued (never merged)
   hits: HitPatch[];          // bullet hit/expiry events, queued (never merged)
+  anim_events: AnimEventPatch[]; // frame-synced animation events, queued (never merged)
   metrics: MetricsPatch;     // tick_ms, ai_ms, physics_ms, pathfinding_ms, net_ms, patch_ms, boundary_ms
 }
 ```

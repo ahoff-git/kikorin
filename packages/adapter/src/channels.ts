@@ -1,4 +1,4 @@
-import type { HitPatch, LifecyclePatch, MetricsPatch, NetPatch, RenderPatch, SemanticPatch } from './types';
+import type { AnimEventPatch, HitPatch, LifecyclePatch, MetricsPatch, NetPatch, RenderPatch, SemanticPatch } from './types';
 import { Channel } from './channel';
 
 /** Zero-valued MetricsPatch — the single literal the field list derives from. */
@@ -32,3 +32,6 @@ export const hitsChannel = new Channel<HitPatch[]>([]);
 
 /** The game creates/removes meshes from these local-entity lifecycle events. */
 export const lifecycleChannel = new Channel<LifecyclePatch[]>([]);
+
+/** TS game logic subscribes here to react to frame-synced animation events (ADR 0017). */
+export const animEventsChannel = new Channel<AnimEventPatch[]>([]);

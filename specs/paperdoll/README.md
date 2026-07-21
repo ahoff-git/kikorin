@@ -361,9 +361,11 @@ Read before shipping on this — the things a user *will* trip on:
   semantic patch, see the patch spec; a bug where no-change ticks clobbered it
   and froze the sprite is fixed). Frame *events* are dispatched in Rust and are
   never dropped, so gameplay stays correct regardless.
-- **No TS-side (presentational) frame callbacks yet** — only engine gameplay
-  events. Surfacing events across the boundary as a queued slice (like `hits`) is
-  the natural follow-up for sound/FX hooks.
+- **TS-side frame callbacks are available** (ADR 0017): frame events ride a
+  queued `anim_events` bundle slice → `animEventsChannel` → `onAnimationEvent(id,
+  cb)` (`apps/web/src/app/animationEvents.ts`), so TS game logic can react to
+  animation frames (sound, FX, custom hooks). Engine gameplay events still
+  dispatch in Rust; this is the TS-facing half.
 
 ### Verification
 - Unit (`pnpm --filter @kikorin/paperdoll test`, 31 tests) — the pure logic:

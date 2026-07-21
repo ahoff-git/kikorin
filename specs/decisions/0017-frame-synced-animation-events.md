@@ -51,10 +51,12 @@ through the wind-up.
 - **Verified**: a cargo test asserts no bullet on the click and exactly one when
   the FIRE frame is crossed; in-browser the bullet spawns ~185 ms after the
   click (the wind-up), not instantly.
-- **Presentational callbacks (TS-side) are a noted extension, not built.** Only
-  gameplay events (engine-dispatched) exist today. Surfacing frame events across
-  the boundary as a queued slice — so the game layer can attach sound/FX
-  callbacks — mirrors how `hits` already works and is the natural follow-up.
+- **TS-side callbacks now exist too.** Frame events are surfaced across the
+  boundary as a queued `anim_events` bundle slice → `animEventsChannel` →
+  `onAnimationEvent(id, cb)` (`apps/web/src/app/animationEvents.ts`), mirroring
+  how `hits` works, so TS game logic can react to animation frames (sound, FX,
+  custom hooks). The engine still dispatches gameplay events (the bullet) itself;
+  this is the additive TS-facing half.
 - Multi-frame skips within a single 4 ms tick would report only the last
   entered frame's event; not a concern at the current step size and frame
   lengths, noted for correctness.

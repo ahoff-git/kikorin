@@ -1,7 +1,7 @@
 ## crates/patch — PatchBundle Generation
 
 ### Purpose
-Scans the world's dirty entities each tick and produces the `PatchBundle` — the single payload that crosses the WASM boundary per tick. Owns the boundary payload schema: `RenderPatch`, `SemanticPatch`, `NetPatch`, `HitPatch`, `MetricsPatch`. Read-only over the ECS world; never mutates state, runs physics, or touches netcode.
+Scans the world's dirty entities each tick and produces the `PatchBundle` — the single payload that crosses the WASM boundary per tick. Owns the boundary payload schema: `RenderPatch`, `SemanticPatch`, `NetPatch`, `HitPatch`, `LifecyclePatch`, `AnimEventPatch`, `MetricsPatch`. Read-only over the ECS world; never mutates state, runs physics, or touches netcode.
 
 ### Inputs and Outputs
 - **In:** `&World` (dirty entities + component values), `Vec<NetPatch>` and `Vec<HitPatch>` (supplied by the engine), `MetricsPatch` (engine timing).
@@ -14,6 +14,7 @@ Scans the world's dirty entities each tick and produces the `PatchBundle` — th
 - `RenderPatch` — emitted for entities with `DirtyFlags::TRANSFORM`.
 - `SemanticPatch` — emitted for entities with `DirtyFlags::HEALTH`, `NET`, or `ANIM`. Carries `health`/`net_flags` (when their flag is dirty) plus `grounded` and the animation cell (`anim_id`/`anim_frame`/`anim_dir`), the latter two emitted **unconditionally** whenever a semantic patch goes out — not only when their flag is dirty. This matters: local entities emit a semantic patch every tick (HEALTH re-dirtied), and the worker's latest-wins merge treats a `None` field (serialized as `undefined`) as an overwrite, so a cell present only on its change-tick would be clobbered by the next no-change tick and the sprite would freeze on a frame. Always emitting the current cell keeps the merge correct. The cell is the engine's animation state machine's per-tick output, which TS displays and never recomputes (ADR 0015).
 - `LifecyclePatch` — engine-supplied (queued at spawn/destroy time, not derived from dirty flags): one `Spawned`/`Despawned` per local-entity creation/destruction, carrying the entity's net-flag profile for mesh styling. Terrain and remote mirrors are excluded (terrain returns from `load_map`; mirrors ride `NetPatch`). `HitPatch` is a pure UI/FX event — the engine already settled the consequences.
+- `AnimEventPatch` — engine-supplied (queued): a frame-synced animation event (`{entity, event}`) surfaced to TS so game logic can react (ADR 0017). The engine dispatches gameplay events itself; this is the TS-facing copy. Never merged.
 - `MetricsPatch` — always present, even when render/semantic/net are empty. Fields: `tick_ms`, `ai_ms`, `physics_ms`, `pathfinding_ms`, `net_ms`, `patch_ms`; `pathfinding_ms` is the A* share of `ai_ms`.
 
 ### Invariants
