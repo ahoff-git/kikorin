@@ -31,7 +31,7 @@ import { createHeldKeysTracker, suppressContextMenu } from "./inputHelpers";
 import type { OwnershipCallbacks } from "./useNetworking";
 import { createMonsterTemplates, pickMonsterTemplate } from "./monsterTemplates";
 import { createSpriteDirector } from "./paperDollDirector";
-import { PLAYER_LOADOUT, MONSTER_LOADOUT } from "./paperDollAssets";
+import { PLAYER_LOADOUT, monsterLoadoutFor } from "./paperDollAssets";
 
 // This file is UI + IO only: it captures raw input, forwards it to the Rust
 // engine (which owns all movement/combat/spawn rules), and renders what the
@@ -179,7 +179,7 @@ export async function setupGame(
           // also covers respawns, which emit this same "spawned" event.
           const template = pickMonsterTemplate(MONSTER_TEMPLATES);
           engine.set_monster_capability(l.entity, template.capability);
-          director.add(l.entity, MONSTER_LOADOUT, PERSON_WORLD_HEIGHT);
+          director.add(l.entity, monsterLoadoutFor(template.name), PERSON_WORLD_HEIGHT);
           monsterEids.push(l.entity);
           recordE2EEntitySpawn("monster", l.entity);
         } else if (l.flags & NET_BULLET) {

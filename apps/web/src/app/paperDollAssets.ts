@@ -10,7 +10,8 @@
 // that indexes it, and the sprite maps that back to a family name to bake.
 
 import type { AnimationDefsInput, AnimFamilyInput } from "@kikorin/adapter";
-import type { SpriteManifest, SpriteSetDef } from "@kikorin/paperdoll";
+import type { Loadout, SpriteManifest, SpriteSetDef } from "@kikorin/paperdoll";
+import { MONSTER_TYPE_STYLE, type MonsterTemplateName } from "./monsterTemplates";
 
 const CELL_W = 32;
 const CELL_H = 48;
@@ -213,9 +214,35 @@ function drawSword(color: string): CellDrawer {
   };
 }
 
+/** 0xRRGGBB → "#rrggbb". */
+function hexCss(n: number): string {
+  return `#${(n & 0xffffff).toString(16).padStart(6, "0")}`;
+}
+
+/** Darken a hex color by a factor for the body's shade (legs/nose/back). */
+function darken(n: number, f = 0.55): number {
+  const r = Math.round(((n >> 16) & 0xff) * f);
+  const g = Math.round(((n >> 8) & 0xff) * f);
+  const b = Math.round((n & 0xff) * f);
+  return (r << 16) | (g << 8) | b;
+}
+
+const monsterBodyId = (name: MonsterTemplateName): string => `body-monster-${name}`;
+
+// One body per monster type, coloured from the shared MONSTER_TYPE_STYLE so each
+// type reads distinctly (agile orange, slow brown, flying purple, ghost grey).
+const MONSTER_TYPE_ITEMS: ItemSpec[] = (
+  Object.keys(MONSTER_TYPE_STYLE) as MonsterTemplateName[]
+).map((name) => ({
+  id: monsterBodyId(name),
+  slot: "body",
+  draw: drawBody(hexCss(MONSTER_TYPE_STYLE[name].body), hexCss(darken(MONSTER_TYPE_STYLE[name].body))),
+}));
+
 const ITEMS: ItemSpec[] = [
   { id: "body-hero", slot: "body", draw: drawBody("#4488cc", "#2b5f92") },
   { id: "body-monster", slot: "body", draw: drawBody("#cc4444", "#902b2b") },
+  ...MONSTER_TYPE_ITEMS,
   { id: "hat-hero", slot: "head", draw: drawHat("#ffd54a") },
   { id: "sword", slot: "weapon", draw: drawSword("#dfe6ee") },
 ];
@@ -311,3 +338,8 @@ export const KIKORIN_ANIM_DEFS: AnimationDefsInput = {
 export const KIKORIN_SPRITE_SET_ID = "kikorin-placeholder";
 export const PLAYER_LOADOUT = { body: "body-hero", head: "hat-hero", weapon: "sword" };
 export const MONSTER_LOADOUT = { body: "body-monster" };
+
+/** Loadout that colours a monster by its type (agile/slow/flying/ghost). */
+export function monsterLoadoutFor(name: MonsterTemplateName): Loadout {
+  return { body: monsterBodyId(name) };
+}

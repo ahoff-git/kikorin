@@ -28,7 +28,7 @@ import { createHeldKeysTracker, suppressContextMenu } from "./inputHelpers";
 import type { OwnershipCallbacks } from "./useNetworking";
 import { createMonsterTemplates, pickMonsterTemplate } from "./monsterTemplates";
 import { createSpriteDirector } from "./paperDollDirector";
-import { PLAYER_LOADOUT, MONSTER_LOADOUT } from "./paperDollAssets";
+import { PLAYER_LOADOUT, monsterLoadoutFor } from "./paperDollAssets";
 
 // This file is UI + IO only, mirroring kikorin.ts's split for the 3D game —
 // it does NOT use the engine's player controller (register_player only
@@ -213,7 +213,7 @@ export async function setupGame2D(
       );
       const template = pickMonsterTemplate(MONSTER_TEMPLATES);
       engine.set_monster_capability(eid, template.capability);
-      director.add(eid, MONSTER_LOADOUT, MONSTER_HALF * 2);
+      director.add(eid, monsterLoadoutFor(template.name), MONSTER_HALF * 2);
     }
   }
 
