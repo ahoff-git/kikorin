@@ -3,8 +3,7 @@
 ## Status
 Accepted — implemented in `crates/engine` (`entity_snapshot`/`adopt_entity`) +
 `apps/web` (`entityHandoff.ts`, wired into `useNetworking`). Consumes awari's
-entity-ownership API (awari ADR 0020), vendored until it ships in a published
-`@awari` release.
+entity-ownership API (awari ADR 0020) via the published `@awari/*` `^0.0.4`.
 
 ## Context
 Awari (kikorin's networking layer) gained entity ownership + load-balanced
@@ -71,13 +70,13 @@ push-before-release state machine is unit-testable without a live network/worker
   recipient retries a few times until the release lands. Directly-connected peers
   are ordered and succeed on the first attempt.
 
-### Awari delivery: vendored tarballs
-The entity API isn't in any published `@awari` release yet. Kikorin depends on
-locally-built tarballs of the three `@awari/*` packages (`vendor/awari/*.tgz`,
-rebuilt via `scripts/vendor-awari.mjs`) through `pnpm.overrides`. Tarballs, not a
-`link:` to the sibling source dir, because Turbopack won't resolve a symlink that
-points outside the app root — an extracted tarball is real files in the store.
-Retire this once kikorin can depend on a published `@awari` carrying the API.
+### Awari delivery
+Kikorin depends on the published `@awari/*` `^0.0.4`, the first release carrying
+the entity-ownership API. (During development, before that release, the API was
+consumed from locally-built tarballs of the sibling `../awari` working tree via
+`pnpm.overrides` — tarballs rather than a `link:`, since Turbopack won't resolve
+a symlink pointing outside the app root. That vendoring was removed once 0.0.4
+shipped.)
 
 ## Consequences
 - **Lossless on the authoritative side**: the new owner gets the old owner's

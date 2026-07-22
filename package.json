@@ -22,13 +22,5 @@
     "turbo": "^2.5.3",
     "typescript": "^5"
   },
-  "pnpm": {
-    "comment": "Vendored @awari tarballs carry the unreleased entity-ownership API (awari ADR 0020) that ADR 0022's state handoff consumes. Rebuild with scripts/vendor-awari.mjs; replace with a published ^0.0.4 once awari ships it. Tarballs (not link:) so Turbopack resolves them as real files, not an out-of-root symlink.",
-    "overrides": {
-      "@awari/core": "file:./vendor/awari/awari-core-0.0.3.tgz",
-      "@awari/protocol": "file:./vendor/awari/awari-protocol-0.0.3.tgz",
-      "@awari/transport-peerjs": "file:./vendor/awari/awari-transport-peerjs-0.0.3.tgz"
-    }
-  },
   "packageManager": "pnpm@10.18.3"
 }

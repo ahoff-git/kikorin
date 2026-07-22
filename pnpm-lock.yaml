@@ -4,11 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-overrides:
-  '@awari/core': file:./vendor/awari/awari-core-0.0.3.tgz
-  '@awari/protocol': file:./vendor/awari/awari-protocol-0.0.3.tgz
-  '@awari/transport-peerjs': file:./vendor/awari/awari-transport-peerjs-0.0.3.tgz
-
 importers:
 
   .:
@@ -26,14 +21,14 @@ importers:
   apps/web:
     dependencies:
       '@awari/core':
-        specifier: file:../../vendor/awari/awari-core-0.0.3.tgz
-        version: file:vendor/awari/awari-core-0.0.3.tgz
+        specifier: ^0.0.4
+        version: 0.0.4
       '@awari/protocol':
-        specifier: file:../../vendor/awari/awari-protocol-0.0.3.tgz
-        version: file:vendor/awari/awari-protocol-0.0.3.tgz
+        specifier: ^0.0.4
+        version: 0.0.4
       '@awari/transport-peerjs':
-        specifier: file:../../vendor/awari/awari-transport-peerjs-0.0.3.tgz
-        version: file:vendor/awari/awari-transport-peerjs-0.0.3.tgz
+        specifier: ^0.0.4
+        version: 0.0.4
       '@emotion/react':
         specifier: ^11.14.0
         version: 11.14.0(@types/react@19.2.14)(react@19.2.3)
@@ -232,17 +227,14 @@ packages:
   '@asamuzakjp/css-color@3.2.0':
     resolution: {integrity: sha512-K1A6z8tS3XsmCMM86xoWdn7Fkdn9m6RSVtocUrJYIwZnFVkng/PvkEoWtOWmP+Scc6saYWHWZYbndEEXxl24jw==}
 
-  '@awari/core@file:vendor/awari/awari-core-0.0.3.tgz':
-    resolution: {integrity: sha512-j5AirpSGdunEwgvLdv4xc/1BgS5SgGLaXK2TYD6/rWhipw6kcBvMvFgM3YUTsl0JzOeOrutYjIdk+n65BRzPXQ==, tarball: file:vendor/awari/awari-core-0.0.3.tgz}
-    version: 0.0.3
+  '@awari/core@0.0.4':
+    resolution: {integrity: sha512-UOAHKFP0+yi4CSfpXxQoRkU+HQGXQoin7tSONeWPmwQ+wFLP2wLjs5s6GpCXCRAxZT30RDPgS+Xh32YdnzHRsQ==}
 
-  '@awari/protocol@file:vendor/awari/awari-protocol-0.0.3.tgz':
-    resolution: {integrity: sha512-SdMPBwZzwL8xZmhr2I3Ttaz88oqctvcB5Fh/nZh6A3+N6Xdw9pGhg3044E9OqyKrCZ8iz73k6cmAN7AJf6VMLw==, tarball: file:vendor/awari/awari-protocol-0.0.3.tgz}
-    version: 0.0.3
+  '@awari/protocol@0.0.4':
+    resolution: {integrity: sha512-7KRKoqf98Rp5AMk5IU1nMAVQrGea/1xjl9j8NQk1J8AktwCCX1R/5wkLnQ+Lw1Bu9cYlMTNeQhejkp9+I/OINA==}
 
-  '@awari/transport-peerjs@file:vendor/awari/awari-transport-peerjs-0.0.3.tgz':
-    resolution: {integrity: sha512-v4P5fvYKiB/3PqFgEepS46A+VF+xSMzbyX8gXx8DL/ShGAl9MorndWK6a1u2XHyLO5jMmUM4Y3KypUtw2pePaQ==, tarball: file:vendor/awari/awari-transport-peerjs-0.0.3.tgz}
-    version: 0.0.3
+  '@awari/transport-peerjs@0.0.4':
+    resolution: {integrity: sha512-nFfkKQHweKU5Tx1fMsKI91gnL+Q9Vh16UYFD0LtRAgd/+AiWFqZlwGcs4cI28mJovnrAT1t8g4dzGLTl6nTF/Q==}
 
   '@babel/code-frame@7.29.0':
     resolution: {integrity: sha512-9NhCeYjq9+3uxgdtp20LSiJXJvN0FeCtNGpJxuMFZ1Kv3cWUNb6DOhJwUvcVCzKGR66cw4njwM6hrJLqgOwbcw==}
@@ -3270,16 +3262,16 @@ snapshots:
       '@csstools/css-tokenizer': 3.0.4
       lru-cache: 10.4.3
 
-  '@awari/core@file:vendor/awari/awari-core-0.0.3.tgz':
+  '@awari/core@0.0.4':
     dependencies:
-      '@awari/protocol': file:vendor/awari/awari-protocol-0.0.3.tgz
+      '@awari/protocol': 0.0.4
 
-  '@awari/protocol@file:vendor/awari/awari-protocol-0.0.3.tgz': {}
+  '@awari/protocol@0.0.4': {}
 
-  '@awari/transport-peerjs@file:vendor/awari/awari-transport-peerjs-0.0.3.tgz':
+  '@awari/transport-peerjs@0.0.4':
     dependencies:
-      '@awari/core': file:vendor/awari/awari-core-0.0.3.tgz
-      '@awari/protocol': file:vendor/awari/awari-protocol-0.0.3.tgz
+      '@awari/core': 0.0.4
+      '@awari/protocol': 0.0.4
       peerjs: 1.5.5
 
   '@babel/code-frame@7.29.0':

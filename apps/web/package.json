@@ -14,9 +14,9 @@
     "test:e2e:headed": "playwright test --headed"
   },
   "dependencies": {
-    "@awari/core": "^0.0.3",
-    "@awari/protocol": "^0.0.3",
-    "@awari/transport-peerjs": "^0.0.3",
+    "@awari/core": "^0.0.4",
+    "@awari/protocol": "^0.0.4",
+    "@awari/transport-peerjs": "^0.0.4",
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
     "@kikorin/adapter": "workspace:*",
