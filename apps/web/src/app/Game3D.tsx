@@ -291,6 +291,40 @@ const crosshairStyle: CSSProperties = {
   transform: "translate(-50%, -50%)",
 };
 
+const healthBarStyle: CSSProperties = {
+  position: "absolute",
+  left: 16,
+  bottom: 16,
+  width: 220,
+  height: 20,
+  borderRadius: 4,
+  background: "rgba(0,0,0,0.55)",
+  border: "1px solid rgba(255,255,255,0.35)",
+  overflow: "hidden",
+  pointerEvents: "none",
+};
+
+const healthFillStyle: CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  width: "100%",
+  background: "#4ade80",
+  transition: "width 120ms linear, background 120ms linear",
+};
+
+const healthTextStyle: CSSProperties = {
+  position: "absolute",
+  inset: 0,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  fontFamily: "monospace",
+  fontSize: 12,
+  fontWeight: 700,
+  color: "#fff",
+  textShadow: "0 1px 2px rgba(0,0,0,0.9)",
+};
+
 const scratchVec = new Vector3();
 
 // Projects a world point to CSS screen coords; returns null if behind camera.
@@ -310,6 +344,26 @@ function CanvasViewport({
   canvasRef: RefObject<HTMLCanvasElement | null>;
 }) {
   const crosshairRef = useRef<SVGSVGElement>(null);
+  const healthFillRef = useRef<HTMLDivElement>(null);
+  const healthTextRef = useRef<HTMLDivElement>(null);
+
+  // Player health bar (ADR 0021): kikorin.ts bridges the player's SemanticPatch
+  // health onto ui:playerHealth; update the bar imperatively (no re-render).
+  useEffect(() => {
+    const onHealth = ({ health, max }: { health: number; max: number }) => {
+      const pct = max > 0 ? Math.max(0, Math.min(1, health / max)) : 0;
+      const fill = healthFillRef.current;
+      if (fill) {
+        fill.style.width = `${pct * 100}%`;
+        fill.style.background = pct > 0.5 ? "#4ade80" : pct > 0.25 ? "#facc15" : "#ef4444";
+      }
+      if (healthTextRef.current) {
+        healthTextRef.current.textContent = `${Math.ceil(health)} / ${max}`;
+      }
+    };
+    eventBus.on("ui:playerHealth", onHealth);
+    return () => eventBus.off("ui:playerHealth", onHealth);
+  }, []);
 
   useEffect(() => {
     const crosshair = crosshairRef.current;
@@ -365,6 +419,10 @@ function CanvasViewport({
         <line x1="0" y1="-11" x2="0" y2="-7" stroke="white" strokeWidth="1.5" />
         <line x1="0" y1="7" x2="0" y2="11" stroke="white" strokeWidth="1.5" />
       </svg>
+      <div style={healthBarStyle}>
+        <div ref={healthFillRef} style={healthFillStyle} />
+        <div ref={healthTextRef} style={healthTextStyle}>100 / 100</div>
+      </div>
     </div>
   );
 }

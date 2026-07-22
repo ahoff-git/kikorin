@@ -132,6 +132,10 @@ export interface PlayerConfigInput {
   bullet_spawn_forward?: number;
   bullet_spawn_up?: number;
   bullet_damage?: number;
+  /** Health pool restored on respawn (ADR 0021). Spawn the player entity with
+   * this same value for a consistent starting bar; the engine does not
+   * overwrite the spawned health on register_player. */
+  max_health?: number;
 }
 
 /** Monster spawn/respawn tuning overrides (partial; missing = engine defaults). */
@@ -207,6 +211,19 @@ export interface AiConfigInput {
   no_progress_after?: number;
   /** Minimum distance-to-goal improvement that counts as progress. */
   progress_epsilon?: number;
+  /** Combat (ADR 0021). A monster chases a player only within this horizontal
+   * distance of the player; beyond it it returns to (idles at) its spawn home.
+   * `<= 0` disables aggro-gating (chase unconditionally — the default). */
+  aggro_radius?: number;
+  /** Once aggroed, the monster gives up and walks home if it strays farther than
+   * this from home; re-aggro is suppressed until it is back within this of home.
+   * `<= 0` disables leashing. */
+  leash_radius?: number;
+  /** Horizontal reach of a monster's melee attack. */
+  melee_range?: number;
+  /** Damage one melee strike deals to the player. `<= 0` disables monster melee
+   * (the default — nothing damages the player). */
+  melee_damage?: number;
 }
 
 /**

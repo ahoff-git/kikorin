@@ -1,4 +1,5 @@
 import {
+  hudChannel,
   lifecycleChannel,
   netChannel,
   NET_BULLET,
@@ -69,11 +70,22 @@ const PERSON_HALF_W = 0.4;
 const PERSON_HALF_H = 0.9;
 const PERSON_HALF_D = 0.4;
 
-// This game never calls set_ai_config, so monsters run on AiConfig::default()
-// — matches its walk_speed exactly, so "agile"/"slow" read as genuinely
-// faster/slower than a plain monster rather than an arbitrary unrelated speed.
+// This game's only set_ai_config call passes combat fields (below); every
+// movement field is omitted, so partial-config semantics resolve them to
+// AiConfig::default() — matching MONSTER_BASE_WALK_SPEED exactly, so
+// "agile"/"slow" still read as faster/slower than a plain monster.
 const MONSTER_BASE_WALK_SPEED = 2.5;
 const MONSTER_TEMPLATES = createMonsterTemplates(MONSTER_BASE_WALK_SPEED);
+
+// Combat tuning (ADR 0021). Monsters aggro on the player within AGGRO of them,
+// give up and walk home if dragged past LEASH from their spawn, and melee the
+// player within MELEE_RANGE (damage lands on the attack's strike frame). The
+// player respawns at full MAX_HEALTH on death.
+const PLAYER_MAX_HEALTH = 100;
+const COMBAT_AGGRO_RADIUS = 14;
+const COMBAT_LEASH_RADIUS = 30;
+const COMBAT_MELEE_RANGE = 1.8;
+const COMBAT_MELEE_DAMAGE = 12;
 
 // ---- Three.js mesh factories ----
 
@@ -151,9 +163,17 @@ export async function setupGame(
   // Spawn the body (game data: position/size/health), then hand it to the
   // engine's controller — movement, jumping, and firing rules live in Rust.
   const playerEid = await engine.spawn_box_entity(
-    0, 5, 0, PERSON_HALF_W, PERSON_HALF_H, PERSON_HALF_D, 100, NET_LOCAL | NET_REPLICATED,
+    0, 5, 0, PERSON_HALF_W, PERSON_HALF_H, PERSON_HALF_D, PLAYER_MAX_HEALTH, NET_LOCAL | NET_REPLICATED,
   );
   engine.register_player(playerEid);
+  // Turn combat on (default engine config leaves it off — see ADR 0021).
+  engine.set_ai_config({
+    aggro_radius: COMBAT_AGGRO_RADIUS,
+    leash_radius: COMBAT_LEASH_RADIUS,
+    melee_range: COMBAT_MELEE_RANGE,
+    melee_damage: COMBAT_MELEE_DAMAGE,
+  });
+  engine.set_player_config({ max_health: PLAYER_MAX_HEALTH });
   recordE2EEntitySpawn("player", playerEid);
   ownership.addOwnedEntity(playerEid);
   const ownedEids: number[] = [playerEid];
@@ -193,6 +213,17 @@ export async function setupGame(
         removeObjectByEid(l.entity, { dispose: true });
         const idx = monsterEids.indexOf(l.entity);
         if (idx >= 0) monsterEids.splice(idx, 1);
+      }
+    }
+  });
+
+  // --- Player health HUD (ADR 0021) ---
+  // The player's health rides its SemanticPatch every tick; bridge it to the
+  // health-bar overlay via the UI event bus.
+  const unsubHealth = hudChannel.subscribe(() => {
+    for (const s of hudChannel.getSnapshot()) {
+      if (s.entity === playerEid && s.health !== undefined) {
+        eventBus.emit("ui:playerHealth", { health: Math.max(0, s.health), max: PLAYER_MAX_HEALTH });
       }
     }
   });
@@ -404,6 +435,7 @@ export async function setupGame(
     if (canvas && document.pointerLockElement === canvas) document.exitPointerLock();
     unsubLifecycle();
     unsubNet();
+    unsubHealth();
     director.dispose();
   }
 

@@ -107,6 +107,22 @@ pub struct AiConfig {
     pub no_progress_after: f32,
     /// Minimum distance-to-goal improvement that counts as progress.
     pub progress_epsilon: f32,
+    /// Combat (ADR 0021). A monster chases a player only within this horizontal
+    /// distance; beyond it, it returns to (idles at) its spawn "home". `<= 0`
+    /// disables aggro-gating — monsters chase unconditionally (legacy default).
+    pub aggro_radius: f32,
+    /// Once aggroed, a monster gives up and walks home if it strays farther than
+    /// this from its home. `<= 0` disables leashing (chase forever once aggroed).
+    /// Re-aggro is suppressed until the monster is back within this of home, so
+    /// a player kiting it out to the leash edge can't re-trigger a flicker.
+    pub leash_radius: f32,
+    /// Horizontal reach of a monster's melee attack: within it, the monster stops
+    /// and plays its attack; damage lands on the strike frame if the player is
+    /// still inside `melee_range` (ADR 0021).
+    pub melee_range: f32,
+    /// Damage one melee strike deals to the player. `<= 0` disables monster melee
+    /// entirely (legacy default — nothing damages the player).
+    pub melee_damage: i32,
 }
 
 impl Default for AiConfig {
@@ -129,6 +145,12 @@ impl Default for AiConfig {
             separation_radius: 2.0,
             no_progress_after: 2.0,
             progress_epsilon: 0.25,
+            // Combat off by default (opt-in per ADR 0021): unbounded chase, no
+            // leash, no melee — preserves every game/test that predates combat.
+            aggro_radius: 0.0,
+            leash_radius: 0.0,
+            melee_range: 1.8,
+            melee_damage: 0,
         }
     }
 }
@@ -212,6 +234,11 @@ pub struct PlayerConfig {
     pub bullet_spawn_forward: f32,
     pub bullet_spawn_up: f32,
     pub bullet_damage: i32,
+    /// The player's health pool. `respawn_player` restores to this on death
+    /// (ADR 0021); spawn the player entity with this same value for a
+    /// consistent starting bar. The engine does not overwrite the spawned
+    /// entity's health on `register_player`.
+    pub max_health: i32,
 }
 
 impl Default for PlayerConfig {
@@ -225,6 +252,7 @@ impl Default for PlayerConfig {
             bullet_spawn_forward: 1.1,
             bullet_spawn_up: 0.4,
             bullet_damage: 50,
+            max_health: 100,
         }
     }
 }
@@ -295,6 +323,9 @@ struct PlayerState {
     jumps_used: u32,
     prev_jump_held: bool,
     input: PlayerInput,
+    /// Position captured at register_player time; the player respawns here on
+    /// death (ADR 0021).
+    spawn: [f32; 3],
 }
 
 /// One static terrain block as supplied by the game's map data.
@@ -458,6 +489,12 @@ struct MonsterState {
     /// Per-monster goal override (set_monster_goal); None = the engine-wide
     /// default goal (update_monster_goal).
     goal: Option<[f32; 2]>,
+    /// Leash anchor: the monster's spawn XZ. It returns here when not aggroed
+    /// (ADR 0021). Captured in register_spawned from the spawn position.
+    home: [f32; 2],
+    /// Sticky aggro state: true once a player entered aggro_radius, cleared when
+    /// the monster leashes back past leash_radius from home (ADR 0021).
+    aggroed: bool,
     // Frustration escalation (specs/engine): moving-but-not-closing
     // detection — complements the stuck sampler, which only catches
     // zero movement.
@@ -468,7 +505,7 @@ struct MonsterState {
 }
 
 impl MonsterState {
-    fn new(initial_replan_cooldown: f32) -> Self {
+    fn new(initial_replan_cooldown: f32, home: [f32; 2]) -> Self {
         Self {
             route: None,
             replan_cooldown: initial_replan_cooldown,
@@ -479,6 +516,8 @@ impl MonsterState {
             last_sample_z: f32::INFINITY,
             stuck_sample_timer: 0.0,
             goal: None,
+            home,
+            aggroed: false,
             progress_goal: [f32::INFINITY, f32::INFINITY],
             best_goal_dist: f32::INFINITY,
             progress_timer: 0.0,
@@ -1078,12 +1117,17 @@ impl Engine {
     /// (facing, movement, jump budget) from set_player_input, fires its bullets
     /// via player_fire, and aims the default monster goal at it every tick.
     pub fn register_player(&mut self, eid: u32) {
+        // Capture the spawn position as the respawn point (ADR 0021). Health is
+        // left as the game spawned it — PlayerConfig::max_health is the respawn
+        // target, not an override applied here.
+        let spawn = self.world.position(eid).unwrap_or([0.0, 0.0, 0.0]);
         self.player = Some(PlayerState {
             eid,
             yaw: 0.0,
             jumps_used: 0,
             prev_jump_held: false,
             input: PlayerInput::default(),
+            spawn,
         });
     }
 
@@ -1107,6 +1151,10 @@ impl Engine {
     /// behavior for games that don't load animations, e.g. the 2D game fires via
     /// spawn_bullet directly and never calls this). See ADR 0017.
     pub fn player_fire(&mut self) {
+        // A dying player can't shoot (ADR 0021).
+        if self.player.as_ref().is_some_and(|p| self.dying.contains(&p.eid)) {
+            return;
+        }
         if self.animation_set.is_some() {
             if let Some(eid) = self.player.as_ref().map(|p| p.eid) {
                 self.request_entity_action(eid, ANIM_KIND_ATTACK, None, None);
@@ -1271,11 +1319,19 @@ impl Engine {
         }
     }
 
-    /// Dispatch a frame event to its gameplay action. The player's attack FIRE
-    /// frame spawns the bullet, so the shot is locked to the strike frame.
+    /// Dispatch a frame event to its gameplay action. Event 1 is the attack's
+    /// strike frame; the *actor* decides its effect (ADR 0017/0021): the
+    /// player's strike spawns a bullet, a monster's strike deals melee damage to
+    /// the player. One event id, one strike frame, so the player and monsters can
+    /// share the same attack family.
     fn on_anim_event(&mut self, eid: u32, event: u16) {
-        if event == ANIM_EVENT_FIRE && self.player.as_ref().is_some_and(|p| p.eid == eid) {
+        if event != ANIM_EVENT_FIRE {
+            return;
+        }
+        if self.player.as_ref().is_some_and(|p| p.eid == eid) {
             self.fire_player_bullet();
+        } else if self.world.net_flags(eid).is_some_and(|f| f & NET_MONSTER != 0) {
+            self.monster_melee_strike(eid);
         }
     }
 
@@ -2233,7 +2289,10 @@ impl Engine {
             let stagger =
                 (id % REPLAN_STAGGER_BUCKETS) as f32 / REPLAN_STAGGER_BUCKETS as f32
                     * self.ai.replan_cooldown;
-            self.monster_states.insert(id, MonsterState::new(stagger));
+            // Home = spawn XZ (set_position ran before this in every spawn path)
+            // — the leash anchor the monster returns to when not aggroed.
+            let home = self.world.position(id).map_or([0.0, 0.0], |p| [p[0], p[2]]);
+            self.monster_states.insert(id, MonsterState::new(stagger, home));
         }
         self.pending_lifecycle.push(LifecyclePatch {
             entity: id,
@@ -2270,6 +2329,11 @@ impl Engine {
         // closest_player_position see it — as long as this stays a no-op so
         // it never overwrites the TS-driven velocity with default input.
         if self.physics.dimension() == Dimension::TwoD {
+            return;
+        }
+        // A dying player is frozen while its death animation plays out
+        // (begin_death zeroed its velocity; respawn restores control) — ADR 0021.
+        if self.player.as_ref().is_some_and(|p| self.dying.contains(&p.eid)) {
             return;
         }
         // The current animation gates which inputs apply (rooted attack, etc.).
@@ -2724,6 +2788,19 @@ impl Engine {
         })
     }
 
+    /// True while a monster is mid-attack (its instance is on the attack family
+    /// and hasn't finished) — the melee pass keeps it rooted until the swing
+    /// completes (ADR 0021).
+    fn monster_is_attacking(&self, mid: u32) -> bool {
+        let Some(set) = self.animation_set.as_ref() else {
+            return false;
+        };
+        let attack_fam = set.family_for_action(ANIM_KIND_ATTACK, None);
+        self.animation_states
+            .get(&mid)
+            .is_some_and(|inst| inst.family() == attack_fam && !inst.finished())
+    }
+
     /// The goal one monster paths toward: its per-entity override; else
     /// whichever player (local or a remote mirror) is currently closest to
     /// it; else the JS-set engine-wide default, used only when no player
@@ -2741,6 +2818,43 @@ impl Engine {
         match self.closest_player_position(mx, mz) {
             Some((px, pz)) => (px, pz, true),
             None => (self.goal_x, self.goal_z, false),
+        }
+    }
+
+    /// Aggro/leash layer over `goal_for` (ADR 0021), updating the monster's
+    /// sticky aggro state. When aggro is disabled (`aggro_radius <= 0`) or the
+    /// goal isn't a player chase (explicit goal / fallback), this is exactly
+    /// `goal_for` — so every pre-combat game and the `goal_for` unit tests are
+    /// unaffected. When enabled and chasing: aggro if the player is within
+    /// `aggro_radius`; once aggroed, keep chasing until the monster strays past
+    /// `leash_radius` from home, then walk home (`chasing = false`). Re-aggro is
+    /// gated on being back within `leash_radius` of home, so kiting to the leash
+    /// edge can't cause aggro flicker.
+    fn resolve_goal(&mut self, mid: u32, mx: f32, mz: f32) -> (f32, f32, bool) {
+        let (gx, gz, chasing) = self.goal_for(mid, mx, mz);
+        if !chasing || self.ai.aggro_radius <= 0.0 {
+            return (gx, gz, chasing);
+        }
+        let aggro_sq = self.ai.aggro_radius * self.ai.aggro_radius;
+        let leash = self.ai.leash_radius;
+        let Some(state) = self.monster_states.get_mut(&mid) else {
+            return (gx, gz, chasing);
+        };
+        let home = state.home;
+        let d_player_sq = (gx - mx).powi(2) + (gz - mz).powi(2);
+        let d_home_sq = (mx - home[0]).powi(2) + (mz - home[1]).powi(2);
+        let within_leash = leash <= 0.0 || d_home_sq <= leash * leash;
+        if state.aggroed {
+            if !within_leash {
+                state.aggroed = false;
+            }
+        } else if d_player_sq <= aggro_sq && within_leash {
+            state.aggroed = true;
+        }
+        if state.aggroed {
+            (gx, gz, true)
+        } else {
+            (home[0], home[1], false)
         }
     }
 
@@ -2787,6 +2901,36 @@ impl Engine {
                 };
                 let capability = this.capability_for(mid);
 
+                // Melee (ADR 0021): opt-in via ai.melee_damage > 0. In reach of a
+                // player → stop and attack; the strike frame deals the damage
+                // (on_anim_event). While mid-swing (the Block attack is still
+                // playing) stay rooted and keep facing the player, so a whiff when
+                // the player steps out is decided by on_anim_event's range recheck,
+                // not by the monster abandoning the swing. Rooting with a zero
+                // velocity matches the flyer's own "reached goal" stop below, so
+                // grounded and flying monsters share this path.
+                if ai.melee_damage > 0 {
+                    let player_xz = this.closest_player_position(mx, mz);
+                    let attacking = this.monster_is_attacking(mid);
+                    let in_reach = player_xz.is_some_and(|(px, pz)| {
+                        (px - mx).powi(2) + (pz - mz).powi(2) <= ai.melee_range * ai.melee_range
+                    });
+                    if attacking || in_reach {
+                        if in_reach && !attacking {
+                            this.request_entity_action(mid, ANIM_KIND_ATTACK, None, None);
+                        }
+                        this.world.set_velocity(mid, [0.0, 0.0, 0.0]);
+                        if !is_2d {
+                            if let Some((px, pz)) = player_xz {
+                                let yaw = (px - mx).atan2(pz - mz);
+                                this.world.set_rotation(mid, [yaw, 0.0, 0.0]);
+                                this.world.mark_dirty(mid, DirtyFlags::TRANSFORM);
+                            }
+                        }
+                        continue;
+                    }
+                }
+
                 // Flying skips the navmesh/pathfinding system entirely — no
                 // waypoints, just steer straight at the goal's real 3D
                 // position (unlike grounded movers, which only ever care
@@ -2797,18 +2941,15 @@ impl Engine {
                 // nonzero_ecs_velocity_y_is_a_one_frame_jump_impulse /
                 // zero_ecs_velocity_y_preserves_gravity_accumulation tests.
                 if capability.can_fly {
-                    // Goal precedence mirrors goal_for, but duplicated rather
-                    // than shared: goal_for is grounded-only (X/Z), while a
-                    // flying monster additionally needs a sensible altitude when
-                    // the goal has none of its own (hold current Y).
-                    let (goal_x, goal_y, goal_z) = if let Some(g) =
-                        this.monster_states.get(&mid).and_then(|s| s.goal)
-                    {
-                        (g[0], my, g[1])
-                    } else if let Some((px, py, pz)) = this.closest_player_position_3d(mx, mz) {
-                        (px, py, pz)
+                    // XZ goal + aggro/leash from the shared resolver (ADR 0021).
+                    // Altitude tracks the player only while actually chasing; when
+                    // returning home / on a fallback / explicit goal, hold current
+                    // Y (the goal carries no altitude of its own).
+                    let (goal_x, goal_z, chasing) = this.resolve_goal(mid, mx, mz);
+                    let goal_y = if chasing {
+                        this.closest_player_position_3d(mx, mz).map_or(my, |(_, py, _)| py)
                     } else {
-                        (this.goal_x, my, this.goal_z)
+                        my
                     };
                     let dx = goal_x - mx;
                     let dy = goal_y - my;
@@ -2870,10 +3011,11 @@ impl Engine {
                 // monster dimensions are caller-supplied, so read the collider.
                 let foot_y = my - this.world.collider(mid).map_or(0.0, |c| c.half_height);
 
-                // Goal + source: goal_for also reports whether this is the
+                // Goal + source: resolve_goal reports whether this is the
                 // shared player chase (flow-field strategy) or a unique goal
-                // (key-route/A* strategy), which the dispatcher below needs.
-                let (goal_x, goal_z, chasing_player) = this.goal_for(mid, mx, mz);
+                // (key-route/A* strategy / leash-home), which the dispatcher
+                // below needs, and updates aggro/leash state (ADR 0021).
+                let (goal_x, goal_z, chasing_player) = this.resolve_goal(mid, mx, mz);
                 let dx = goal_x - mx;
                 let dz = goal_z - mz;
                 let dist = (dx * dx + dz * dz).sqrt();
@@ -3483,13 +3625,90 @@ impl Engine {
         }
     }
 
-    /// Despawn a dead entity; monsters respawn per MonsterConfig.
+    /// Despawn a dead entity; monsters respawn per MonsterConfig. The player is
+    /// never destroyed — it respawns in place instead (ADR 0021), so its entity
+    /// id, controller registration, and mesh survive the death.
     fn finish_death(&mut self, id: u32) {
+        if self.player.as_ref().is_some_and(|p| p.eid == id) {
+            self.respawn_player();
+            return;
+        }
         let was_monster = self.world.net_flags(id).is_some_and(|f| f & NET_MONSTER != 0);
         self.dying.remove(&id);
         self.destroy_entity(id);
         if was_monster && self.monster_cfg.respawn {
             self.respawn_monster();
+        }
+    }
+
+    /// A monster's attack strike connected: deal melee damage to the local player
+    /// if it's still within `melee_range` at this frame (a swing the player
+    /// dodged out of whiffs). Only the local registered player is a target —
+    /// remote mirrors are their own engine's authority (ADR 0021).
+    fn monster_melee_strike(&mut self, mid: u32) {
+        if self.ai.melee_damage <= 0 {
+            return;
+        }
+        let Some([mx, _, mz]) = self.world.position(mid) else {
+            return;
+        };
+        let Some(player_eid) = self.player.as_ref().map(|p| p.eid) else {
+            return;
+        };
+        if self.dying.contains(&player_eid) {
+            return;
+        }
+        let Some(ppos) = self.world.position(player_eid) else {
+            return;
+        };
+        let d_sq = (ppos[0] - mx).powi(2) + (ppos[2] - mz).powi(2);
+        if d_sq > self.ai.melee_range * self.ai.melee_range {
+            return;
+        }
+        self.damage_player(self.ai.melee_damage);
+    }
+
+    /// Apply `dmg` to the player: non-lethal plays a quick hurt flinch, lethal
+    /// starts the death → respawn flow (ADR 0021). Mirrors the monster damage
+    /// settlement in `tick_bullets`. No-op if the player is already dying.
+    fn damage_player(&mut self, dmg: i32) {
+        let Some(eid) = self.player.as_ref().map(|p| p.eid) else {
+            return;
+        };
+        if self.dying.contains(&eid) {
+            return;
+        }
+        let Some(hp) = self.world.health(eid) else {
+            return;
+        };
+        let hp = hp - dmg;
+        self.world.set_health(eid, hp);
+        self.world.mark_dirty(eid, DirtyFlags::HEALTH);
+        if hp <= 0 {
+            self.begin_death(eid);
+        } else {
+            self.request_entity_action(eid, ANIM_KIND_HURT, None, None);
+        }
+    }
+
+    /// Revive the player at its registered spawn with a full health pool
+    /// (`PlayerConfig::max_health`), clearing the dying state and resetting the
+    /// animation to idle. The entity is reused, not recreated (ADR 0021).
+    fn respawn_player(&mut self) {
+        let Some((eid, spawn)) = self.player.as_ref().map(|p| (p.eid, p.spawn)) else {
+            return;
+        };
+        self.dying.remove(&eid);
+        self.world.set_health(eid, self.player_cfg.max_health);
+        self.world.mark_dirty(eid, DirtyFlags::HEALTH);
+        self.teleport_entity(eid, spawn[0], spawn[1], spawn[2]);
+        self.world.set_velocity(eid, [0.0, 0.0, 0.0]);
+        // Drop the death instance so the next tick rebuilds it at idle rather
+        // than holding the last death frame.
+        self.animation_states.remove(&eid);
+        if let Some(p) = self.player.as_mut() {
+            p.jumps_used = 0;
+            p.prev_jump_held = false;
         }
     }
 }
@@ -4134,6 +4353,115 @@ mod tests {
         }
         assert!(engine.world.position(monster).is_none(), "despawns when the death animation finishes");
         assert!(!engine.dying.contains(&monster));
+    }
+
+    // --- Combat: aggro / leash / melee / player death (ADR 0021) ---
+
+    #[test]
+    fn aggro_radius_gates_the_chase() {
+        let mut engine = engine_with_flat_floor();
+        engine.ai.aggro_radius = 5.0; // leash disabled (0)
+        let player = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        engine.register_player(player);
+        // Home = spawn (20, 0), well outside aggro_radius of the origin player.
+        let m = engine.spawn_box_entity(20.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_LOCAL | NET_MONSTER);
+        // At home, the player is 20 away (> 5) → not aggroed → goal is home.
+        assert_eq!(engine.resolve_goal(m, 20.0, 0.0), (20.0, 0.0, false));
+        // Query as if the monster were within 5 of the origin player → aggroes.
+        let (gx, gz, chasing) = engine.resolve_goal(m, 3.0, 0.0);
+        assert!(chasing, "within aggro_radius → chases");
+        assert_eq!((gx, gz), (0.0, 0.0), "chases the player's position");
+    }
+
+    #[test]
+    fn leash_pulls_a_strayed_monster_home_without_flicker() {
+        let mut engine = engine_with_flat_floor();
+        engine.ai.aggro_radius = 100.0; // aggroes easily
+        engine.ai.leash_radius = 8.0;
+        let player = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        engine.register_player(player);
+        let m = engine.spawn_box_entity(10.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_LOCAL | NET_MONSTER);
+        // Near home (0 ≤ 8) with a player in range → aggroes and chases.
+        let (gx, _, chasing) = engine.resolve_goal(m, 10.0, 0.0);
+        assert!(chasing && gx == 0.0, "aggroes and chases when near home");
+        // Chased out to 9.5 from home (> 8) → leash breaks; walks home.
+        let (gx2, gz2, chasing2) = engine.resolve_goal(m, 0.5, 0.0);
+        assert!(!chasing2, "strayed past leash → de-aggroes");
+        assert_eq!((gx2, gz2), (10.0, 0.0), "heads home");
+        // Still out past leash: no re-aggro even though the player is close (no flicker).
+        let (_, _, chasing3) = engine.resolve_goal(m, 0.5, 0.0);
+        assert!(!chasing3, "re-aggro suppressed until back within leash of home");
+    }
+
+    #[test]
+    fn melee_is_off_by_default() {
+        let mut engine = engine_with_flat_floor();
+        let player = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        engine.register_player(player);
+        let m = engine.spawn_box_entity(0.5, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_LOCAL | NET_MONSTER);
+        engine.monster_melee_strike(m); // default melee_damage = 0
+        assert_eq!(engine.world.health(player), Some(100), "no melee damage by default");
+    }
+
+    #[test]
+    fn melee_strike_lands_in_range_and_whiffs_out_of_range() {
+        let mut engine = engine_with_flat_floor();
+        engine.ai.melee_damage = 25;
+        engine.ai.melee_range = 2.0;
+        let player = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        engine.register_player(player);
+        let m = engine.spawn_box_entity(10.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_LOCAL | NET_MONSTER);
+        // 10 units away (> 2) → the swing whiffs.
+        engine.monster_melee_strike(m);
+        assert_eq!(engine.world.health(player), Some(100), "out-of-range strike whiffs");
+        // Adjacent → the swing connects.
+        engine.teleport_entity(m, 1.0, 0.9, 0.0);
+        engine.monster_melee_strike(m);
+        assert_eq!(engine.world.health(player), Some(75), "in-range strike lands");
+    }
+
+    #[test]
+    fn monster_in_reach_attacks_and_damages_the_player_on_the_strike_frame() {
+        let mut engine = engine_with_flat_floor();
+        engine.animation_set = Some(fire_on_frame1_anim_set()); // strike (FIRE) on frame 1
+        engine.ai.melee_damage = 30;
+        engine.ai.melee_range = 2.0;
+        let player = engine.spawn_box_entity(0.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        engine.register_player(player);
+        // Within reach (1 unit) — no navmesh needed; the melee pass roots + attacks.
+        let _m = engine.spawn_box_entity(1.0, 0.9, 0.0, 0.4, 0.9, 0.4, 50, NET_LOCAL | NET_MONSTER);
+        let start = engine.world.health(player).unwrap();
+        // Attack is 3×100 ms; frame 1 (strike) begins ~tick 25. Cross it.
+        for _ in 0..40 {
+            engine.tick_core(0.004);
+        }
+        assert!(
+            engine.world.health(player).unwrap() < start,
+            "monster melee reduced the player's health on the strike frame",
+        );
+    }
+
+    #[test]
+    fn lethal_damage_respawns_the_player_in_place_at_full_health() {
+        let mut engine = engine_with_flat_floor();
+        engine.animation_set = Some(fire_on_frame1_anim_set()); // death = 2×100 ms hold_last
+        engine.player_cfg.max_health = 100;
+        // Spawn away from origin so the respawn teleport is observable.
+        let player = engine.spawn_box_entity(5.0, 0.9, 0.0, 0.4, 0.9, 0.4, 100, NET_LOCAL);
+        engine.register_player(player);
+        engine.world.set_health(player, 10);
+        engine.damage_player(999);
+        assert!(engine.dying.contains(&player), "lethal damage starts the death");
+        assert!(engine.world.position(player).is_some(), "player entity is not destroyed");
+        // Shove the frozen player elsewhere → respawn must teleport it back home.
+        engine.teleport_entity(player, 12.0, 0.9, 0.0);
+        for _ in 0..60 {
+            engine.tick_core(0.004);
+        }
+        assert!(!engine.dying.contains(&player), "respawned — no longer dying");
+        assert_eq!(engine.world.health(player), Some(100), "respawn restores full health");
+        let pos = engine.world.position(player).unwrap();
+        assert!((pos[0] - 5.0).abs() < 0.6, "respawns at the registered spawn: {pos:?}");
     }
 
     #[test]
@@ -4899,7 +5227,7 @@ mod tests {
     #[test]
     fn frustration_escalates_on_no_progress_and_resets_on_real_progress() {
         let ai = AiConfig::default();
-        let mut state = MonsterState::new(0.0);
+        let mut state = MonsterState::new(0.0, [0.0, 0.0]);
 
         // First observation baselines (goal "moved" from the INFINITY init).
         assert!(!state.update_progress(&ai, 0.1, 10.0, [10.0, 0.0]));
