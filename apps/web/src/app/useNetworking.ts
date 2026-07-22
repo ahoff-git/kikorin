@@ -23,11 +23,12 @@
 // exact peer" primitive.
 
 import { log, logLevels } from "@kikorin/util";
-import { netChannel } from "@kikorin/adapter";
+import { lifecycleChannel, netChannel, NET_BULLET, NET_REPLICATED } from "@kikorin/adapter";
 import { applyToObjectByEid } from "@kikorin/system-rendering";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createAwari, type Transport } from "@awari/core";
 import type { PeerRef, RoomSession } from "@awari/protocol";
+import { createEntityHandoff, type EntityHandoffController } from "./entityHandoff";
 import { createPeerJsTransport, readPeerJsId } from "@awari/transport-peerjs";
 import { createHttpBootstrapClient } from "./httpBootstrapClient";
 import { createManualBootstrapClient } from "./manualBootstrap";
@@ -67,6 +68,8 @@ export interface UseNetworkingReturn {
   leaveChatGroup: (name: string) => void;
   connect: (remotePeerId: string) => void;
   sendChatMessage: (text: string) => void;
+  /** Push-before-release transfer of a locally-owned entity's ownership + state to a connected peer (ADR 0022). */
+  transferEntity: (eid: number, toPeerId: string) => void;
   addOwnedEntity: (eid: number) => void;
   removeOwnedEntity: (eid: number) => void;
   signalEntityDestroyed: (eid: number) => void;
@@ -98,6 +101,9 @@ export function useNetworking(
   const manualAwariRef = useRef<ReturnType<typeof createAwari> | null>(null);
   const manualBootstrapRef = useRef<ReturnType<typeof createManualBootstrapClient> | null>(null);
   const chatControllerRef = useRef<ChatController | null>(null);
+  // Entity-ownership state handoff (ADR 0022) + the full PeerRefs it routes to.
+  const handoffRef = useRef<EntityHandoffController | null>(null);
+  const peersRef = useRef<Map<string, PeerRef>>(new Map());
   const selfPeerIdRef = useRef<string | null>(null);
   // Latest-value refs so the chat controller (created once per session
   // inside the effect) reads current values instead of a stale closure —
@@ -134,9 +140,17 @@ export function useNetworking(
 
       // Only the bridge call happens here — the UI's peer list comes from
       // the engine's own NetPatch (PeerJoined/PeerLeft) stream via
-      // netChannel below, same as every other piece of entity state.
-      session.onPeerJoined((peer: PeerRef) => activeEngine.net_peer_connected(peer.peerId));
-      session.onPeerLeft((peer: PeerRef) => activeEngine.net_peer_disconnected(peer.peerId));
+      // netChannel below, same as every other piece of entity state. The full
+      // PeerRef (peerId + sessionId) is kept for entity-handoff routing, which
+      // resolves peers by the whole ref, not the peerId alone.
+      session.onPeerJoined((peer: PeerRef) => {
+        peersRef.current.set(peer.peerId, peer);
+        activeEngine.net_peer_connected(peer.peerId);
+      });
+      session.onPeerLeft((peer: PeerRef) => {
+        peersRef.current.delete(peer.peerId);
+        activeEngine.net_peer_disconnected(peer.peerId);
+      });
       session.onMessage((message) => {
         // PeerJS's default serialization normalizes a sent Uint8Array back to
         // a plain ArrayBuffer on arrival, not the original TypedArray class —
@@ -179,6 +193,15 @@ export function useNetworking(
         },
         nearbyRadius,
       );
+
+      // Entity-ownership state handoff (ADR 0022) rides this same session:
+      // awari moves routing authority between peers, this transfers the
+      // entity's simulation state so the new owner continues it seamlessly.
+      // Recreated with the session (a manual connect() swaps both).
+      handoffRef.current?.dispose();
+      handoffRef.current = createEntityHandoff(session, activeEngine, selfPeerIdRef.current ?? "unknown", {
+        onError: (context, error) => log(logLevels.warning, `[handoff] ${context}`, ["network"], error),
+      });
     }
     attachSessionRef.current = attachSession;
 
@@ -263,6 +286,9 @@ export function useNetworking(
       activeEngine.onNetOut(null);
       chatControllerRef.current?.dispose();
       chatControllerRef.current = null;
+      handoffRef.current?.dispose();
+      handoffRef.current = null;
+      peersRef.current.clear();
       void sessionRef.current?.close();
       sessionRef.current = null;
       void transport?.destroy();
@@ -305,6 +331,56 @@ export function useNetworking(
     });
     return unsub;
   }, []);
+
+  // Entity-handoff bookkeeping: a locally-owned, handoff-eligible entity's
+  // lifecycle drives its awari ownership. Eligible = NET_REPLICATED, not a
+  // bullet (too short-lived to hand off), and not the local player (each peer
+  // always owns its own). Spawned → claim routing authority; despawned →
+  // release it (a handoff release already forgot the mapping, so untrackLocal
+  // no-ops there). The engine emits these only for local entities, never
+  // mirrors, so we only ever claim things we actually own.
+  useEffect(() => {
+    const unsub = lifecycleChannel.subscribe(() => {
+      const handoff = handoffRef.current;
+      if (!handoff) return;
+      for (const l of lifecycleChannel.getSnapshot()) {
+        const eligible =
+          (l.flags & NET_REPLICATED) !== 0 &&
+          (l.flags & NET_BULLET) === 0 &&
+          l.entity !== playerEidRef.current;
+        if (!eligible) continue;
+        if (l.kind === "spawned") handoff.trackLocal(l.entity);
+        else handoff.untrackLocal(l.entity);
+      }
+    });
+    return unsub;
+  }, []);
+
+  // Push-before-release transfer of a locally-owned entity to a connected peer
+  // (ADR 0022). Routing needs the peer's full PeerRef, tracked from onPeerJoined.
+  const transferEntity = useCallback((eid: number, toPeerId: string) => {
+    const handoff = handoffRef.current;
+    const peer = peersRef.current.get(toPeerId);
+    if (!handoff || !peer) return;
+    void handoff.transfer(eid, peer);
+  }, []);
+
+  // E2E hook: lets a two-peer test drive a handoff and read ownership. Gated on
+  // the ?e2e flag so it never exists in a normal session.
+  useEffect(() => {
+    if (typeof window === "undefined" || !new URLSearchParams(window.location.search).has("e2e")) {
+      return;
+    }
+    const w = window as unknown as { __KIKORIN_HANDOFF__?: unknown };
+    w.__KIKORIN_HANDOFF__ = {
+      transfer: (eid: number, toPeerId: string) => transferEntity(eid, toPeerId),
+      ownedEids: () => handoffRef.current?.ownedEids() ?? [],
+      peers: () => [...peersRef.current.keys()],
+    };
+    return () => {
+      delete w.__KIKORIN_HANDOFF__;
+    };
+  }, [transferEntity]);
 
   // Manual override: join a private ad hoc room keyed by a pasted PeerJS id,
   // replacing whatever room we were previously in (the shared game room, by
@@ -372,6 +448,7 @@ export function useNetworking(
     leaveChatGroup,
     connect,
     sendChatMessage,
+    transferEntity,
     addOwnedEntity,
     removeOwnedEntity,
     signalEntityDestroyed,

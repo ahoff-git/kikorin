@@ -14,6 +14,18 @@ export class Engine {
      */
     add_monster_nudge(id: number, nx: number, ny: number, nz: number): void;
     /**
+     * Adopt an entity from another peer's `entity_snapshot` as a new,
+     * locally-owned, fully-simulated entity (ADR 0022) — the receiving half of
+     * an ownership handoff. Restores position/velocity/rotation/health/
+     * collider/animation so simulation continues seamlessly, and (via
+     * `register_spawned`) enrolls it in local simulation + replication, monster
+     * AI if NET_MONSTER, and the game's mesh lifecycle. Returns the new local
+     * eid, or `u32::MAX` on malformed input. The entity's stable cross-peer
+     * identity (the awari `EntityId`) is owned by the TS layer, which maps it
+     * to this returned eid.
+     */
+    adopt_entity(payload: Uint8Array): number;
+    /**
      * Build (or rebuild) the navmesh by scanning floor geometry via the physics world.
      * Bounds are derived from the loaded floor entities (AABB padded by one cell), so
      * maps of any size and location work without engine changes.
@@ -52,6 +64,15 @@ export class Engine {
      * `"3d"`. Introspection only; the choice was fixed at construction.
      */
     dimension(): string;
+    /**
+     * Serialize an owned entity's full transferable state for an ownership
+     * handoff (ADR 0022). The TS layer sends these bytes to the peer receiving
+     * ownership (push-before-release), which reconstructs the entity via
+     * `adopt_entity`. Returns empty bytes if the entity has no net profile
+     * (never existed / already gone). Read-only — the entity keeps simulating
+     * on this peer until the handoff is committed and it's destroyed here.
+     */
+    entity_snapshot(id: number): Uint8Array;
     /**
      * Find a path from (startX, startY, startZ) to (goalX, goalZ).
      */

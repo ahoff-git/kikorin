@@ -36,6 +36,7 @@ Lightweight architecture decision record (ADR) log for kikorin.
 - [0019: Animation authoring contract & graceful degradation](./0019-animation-authoring-contract-and-graceful-degradation.md)
 - [0020: Death animation flow (the dying state), hurt, and a non-evicting bake cache](./0020-death-animation-flow-and-cache-growth.md)
 - [0021: Combat — aggro/leash, monster melee, and player death/respawn](./0021-combat-aggro-leash-and-player-damage.md)
+- [0022: Entity-ownership state handoff over awari](./0022-entity-ownership-state-handoff.md)
 
 ## Open Questions
 

@@ -1,0 +1,17 @@
+{
+  "comment": "Dependency-free unit-test build for entityHandoff (ADR 0022): compile the pure orchestrator + its node:test spec to CommonJS, then `node --test` the output. Kept separate from the Next tsconfig, which is noEmit and DOM-flavored.",
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "outDir": ".handoff-test-dist",
+    "rootDir": "src/app",
+    "types": ["node"],
+    "lib": ["es2022"]
+  },
+  "include": ["src/app/entityHandoff.ts", "src/app/entityHandoff.test.ts"]
+}

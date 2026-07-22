@@ -2129,6 +2129,92 @@ impl Engine {
         self.delta_tracker.forget(id);
     }
 
+    /// Serialize an owned entity's full transferable state for an ownership
+    /// handoff (ADR 0022). The TS layer sends these bytes to the peer receiving
+    /// ownership (push-before-release), which reconstructs the entity via
+    /// `adopt_entity`. Returns empty bytes if the entity has no net profile
+    /// (never existed / already gone). Read-only — the entity keeps simulating
+    /// on this peer until the handoff is committed and it's destroyed here.
+    pub fn entity_snapshot(&self, id: u32) -> Vec<u8> {
+        let Some(net_flags) = self.world.net_flags(id) else {
+            return Vec::new();
+        };
+        let collider = self.world.collider(id).map(|c| ColliderBp {
+            active: c.active,
+            sensor: c.sensor,
+            hw: c.half_width,
+            hh: c.half_height,
+            hd: c.half_depth,
+        });
+        let anim = self
+            .world
+            .anim_cell(id)
+            .map(|c| (c.anim_id, c.frame, c.dir));
+        let snapshot = HandoffSnapshot {
+            position: self.world.position(id),
+            velocity: self.world.velocity(id),
+            rotation: self.world.rotation(id),
+            net_flags,
+            health: self.world.health(id),
+            collider,
+            anim,
+        };
+        bincode::encode_to_vec(&snapshot, bincode::config::standard()).unwrap_or_default()
+    }
+
+    /// Adopt an entity from another peer's `entity_snapshot` as a new,
+    /// locally-owned, fully-simulated entity (ADR 0022) — the receiving half of
+    /// an ownership handoff. Restores position/velocity/rotation/health/
+    /// collider/animation so simulation continues seamlessly, and (via
+    /// `register_spawned`) enrolls it in local simulation + replication, monster
+    /// AI if NET_MONSTER, and the game's mesh lifecycle. Returns the new local
+    /// eid, or `u32::MAX` on malformed input. The entity's stable cross-peer
+    /// identity (the awari `EntityId`) is owned by the TS layer, which maps it
+    /// to this returned eid.
+    pub fn adopt_entity(&mut self, payload: &[u8]) -> u32 {
+        let Ok((snap, _)) =
+            bincode::decode_from_slice::<HandoffSnapshot, _>(payload, bincode::config::standard())
+        else {
+            return u32::MAX;
+        };
+        let id = self.world.create_entity();
+        if let Some(p) = snap.position {
+            self.world.set_position(id, p);
+        }
+        self.world.set_net_flags(id, snap.net_flags);
+        if let Some(hp) = snap.health {
+            self.world.set_health(id, hp);
+        }
+        if let Some(c) = snap.collider {
+            self.world.set_collider(
+                id,
+                ColliderConfig {
+                    active: c.active,
+                    sensor: c.sensor,
+                    half_width: c.hw,
+                    half_height: c.hh,
+                    half_depth: c.hd,
+                },
+            );
+        }
+        if let Some((anim_id, frame, dir)) = snap.anim {
+            self.world.set_anim_cell(id, ecs::AnimCell { anim_id, frame, dir });
+        }
+        // register_spawned reads position for a monster's leash home and creates
+        // physics/AI state, so it runs after position/collider/flags are set.
+        self.register_spawned(id, snap.net_flags);
+        // Velocity after register_spawned: register_spawned zero-inits velocity
+        // when absent, which would clobber the carried value.
+        if let Some(v) = snap.velocity {
+            self.world.set_velocity(id, v);
+        }
+        if let Some(r) = snap.rotation {
+            self.world.set_rotation(id, r);
+        }
+        self.world.mark_dirty(id, DirtyFlags::TRANSFORM);
+        id
+    }
+
     /// Load a map from a JS array of `{ x, y, z, hw, hh, hd, kind }` blocks: spawns a
     /// static terrain entity per block, builds the navmesh from the resulting floor
     /// geometry, and returns the same blocks with `eid` added for mesh creation on the
@@ -3738,6 +3824,26 @@ struct ColliderBp {
     hd: f32,
 }
 
+/// Full transferable ECS state of one entity, for an ownership handoff between
+/// peers (ADR 0022). Distinct from `EntityBlueprint` — a handoff must be
+/// lossless on the authoritative side, so it carries velocity, rotation, and
+/// the animation cell that a fresh spawn wouldn't. Application-level state
+/// (loadout, monster capability) rides the TS handoff message, not this — the
+/// engine snapshot is pure ECS/physics state. Monster AI *internal* state
+/// (route/frustration) is deliberately not carried: the new owner re-derives it
+/// from the navmesh, exactly as it must after any leader failover.
+#[derive(Decode, Encode)]
+struct HandoffSnapshot {
+    position: Option<[f32; 3]>,
+    velocity: Option<[f32; 3]>,
+    rotation: Option<[f32; 3]>,
+    net_flags: u8,
+    health: Option<i32>,
+    collider: Option<ColliderBp>,
+    /// (anim_id, frame, dir) — so the sprite doesn't snap to frame 0 on adopt.
+    anim: Option<(u16, u16, u8)>,
+}
+
 // --- JS-serializable mirror types for serde_wasm_bindgen ---
 
 #[derive(Serialize)]
@@ -4462,6 +4568,45 @@ mod tests {
         assert_eq!(engine.world.health(player), Some(100), "respawn restores full health");
         let pos = engine.world.position(player).unwrap();
         assert!((pos[0] - 5.0).abs() < 0.6, "respawns at the registered spawn: {pos:?}");
+    }
+
+    // --- Entity ownership handoff: state snapshot/adopt (ADR 0022) ---
+
+    #[test]
+    fn entity_snapshot_round_trips_through_adopt() {
+        let mut engine = engine_with_flat_floor();
+        let src = engine.spawn_box_entity(
+            1.0, 2.0, 3.0, 0.4, 0.9, 0.4, 42, NET_LOCAL | NET_MONSTER | NET_REPLICATED,
+        );
+        engine.world.set_velocity(src, [0.5, 0.0, -0.5]);
+        engine.world.set_rotation(src, [1.2, 0.0, 0.0]);
+        engine.world.set_anim_cell(src, ecs::AnimCell { anim_id: 2, frame: 1, dir: 3 });
+
+        let bytes = engine.entity_snapshot(src);
+        assert!(!bytes.is_empty(), "snapshot of a live entity is non-empty");
+
+        let adopted = engine.adopt_entity(&bytes);
+        assert_ne!(adopted, u32::MAX, "well-formed snapshot adopts");
+        assert_ne!(adopted, src, "adoption creates a distinct local entity");
+
+        // Full ECS state carried across.
+        assert_eq!(engine.world.position(adopted), Some([1.0, 2.0, 3.0]));
+        assert_eq!(engine.world.velocity(adopted), Some([0.5, 0.0, -0.5]), "velocity survives (not zeroed by register_spawned)");
+        assert_eq!(engine.world.rotation(adopted), Some([1.2, 0.0, 0.0]));
+        assert_eq!(engine.world.health(adopted), Some(42));
+        assert_eq!(engine.world.anim_cell(adopted), Some(ecs::AnimCell { anim_id: 2, frame: 1, dir: 3 }));
+        assert!(engine.world.net_flags(adopted).is_some_and(|f| f & NET_LOCAL != 0), "adopted entity is locally owned");
+
+        // Enrolled in local simulation + monster AI, exactly like a fresh spawn.
+        assert!(engine.local_entities.contains(&adopted), "adopted entity is locally simulated + replicated");
+        assert!(engine.monster_states.contains_key(&adopted), "adopted monster gets AI state");
+    }
+
+    #[test]
+    fn adopt_entity_rejects_malformed_snapshot() {
+        let mut engine = engine_with_flat_floor();
+        assert_eq!(engine.adopt_entity(&[0xff, 0x00, 0x13]), u32::MAX, "garbage bytes don't spawn an entity");
+        assert_eq!(engine.entity_snapshot(9999), Vec::<u8>::new(), "snapshot of a nonexistent entity is empty");
     }
 
     #[test]

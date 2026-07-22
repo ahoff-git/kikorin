@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.handoff-test.json && node --test .handoff-test-dist/entityHandoff.test.js",
     "test:e2e": "playwright test",
     "test:e2e:stress": "playwright test monster-tps-stress",
     "test:e2e:headed": "playwright test --headed"

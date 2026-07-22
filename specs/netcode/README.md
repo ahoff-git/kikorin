@@ -26,6 +26,41 @@ Every client joins one shared game room (`gameRoom.ts`'s `roomId`, overridable v
 
 `connect(remotePeerId)` remains as a manual override, joining a private ad hoc room keyed by the pasted id instead of the shared game room — useful for testing or a session deliberately kept separate. This is a direct dial, not discovery, so it keeps its own dedicated bootstrap client (`manualBootstrap.ts`) and `awari` instance rather than going through the real service.
 
+### Entity-Ownership State Handoff (ADR 0022)
+Awari (ADR 0020) can move an entity's **routing authority** between peers to
+load-balance; kikorin owns transferring the entity's **simulation state** so the
+new owner continues it seamlessly. The state handoff rides the same awari session
+as netcode + chat (control messages tagged `kind: "kikorin-handoff"`, ignored by
+`net_ingest`'s binary check like chat's tag), orchestrated in
+`apps/web/src/app/entityHandoff.ts`.
+
+- **Engine primitives** (WASM): `entity_snapshot(eid) → bytes` serializes an
+  owned entity's full ECS state (position/velocity/rotation/health/collider/anim
+  — richer than a `spawn_entity` blueprint, so the cutover is lossless);
+  `adopt_entity(bytes) → eid` reconstructs it as a new locally-owned, simulated
+  entity (via `register_spawned`, so it re-enters simulation, replication, and
+  monster AI). Release is just `destroy_entity` on the old owner. Monster AI
+  *internal* state (route/frustration) is not carried — the new owner re-derives
+  it, like after a leader failover.
+- **Flow — push-before-release**: owner X snapshots the entity and sends it to
+  recipient Y (`offer`); Y stashes it and agrees (`ack`); X stops simulating
+  (`destroy_entity`) + relinquishes awari ownership (`releaseEntity`) + tells Y
+  (`commit`); Y claims (`claimEntity`), and the resulting `onEntityOwned` adopts
+  the stashed snapshot. Each handoff-eligible local entity (`NET_REPLICATED`,
+  not a bullet, not the local player) claims a stable `EntityId` (`"<peer>:<eid>"`)
+  on spawn and releases it on despawn, driven off the lifecycle patches.
+- **Recipient claim retry**: awari's `claimEntity` is genesis-only (no-ops if the
+  entity still exists), so if X's release-delta is reordered behind the `commit`
+  (only possible when the two peers are relay-connected, not direct), Y's claim
+  no-ops; it retries a few times until the release lands. Directly-connected
+  peers are ordered and never race.
+- **Limitation — third-party mirror blink**: the wire `Spawn`/`Delta` carry no
+  stable cross-peer id (entity ids are per-sender), so to *other* peers a handoff
+  looks like the old owner's mirror despawning and the new owner's spawning — a
+  brief visual reset. The handoff is lossless on the authoritative side (Y gets
+  X's exact state); seamless third-party continuity would need threading the
+  `EntityId` through the wire protocol, deferred.
+
 ### Disconnect Model
 Explicit: awari's `onPeerLeft` (the room leader detecting a member's connection closing and broadcasting it, or this client's own leader connection dropping) calls `net_peer_disconnected` — mirrors despawn and `PeerLeft` reaches the UI next tick. Backstop: peers silent past `PEER_TIMEOUT_SECS` are dropped the same way (healthy peers `Ping` when otherwise quiet for `PING_INTERVAL_SECS`) — this covers a leader that's alive but silently partitioned, which awari v0's reactive-only failover (no phi-accrual yet) wouldn't otherwise catch.
 
@@ -39,4 +74,4 @@ Explicit: awari's `onPeerLeft` (the room leader detecting a member's connection 
 `ecs` (World reads/writes), `bincode`. Nothing else — no wasm, no transport.
 
 ### Verification
-`cargo test -p netcode` — Spawn-then-Delta sequencing with public-flag masking, suppression of unchanged values, velocity shipped only for predictable entities, wire-event encode/decode roundtrip, `apply_fields` ignoring unknown component/field ids, full-snapshot scoping, and snapshot eviction (`forget`) for recycled IDs. The engine crate's loopback test wires two engines through the same `net_*` bridge the browser uses.
+`cargo test -p netcode` — Spawn-then-Delta sequencing with public-flag masking, suppression of unchanged values, velocity shipped only for predictable entities, wire-event encode/decode roundtrip, `apply_fields` ignoring unknown component/field ids, full-snapshot scoping, and snapshot eviction (`forget`) for recycled IDs. The engine crate's loopback test wires two engines through the same `net_*` bridge the browser uses. For the entity-ownership state handoff (ADR 0022): `cargo test -p engine` covers `entity_snapshot` → `adopt_entity` round-tripping full state into a simulated, AI-enrolled entity; `apps/web`'s `node --test` suite (`entityHandoff.test.ts`) covers the push-before-release orchestration end-to-end against a fake awari session; and `e2e/entity-handoff.spec.ts` proves a live two-peer handoff where P2P is reachable (skips otherwise).

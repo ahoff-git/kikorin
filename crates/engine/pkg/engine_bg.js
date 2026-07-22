@@ -25,6 +25,25 @@ export class Engine {
         wasm.engine_add_monster_nudge(this.__wbg_ptr, id, nx, ny, nz);
     }
     /**
+     * Adopt an entity from another peer's `entity_snapshot` as a new,
+     * locally-owned, fully-simulated entity (ADR 0022) — the receiving half of
+     * an ownership handoff. Restores position/velocity/rotation/health/
+     * collider/animation so simulation continues seamlessly, and (via
+     * `register_spawned`) enrolls it in local simulation + replication, monster
+     * AI if NET_MONSTER, and the game's mesh lifecycle. Returns the new local
+     * eid, or `u32::MAX` on malformed input. The entity's stable cross-peer
+     * identity (the awari `EntityId`) is owned by the TS layer, which maps it
+     * to this returned eid.
+     * @param {Uint8Array} payload
+     * @returns {number}
+     */
+    adopt_entity(payload) {
+        const ptr0 = passArray8ToWasm0(payload, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.engine_adopt_entity(this.__wbg_ptr, ptr0, len0);
+        return ret >>> 0;
+    }
+    /**
      * Build (or rebuild) the navmesh by scanning floor geometry via the physics world.
      * Bounds are derived from the loaded floor entities (AABB padded by one cell), so
      * maps of any size and location work without engine changes.
@@ -97,6 +116,22 @@ export class Engine {
         } finally {
             wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
         }
+    }
+    /**
+     * Serialize an owned entity's full transferable state for an ownership
+     * handoff (ADR 0022). The TS layer sends these bytes to the peer receiving
+     * ownership (push-before-release), which reconstructs the entity via
+     * `adopt_entity`. Returns empty bytes if the entity has no net profile
+     * (never existed / already gone). Read-only — the entity keeps simulating
+     * on this peer until the handoff is committed and it's destroyed here.
+     * @param {number} id
+     * @returns {Uint8Array}
+     */
+    entity_snapshot(id) {
+        const ret = wasm.engine_entity_snapshot(this.__wbg_ptr, id);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
     }
     /**
      * Find a path from (startX, startY, startZ) to (goalX, goalZ).

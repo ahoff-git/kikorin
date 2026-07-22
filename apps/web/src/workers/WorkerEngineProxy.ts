@@ -93,6 +93,29 @@ export class WorkerEngineProxy {
     this.worker.postMessage({ type: 'destroy', eid });
   }
 
+  /**
+   * Serialize an owned entity's full ECS state for an ownership handoff
+   * (ADR 0022). Empty array if the entity is gone. Async — the engine lives in
+   * the worker; the transport (main thread) sends these bytes to the peer
+   * receiving ownership.
+   */
+  entity_snapshot(eid: number): Promise<Uint8Array> {
+    const [id, p] = this.request<Uint8Array>();
+    this.worker.postMessage({ type: 'entity_snapshot', id, eid });
+    return p;
+  }
+
+  /**
+   * Adopt an entity from another peer's `entity_snapshot` as a new,
+   * locally-owned, simulated entity (ADR 0022). Resolves to the new local eid,
+   * or 0xffffffff on malformed input.
+   */
+  adopt_entity(snapshot: Uint8Array): Promise<number> {
+    const [id, p] = this.request<number>();
+    this.worker.postMessage({ type: 'adopt_entity', id, snapshot });
+    return p;
+  }
+
   spawn_box_entity(x: number, y: number, z: number, hw: number, hh: number, hd: number, health: number, net_flags: number): Promise<number> {
     const [id, p] = this.request<number>();
     this.worker.postMessage({ type: 'spawn_box', id, x, y, z, hw, hh, hd, health, net_flags });

@@ -338,6 +338,19 @@ export interface EngineHandle {
   spawn_entity(payload: Uint8Array): number;
   destroy_entity(id: number): void;
   /**
+   * Serialize an owned entity's full ECS state (position/velocity/rotation/
+   * health/collider/anim) for an ownership handoff (ADR 0022). Empty array if
+   * the entity is gone. The transport sends these bytes to the peer receiving
+   * ownership; that peer reconstructs the entity via `adopt_entity`.
+   */
+  entity_snapshot(id: number): Uint8Array;
+  /**
+   * Adopt an entity from another peer's `entity_snapshot` as a new,
+   * locally-owned, simulated entity (ADR 0022). Returns the new local entity id,
+   * or 0xffffffff on malformed input.
+   */
+  adopt_entity(snapshot: Uint8Array): number;
+  /**
    * Load a game-owned map. Spawns a static terrain entity per block and builds the
    * navmesh over the resulting geometry in a single Rust call. Returns the blocks
    * with their entity IDs added so TypeScript can create Three.js meshes.

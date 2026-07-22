@@ -50,6 +50,8 @@ type Req =
   | { type: 'set_velocity';        eid: number; vx: number; vy: number; vz: number }
   | { type: 'teleport';            eid: number; x: number; y: number; z: number }
   | { type: 'destroy';             eid: number }
+  | { type: 'entity_snapshot';     id: number; eid: number }
+  | { type: 'adopt_entity';        id: number; snapshot: Uint8Array }
   | { type: 'spawn_box';           id: number; x: number; y: number; z: number; hw: number; hh: number; hd: number; health: number; net_flags: number }
   | { type: 'spawn_bullet';        id: number; x: number; y: number; z: number; vx: number; vy: number; vz: number; net_flags: number }
   | { type: 'spawn_floor';         id: number; x: number; y: number; z: number; hw: number; hh: number; hd: number }
@@ -207,6 +209,16 @@ addEventListener('message', async (event: MessageEvent<Req>) => {
     case 'destroy':
       engine.destroy_entity(msg.eid);
       break;
+    case 'entity_snapshot': {
+      const bytes = engine.entity_snapshot(msg.eid);
+      post({ type: 'ack', id: msg.id, result: bytes });
+      break;
+    }
+    case 'adopt_entity': {
+      const eid = engine.adopt_entity(msg.snapshot);
+      post({ type: 'ack', id: msg.id, result: eid });
+      break;
+    }
     case 'spawn_box': {
       const eid = engine.spawn_box_entity(msg.x, msg.y, msg.z, msg.hw, msg.hh, msg.hd, msg.health, msg.net_flags);
       post({ type: 'ack', id: msg.id, result: eid });

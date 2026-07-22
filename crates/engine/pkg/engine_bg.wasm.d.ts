@@ -3,6 +3,7 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_engine_free: (a: number, b: number) => void;
 export const engine_add_monster_nudge: (a: number, b: number, c: number, d: number, e: number) => void;
+export const engine_adopt_entity: (a: number, b: number, c: number) => number;
 export const engine_build_navmesh: (a: number) => void;
 export const engine_build_navmesh_2d: (a: number, b: number, c: number, d: number) => void;
 export const engine_clear_monster_capability: (a: number, b: number) => void;
@@ -10,6 +11,7 @@ export const engine_clear_monster_goal: (a: number, b: number) => void;
 export const engine_deserialize_patch: (a: number, b: number) => any;
 export const engine_destroy_entity: (a: number, b: number) => void;
 export const engine_dimension: (a: number) => [number, number];
+export const engine_entity_snapshot: (a: number, b: number) => [number, number];
 export const engine_find_path: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
 export const engine_get_metrics: (a: number) => any;
 export const engine_load_animations: (a: number, b: any) => void;

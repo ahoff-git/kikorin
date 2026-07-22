@@ -16,6 +16,7 @@ pnpm-debug.log*
 # build outputs
 **/dist/
 **/build/
+**/.handoff-test-dist/
 
 # testing
 **/coverage/
